@@ -115,44 +115,71 @@ describe('packaged smoke configuration', () => {
     expect(shouldMigrateLegacyData(undefined)).toBe(true)
   })
 
-  it('bootstraps token-bound PowerShell output before queued input', () => {
+  it('builds a token-bound PowerShell line probe', () => {
     const probe = buildWindowsTerminalProbe(
       {
         executable:
           'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
         args: ['-NoLogo']
       },
-      TOKEN
+      TOKEN,
+      'C:\\workspace'
     )
 
     expect(probe.readyMarker).toBe(`ground-packaged-pty-ready-${TOKEN}`)
     expect(probe.successMarker).toBe(`ground-packaged-pty-ok-${TOKEN}`)
-    expect(probe.shell.args.slice(0, 4)).toEqual([
+    expect(probe.shell.args.slice(0, 6)).toEqual([
       '-NoLogo',
       '-NoProfile',
-      '-NoExit',
-      '-Command'
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      probe.fixturePath
     ])
     expect(probe.shell.args.join(' ')).not.toContain(probe.readyMarker)
     expect(probe.input).not.toContain(probe.successMarker)
-    expect(probe.input).toMatch(/exit 0\r$/u)
+    expect(probe.input).toBe(`ground-packaged-pty-input-${TOKEN}\r`)
+    expect(probe.fixturePath).toBe(
+      `C:\\workspace\\ground-packaged-pty-${TOKEN}.ps1`
+    )
+    expect(probe.fixtureContents).toContain(probe.readyMarker)
+    expect(probe.fixtureContents).toContain(probe.successMarker)
+    expect(probe.fixtureContents).toContain(
+      `ground-packaged-pty-input-${TOKEN}`
+    )
   })
 
-  it('bootstraps token-bound cmd output with autorun disabled', () => {
+  it('builds a token-bound cmd line probe with autorun disabled', () => {
     const probe = buildWindowsTerminalProbe(
       {
         executable: 'C:\\Windows\\System32\\cmd.exe',
         args: []
       },
-      TOKEN
+      TOKEN,
+      'C:\\workspace'
     )
 
     expect(probe.readyMarker).toBe(`ground-packaged-pty-ready-${TOKEN}`)
     expect(probe.successMarker).toBe(`ground-packaged-pty-ok-${TOKEN}`)
-    expect(probe.shell.args.slice(0, 3)).toEqual(['/D', '/Q', '/K'])
+    expect(probe.shell.args.slice(0, 5)).toEqual([
+      '/D',
+      '/Q',
+      '/E:ON',
+      '/V:OFF',
+      '/C'
+    ])
+    expect(probe.shell.args.at(-1)).toBe(
+      `ground-packaged-pty-${TOKEN}.cmd`
+    )
     expect(probe.shell.args.join(' ')).not.toContain(probe.readyMarker)
     expect(probe.input).not.toContain(probe.successMarker)
-    expect(probe.input).toMatch(/exit \/b 0\r$/u)
+    expect(probe.input).toBe(`ground-packaged-pty-input-${TOKEN}\r`)
+    expect(probe.fixturePath).toBe(
+      `C:\\workspace\\ground-packaged-pty-${TOKEN}.cmd`
+    )
+    expect(probe.fixtureContents).toContain(probe.readyMarker)
+    expect(probe.fixtureContents).toContain(probe.successMarker)
+    expect(probe.fixtureContents).toContain('set /p "GROUND_PTY_LINE="')
   })
 
   it('rejects an unexpected Windows terminal executable', () => {
@@ -162,7 +189,8 @@ describe('packaged smoke configuration', () => {
           executable: 'C:\\Users\\example\\custom-shell.exe',
           args: []
         },
-        TOKEN
+        TOKEN,
+        'C:\\workspace'
       )
     ).toThrow(/fixed Windows system shell/u)
   })
@@ -175,9 +203,23 @@ describe('packaged smoke configuration', () => {
             'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
           args: ['-NoLogo']
         },
-        `${TOKEN}'; Write-Output 'spoof`
+        `${TOKEN}'; Write-Output 'spoof`,
+        'C:\\workspace'
       )
     ).toThrow(/valid token/u)
+  })
+
+  it('rejects a relative Windows probe workspace', () => {
+    expect(() =>
+      buildWindowsTerminalProbe(
+        {
+          executable: 'C:\\Windows\\System32\\cmd.exe',
+          args: []
+        },
+        TOKEN,
+        '..\\workspace'
+      )
+    ).toThrow(/absolute workspace/u)
   })
 
   it('creates one new contained user-data directory and rejects a precreated child', async () => {

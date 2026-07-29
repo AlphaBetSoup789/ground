@@ -295,6 +295,35 @@ describe('terminal workspace and process boundary', () => {
     expect(environment).not.toHaveProperty('NODE_OPTIONS')
     expect(environment).not.toHaveProperty('ELECTRON_RUN_AS_NODE')
   })
+
+  it('keeps the Windows command processor fixed when PowerShell is selected', () => {
+    const environment = buildTerminalEnvironment(
+      {
+        SystemRoot: 'D:\\Windows',
+        COMSPEC: 'C:\\Users\\example\\malicious.exe',
+        Path: 'D:\\Windows\\System32',
+        USERPROFILE: 'C:\\Users\\example',
+        OPENAI_API_KEY: 'secret',
+        NODE_OPTIONS: '--require C:\\Users\\example\\inject.js'
+      },
+      'win32',
+      'D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      'D:\\workspace'
+    )
+
+    expect(environment).toMatchObject({
+      SystemRoot: 'D:\\Windows',
+      Path: 'D:\\Windows\\System32',
+      USERPROFILE: 'C:\\Users\\example',
+      ComSpec: 'D:\\Windows\\System32\\cmd.exe',
+      TERM: 'xterm-256color',
+      COLORTERM: 'truecolor',
+      GROUND_TERMINAL: '1'
+    })
+    expect(environment).not.toHaveProperty('COMSPEC')
+    expect(environment).not.toHaveProperty('OPENAI_API_KEY')
+    expect(environment).not.toHaveProperty('NODE_OPTIONS')
+  })
 })
 
 describe('terminal limits and streaming', () => {

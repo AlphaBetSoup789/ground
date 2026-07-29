@@ -63,6 +63,8 @@ export interface WindowsTerminalProbe {
   readyMarker: string
   successMarker: string
   input: string
+  fixturePath: string
+  fixtureContents: string
 }
 
 export function buildWindowsTerminalProbe(
@@ -70,51 +72,98 @@ export function buildWindowsTerminalProbe(
     executable: string
     args: string[]
   },
-  token: string
+  token: string,
+  workspace: string
 ): WindowsTerminalProbe {
   if (!isPackagedSmokeToken(token)) {
     throw new Error('Packaged PTY smoke requires a valid token')
   }
+  if (
+    !path.win32.isAbsolute(workspace) ||
+    workspace.includes('\0')
+  ) {
+    throw new Error('Packaged PTY smoke requires an absolute workspace')
+  }
   const shellName = path.win32
     .basename(resolvedShell.executable)
     .toLowerCase()
-  const tokenStart = token.slice(0, 16)
-  const tokenEnd = token.slice(16)
   const readyMarker = `ground-packaged-pty-ready-${token}`
   const successMarker = `ground-packaged-pty-ok-${token}`
+  const inputMarker = `ground-packaged-pty-input-${token}`
 
   if (shellName === 'powershell.exe') {
+    const fixturePath = path.win32.join(
+      workspace,
+      `ground-packaged-pty-${token}.ps1`
+    )
     return {
       shell: {
         executable: resolvedShell.executable,
         args: [
           ...resolvedShell.args,
           '-NoProfile',
-          '-NoExit',
-          '-Command',
-          `Write-Output ('ground-packaged-pty-' + 'ready-' + '${tokenStart}' + '${tokenEnd}')`
+          '-ExecutionPolicy',
+          'Bypass',
+          '-File',
+          fixturePath
         ]
       },
       readyMarker,
       successMarker,
-      input: `Write-Output ('ground-packaged-pty-' + 'ok-' + '${tokenStart}' + '${tokenEnd}'); exit 0\r`
+      input: `${inputMarker}\r`,
+      fixturePath,
+      fixtureContents: [
+        "$ErrorActionPreference = 'Stop'",
+        `[Console]::Out.WriteLine('${readyMarker}')`,
+        '[Console]::Out.Flush()',
+        '$groundInput = [Console]::In.ReadLine()',
+        `if ($groundInput -ceq '${inputMarker}') {`,
+        `  [Console]::Out.WriteLine('${successMarker}')`,
+        '  [Console]::Out.Flush()',
+        '  exit 0',
+        '}',
+        "[Console]::Error.WriteLine('ground-packaged-pty-input-mismatch')",
+        'exit 2',
+        ''
+      ].join('\r\n')
     }
   }
 
   if (shellName === 'cmd.exe') {
+    const fixtureName = `ground-packaged-pty-${token}.cmd`
+    const fixturePath = path.win32.join(
+      workspace,
+      fixtureName
+    )
     return {
       shell: {
         executable: resolvedShell.executable,
         args: [
           '/D',
           '/Q',
-          '/K',
-          `echo ground-packaged-pty-re^ady-${tokenStart}^${tokenEnd}`
+          '/E:ON',
+          '/V:OFF',
+          '/C',
+          fixtureName
         ]
       },
       readyMarker,
       successMarker,
-      input: `echo ground-packaged-pty-o^k-${tokenStart}^${tokenEnd} & exit /b 0\r`
+      input: `${inputMarker}\r`,
+      fixturePath,
+      fixtureContents: [
+        '@echo off',
+        `echo ${readyMarker}`,
+        'set "GROUND_PTY_LINE="',
+        'set /p "GROUND_PTY_LINE="',
+        `if "%GROUND_PTY_LINE%"=="${inputMarker}" goto success`,
+        '>&2 echo ground-packaged-pty-input-mismatch',
+        'exit /b 2',
+        ':success',
+        `echo ${successMarker}`,
+        'exit /b 0',
+        ''
+      ].join('\r\n')
     }
   }
 
@@ -292,8 +341,23 @@ async function smokeTerminal(
       ? await resolveDefaultTerminalShell('win32', process.env)
       : undefined
   const windowsProbe = resolvedWindowsShell
-    ? buildWindowsTerminalProbe(resolvedWindowsShell, config.token)
+    ? buildWindowsTerminalProbe(
+        resolvedWindowsShell,
+        config.token,
+        canonicalWorkspace
+      )
     : undefined
+  if (windowsProbe) {
+    await writeFile(
+      windowsProbe.fixturePath,
+      windowsProbe.fixtureContents,
+      {
+        encoding: 'utf8',
+        flag: 'wx',
+        mode: 0o600
+      }
+    )
+  }
   const shell = windowsProbe?.shell ?? {
     executable: packagedExecutable,
     args: ['-e', program]
@@ -353,13 +417,10 @@ async function smokeTerminal(
     let rejectMarker: ((error: Error) => void) | undefined
     let resolveExit: (() => void) | undefined
     let rejectExit: ((error: Error) => void) | undefined
-    const ready =
-      process.platform === 'win32'
-        ? undefined
-        : new Promise<void>((resolve, reject) => {
-            resolveReady = resolve
-            rejectReady = reject
-          })
+    const ready = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve
+      rejectReady = reject
+    })
     const marked = new Promise<void>((resolve, reject) => {
       resolveMarker = resolve
       rejectMarker = reject
@@ -368,15 +429,12 @@ async function smokeTerminal(
       resolveExit = resolve
       rejectExit = reject
     })
+    const completed = Promise.all([marked, exited])
+    void completed.catch(() => undefined)
     const subscription = service.subscribe(session.id, {
       onData: (event) => {
         output = `${output}${event.data}`.slice(-16_384)
-        if (
-          process.platform !== 'win32' &&
-          output.includes(readyMarker)
-        ) {
-          resolveReady?.()
-        }
+        if (output.includes(readyMarker)) resolveReady?.()
         if (output.includes(marker)) resolveMarker?.()
       },
       onExit: (event) => {
@@ -399,29 +457,24 @@ async function smokeTerminal(
       }
     })
     try {
-      if (ready) {
-        await waitFor('Packaged PTY readiness', ready, 12_000)
-      }
-      // node-pty queues Windows writes until the child produces its first
-      // ConPTY output. The token-bound startup command above supplies that
-      // output and releases this input even if it arrived before the shell.
+      // ConPTY emits setup bytes before a Windows shell is ready to accept a
+      // line. Only the fixture's token-bound marker is an input-safe boundary.
+      await waitFor('Packaged PTY readiness', ready, 20_000)
       service.sendInput(session.id, input)
-      try {
-        await waitFor(
-          'Packaged PTY marker and exit',
-          Promise.all([marked, exited]),
-          12_000
-        )
-      } catch (error) {
-        const diagnostic = output
-          .replace(/[\u0000-\u001f\u007f-\u009f]/gu, ' ')
-          .slice(-1_000)
-        throw new Error(
-          `${error instanceof Error ? error.message : String(error)}${
-            diagnostic ? `; PTY output: ${diagnostic}` : '; no PTY output'
-          }`
-        )
-      }
+      await waitFor(
+        'Packaged PTY marker and exit',
+        completed,
+        20_000
+      )
+    } catch (error) {
+      const diagnostic = output
+        .replace(/[\u0000-\u001f\u007f-\u009f]/gu, ' ')
+        .slice(-1_000)
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}${
+          diagnostic ? `; PTY output: ${diagnostic}` : '; no PTY output'
+        }`
+      )
     } finally {
       subscription.dispose()
       service.kill(session.id)

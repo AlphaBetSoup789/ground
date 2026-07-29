@@ -248,6 +248,16 @@ function safeWindowsRoot(environment: NodeJS.ProcessEnv): string {
   return 'C:\\Windows'
 }
 
+export function resolveWindowsCommandProcessor(
+  environment: NodeJS.ProcessEnv = process.env
+): string {
+  return path.win32.join(
+    safeWindowsRoot(environment),
+    'System32',
+    'cmd.exe'
+  )
+}
+
 function defaultShellCandidates(
   platform: NodeJS.Platform,
   environment: NodeJS.ProcessEnv
@@ -337,7 +347,10 @@ export function buildTerminalEnvironment(
   result.COLORTERM = 'truecolor'
   result.GROUND_TERMINAL = '1'
   if (platform === 'win32') {
-    result.ComSpec = shell
+    for (const key of Object.keys(result)) {
+      if (key.toLowerCase() === 'comspec') delete result[key]
+    }
+    result.ComSpec = resolveWindowsCommandProcessor(source)
   } else {
     result.SHELL = shell
     result.PWD = workspace
