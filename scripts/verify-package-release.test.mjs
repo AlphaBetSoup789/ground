@@ -6,6 +6,7 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
 import packageMetadata from '../package.json' with { type: 'json' }
+import { classifyUnsignedMacSignature } from './lib/mac-signature.mjs'
 
 const execFileAsync = promisify(execFile)
 const projectRoot = path.resolve(import.meta.dirname, '..')
@@ -76,6 +77,33 @@ afterEach(async () => {
 })
 
 describe('release artifact and runtime-evidence verification', () => {
+  it('uses canonical Linux x64 names and accepts only unsigned macOS identities', () => {
+    expect(packageMetadata.build.linux.artifactName).toBe(
+      'Ground-${version}-linux-x64.${ext}'
+    )
+    expect(
+      classifyUnsignedMacSignature(
+        1,
+        '/tmp/Ground.app: code object is not signed at all'
+      )
+    ).toBe('completely-unsigned')
+    expect(
+      classifyUnsignedMacSignature(
+        0,
+        'Signature=adhoc\nTeamIdentifier=not set'
+      )
+    ).toBe('adhoc-teamless')
+    expect(
+      classifyUnsignedMacSignature(
+        0,
+        'Signature=adhoc\nTeamIdentifier=not set\nAuthority=Developer ID Application: Example'
+      )
+    ).toBeUndefined()
+    expect(
+      classifyUnsignedMacSignature(1, 'codesign failed unexpectedly')
+    ).toBeUndefined()
+  })
+
   it('requires the exact complete cross-platform artifact inventory', async () => {
     const directory = await fixtureDirectory()
     await expect(

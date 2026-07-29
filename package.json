@@ -149,7 +149,7 @@
         "AppImage",
         "deb"
       ],
-      "artifactName": "Ground-${version}-linux-${arch}.${ext}"
+      "artifactName": "Ground-${version}-linux-x64.${ext}"
     },
     "nsis": {
       "oneClick": false,

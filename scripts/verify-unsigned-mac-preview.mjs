@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import { locatePackagedApp } from './lib/packaged-app.mjs'
+import { classifyUnsignedMacSignature } from './lib/mac-signature.mjs'
 
 if (process.platform !== 'darwin') {
   throw new Error('Unsigned macOS preview verification requires macOS')
@@ -51,13 +52,13 @@ const signature = command('/usr/bin/codesign', [
   packagedApp.appPath
 ])
 const signatureOutput = `${signature.stdout ?? ''}\n${signature.stderr ?? ''}`
-if (
-  !signatureOutput.includes('Signature=adhoc') ||
-  !signatureOutput.includes('TeamIdentifier=not set') ||
-  signatureOutput.includes('Authority=Developer ID Application')
-) {
+const signatureKind = classifyUnsignedMacSignature(
+  signature.status,
+  signatureOutput
+)
+if (!signatureKind) {
   throw new Error(
-    `macOS preview is not provably ad-hoc and teamless:\n${signatureOutput.trim()}`
+    `macOS preview is neither completely unsigned nor provably ad-hoc and teamless:\n${signatureOutput.trim()}`
   )
 }
 
@@ -82,5 +83,9 @@ if (stapler.status === 0) {
 }
 
 process.stdout.write(
-  'Verified macOS preview bundle identity and ad-hoc, teamless, Gatekeeper-rejected, unstapled status.\n'
+  `Verified macOS preview bundle identity and ${
+    signatureKind === 'completely-unsigned'
+      ? 'completely unsigned'
+      : 'ad-hoc, teamless'
+  }, Gatekeeper-rejected, unstapled status.\n`
 )
