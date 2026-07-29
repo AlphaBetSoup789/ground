@@ -139,6 +139,7 @@ export function Composer(props: ComposerProps): React.JSX.Element {
 
           {isRunning ? (
             <button
+              key="stop-run"
               className="send-button stop-button"
               type="button"
               onClick={() => void props.onStop()}
@@ -149,6 +150,7 @@ export function Composer(props: ComposerProps): React.JSX.Element {
             </button>
           ) : (
             <button
+              key="send-message"
               className="send-button"
               type="button"
               onClick={() => void send()}

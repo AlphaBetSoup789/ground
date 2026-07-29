@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Command, Search } from 'lucide-react'
 
 export interface CommandPaletteAction {
@@ -80,9 +80,9 @@ export function CommandPalette(
     onCloseRef.current = props.onClose
   }, [props.onClose])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const previouslyFocused = document.activeElement
-    const frame = window.requestAnimationFrame(() => searchRef.current?.focus())
+    searchRef.current?.focus()
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (!shouldHandleCommandPaletteWindowKey(event.key, event.isComposing)) {
         return
@@ -110,9 +110,12 @@ export function CommandPalette(
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => {
-      window.cancelAnimationFrame(frame)
       window.removeEventListener('keydown', handleKeyDown)
-      if (previouslyFocused instanceof HTMLElement) previouslyFocused.focus()
+      if (previouslyFocused instanceof HTMLElement) {
+        window.queueMicrotask(() => {
+          if (previouslyFocused.isConnected) previouslyFocused.focus()
+        })
+      }
     }
   }, [])
 

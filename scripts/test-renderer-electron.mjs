@@ -68,7 +68,11 @@ try {
     await palette.waitFor()
 
     const search = page.getByLabel('Search commands')
-    assert.equal(await search.evaluate((element) => element === document.activeElement), true)
+    await waitForValue(
+      () => search.evaluate((element) => element === document.activeElement),
+      true,
+      'the command search should receive focus'
+    )
     await search.fill('provider')
     const searchTaskAction = page.getByRole('option', { name: /Search tasks/ })
     const providerAction = page.getByRole('option', { name: /Provider settings/ })
@@ -88,7 +92,11 @@ try {
 
     await page.keyboard.press('Escape')
     await palette.waitFor({ state: 'detached' })
-    assert.equal(await composer.evaluate((element) => element === document.activeElement), true)
+    await waitForValue(
+      () => composer.evaluate((element) => element === document.activeElement),
+      true,
+      'closing the command palette should restore focus'
+    )
   })
 
   await run('provider form exposes labels and native constraint validation', async () => {
@@ -150,15 +158,18 @@ try {
 
     const stop = page.getByRole('button', { name: 'Stop run' })
     await stop.waitFor()
-    await page.getByText(prompt, { exact: true }).waitFor()
     await stop.click()
+    await page.getByText(prompt, { exact: true }).waitFor()
     await page.getByRole('button', { name: 'Send message' }).waitFor()
 
+    const assistantMessages = page.locator('.message-assistant')
+    await page.waitForTimeout(100)
+    const contentAfterStop = await assistantMessages.allTextContents()
     await page.waitForTimeout(800)
-    assert.equal(
-      await page.getByText(/I’m connected\. This browser preview/).count(),
-      0,
-      'cancelled preview runs must not continue streaming'
+    assert.deepEqual(
+      await assistantMessages.allTextContents(),
+      contentAfterStop,
+      'cancelled preview runs must not emit later assistant output'
     )
   })
 
