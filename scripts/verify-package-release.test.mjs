@@ -38,6 +38,7 @@ const allArtifacts = [
   'linux-x64.AppImage',
   'linux-x64.deb'
 ].map((suffix) => `Ground-${packageMetadata.version}-${suffix}`)
+const releaseCommit = 'a'.repeat(40)
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex')
@@ -54,11 +55,15 @@ async function fixtureDirectory() {
   return directory
 }
 
-async function runScript(script, args) {
+async function runScript(script, args, environment = {}) {
   return execFileAsync(process.execPath, [path.join(projectRoot, script), ...args], {
     cwd: projectRoot,
     encoding: 'utf8',
-    maxBuffer: 1_000_000
+    maxBuffer: 1_000_000,
+    env: {
+      ...process.env,
+      ...environment
+    }
   })
 }
 
@@ -94,6 +99,7 @@ describe('release artifact and runtime-evidence verification', () => {
       const document = {
         version: 1,
         status: 'passed',
+        commit: releaseCommit,
         packageVersion: packageMetadata.version,
         platform,
         architecture,
@@ -134,7 +140,9 @@ describe('release artifact and runtime-evidence verification', () => {
     }
 
     await expect(
-      runScript('scripts/verify-package-runtime-evidence.mjs', [directory])
+      runScript('scripts/verify-package-runtime-evidence.mjs', [directory], {
+        GITHUB_SHA: releaseCommit
+      })
     ).resolves.toMatchObject({
       stdout: expect.stringContaining(
         'Verified 4 distributable package runtime-evidence records'
@@ -154,7 +162,9 @@ describe('release artifact and runtime-evidence verification', () => {
       `${JSON.stringify(linuxEvidence)}\n`
     )
     await expect(
-      runScript('scripts/verify-package-runtime-evidence.mjs', [directory])
+      runScript('scripts/verify-package-runtime-evidence.mjs', [directory], {
+        GITHUB_SHA: releaseCommit
+      })
     ).rejects.toThrow(/security evidence is incomplete/iu)
     linuxEvidence.evidence.credentialStorage.backend = 'gnome_libsecret'
     await writeFile(
@@ -170,7 +180,9 @@ describe('release artifact and runtime-evidence verification', () => {
       'changed bytes\n'
     )
     await expect(
-      runScript('scripts/verify-package-runtime-evidence.mjs', [directory])
+      runScript('scripts/verify-package-runtime-evidence.mjs', [directory], {
+        GITHUB_SHA: releaseCommit
+      })
     ).rejects.toThrow(/distributable hash does not match/iu)
   })
 })

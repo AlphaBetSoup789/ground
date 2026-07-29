@@ -43,7 +43,12 @@ async function executableAt(
   directory: string,
   name = process.platform === 'win32' ? 'git.exe' : 'git'
 ): Promise<string> {
-  const executable = path.join(directory, name)
+  const portableName =
+    process.platform === 'win32' &&
+    path.win32.extname(name).toLowerCase() !== '.exe'
+      ? `${name}.exe`
+      : name
+  const executable = path.join(directory, portableName)
   await writeFile(executable, 'test executable')
   return realpath(executable)
 }
@@ -105,7 +110,10 @@ describe('GitExecutablePreferenceStore', () => {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error
     }
-    const subdirectory = path.join(directory, 'not-a-file')
+    const subdirectory = path.join(
+      directory,
+      process.platform === 'win32' ? 'not-a-file.exe' : 'not-a-file'
+    )
     await mkdir(subdirectory)
     const canonicalSubdirectory = await realpath(subdirectory)
     const store = new GitExecutablePreferenceStore(directory)
