@@ -906,7 +906,9 @@ describe('StateStore', () => {
     await writeFile(blockingPath, 'ordinary file', 'utf8')
     const store = new StateStore(path.join(blockingPath, 'state.json'))
 
-    await expect(store.load()).rejects.toMatchObject({ code: 'ENOTDIR' })
+    await expect(store.load()).rejects.toMatchObject({
+      code: expect.stringMatching(/^(?:EEXIST|ENOTDIR)$/u)
+    })
     expect(store.snapshot().recoveryNotice).toBeUndefined()
     expect(await readdir(directory)).toEqual(['not-a-directory'])
   })

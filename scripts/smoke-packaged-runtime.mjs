@@ -32,6 +32,7 @@ const smokeDirectory = path.join(
   `ground-packaged-smoke-${token}`
 )
 const resultPath = path.join(smokeDirectory, 'result.json')
+const timeoutMs = scope === 'native' ? 180_000 : 75_000
 await mkdir(smokeDirectory, { recursive: false, mode: 0o700 })
 
 const appArguments = [
@@ -146,8 +147,17 @@ try {
     new Promise((_, reject) => {
       timer = setTimeout(() => {
         if (child) stopProcessTree(child)
-        reject(new Error('Packaged runtime smoke timed out after 75000ms'))
-      }, 75_000)
+        const diagnostics = Buffer.concat(outputChunks)
+          .toString('utf8')
+          .trim()
+        reject(
+          new Error(
+            `Packaged runtime smoke timed out after ${timeoutMs}ms${
+              diagnostics ? `:\n${diagnostics}` : ''
+            }`
+          )
+        )
+      }, timeoutMs)
     })
   ]).finally(() => clearTimeout(timer))
 

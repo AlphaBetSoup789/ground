@@ -619,6 +619,13 @@ async function smokeMcpAndCancellation(
   await waitForProcessesToExit([pids.server, pids.descendant])
 }
 
+function reportNativeSmokeProgress(
+  check: 'pty' | 'git' | 'mcp',
+  state: 'starting' | 'passed'
+): void {
+  process.stderr.write(`ground-packaged-smoke-${check}-${state}\n`)
+}
+
 export async function runPackagedNativeSmoke(
   config: PackagedSmokeConfig
 ): Promise<Record<string, boolean>> {
@@ -630,15 +637,21 @@ export async function runPackagedNativeSmoke(
   ])
   const checks: Record<string, boolean> = {}
 
+  reportNativeSmokeProgress('pty', 'starting')
   await smokeTerminal(workspace)
   checks.pty = true
+  reportNativeSmokeProgress('pty', 'passed')
 
+  reportNativeSmokeProgress('git', 'starting')
   await smokeGit(workspace, worktreeRoot)
   checks.git = true
+  reportNativeSmokeProgress('git', 'passed')
 
+  reportNativeSmokeProgress('mcp', 'starting')
   await smokeMcpAndCancellation(config)
   checks.mcp = true
   checks.processTreeCancellation = true
+  reportNativeSmokeProgress('mcp', 'passed')
 
   return checks
 }

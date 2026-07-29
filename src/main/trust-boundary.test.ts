@@ -1,6 +1,7 @@
 import { mkdtemp, mkdir, realpath } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import type { ProviderDraft } from '../shared/types'
 import {
@@ -15,15 +16,14 @@ import {
 
 describe('renderer trust boundary', () => {
   it('ignores a development renderer URL in packaged builds', () => {
+    const rendererFile = '/Applications/Ground.app/renderer/index.html'
     const target = resolveRendererTarget(
       true,
       'http://127.0.0.1:5173',
-      '/Applications/Ground.app/renderer/index.html'
+      rendererFile
     )
     expect(target.kind).toBe('file')
-    expect(target.value).toBe(
-      'file:///Applications/Ground.app/renderer/index.html'
-    )
+    expect(target.value).toBe(pathToFileURL(rendererFile).toString())
   })
 
   it('accepts only loopback HTTP(S) development renderers', () => {

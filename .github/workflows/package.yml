@@ -73,6 +73,13 @@ jobs:
       - name: Build unsigned preview
         run: ${{ matrix.command }}
 
+      - name: Prepare Linux Chromium sandbox for packaged smoke
+        if: runner.os == 'Linux'
+        run: |
+          sudo chown root:root release/linux-unpacked/chrome-sandbox
+          sudo chmod 4755 release/linux-unpacked/chrome-sandbox
+          test "$(stat --format='%u:%g:%a' release/linux-unpacked/chrome-sandbox)" = "0:0:4755"
+
       - name: Smoke-test packaged main and preload startup
         run: npm run smoke:package:launch
 
