@@ -38,13 +38,20 @@ function normalizeRelativePath(root, target) {
 
 export async function inspectAsar(archivePath, searchRoot) {
   const packagesByKey = new Map()
-  for (const archiveEntry of asar
-    .listPackage(archivePath)
-    .filter((entry) => entry.endsWith('/package.json'))) {
+  for (const archiveEntry of asar.listPackage(archivePath)) {
+    const normalizedEntry = archiveEntry
+      .split(path.sep)
+      .join('/')
+    if (!normalizedEntry.endsWith('/package.json')) continue
     let packageDocument
     try {
       packageDocument = JSON.parse(
-        asar.extractFile(archivePath, archiveEntry.replace(/^\//u, '')).toString()
+        asar
+          .extractFile(
+            archivePath,
+            archiveEntry.replace(/^[/\\]/u, '')
+          )
+          .toString()
       )
     } catch {
       continue
@@ -60,11 +67,11 @@ export async function inspectAsar(archivePath, searchRoot) {
     const component = {
       name: packageDocument.name,
       version: packageDocument.version,
-      path: archiveEntry
+      path: normalizedEntry
     }
     const key = packageKey(component)
     const existing = packagesByKey.get(key)
-    if (!existing || archiveEntry.length < existing.path.length) {
+    if (!existing || normalizedEntry.length < existing.path.length) {
       packagesByKey.set(key, component)
     }
   }
