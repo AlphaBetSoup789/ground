@@ -22,6 +22,7 @@ import {
 } from './json'
 import {
   AdapterKindMismatchError,
+  AdapterIdentityDriftError,
   AdapterRegistry,
   DuplicateAdapterError,
   UnknownAdapterError
@@ -222,7 +223,56 @@ describe('adapter registry', () => {
     )
   })
 
-  it.each(['Uppercase', 'has spaces', '', '.prefix'])(
+  it.each([
+    {
+      kind: 'model',
+      adapter: modelAdapter('stable.model'),
+      register: (registry: AdapterRegistry, adapter: ModelAdapter<unknown>) =>
+        registry.registerModel(adapter),
+      require: (registry: AdapterRegistry) =>
+        registry.requireModel('stable.model')
+    },
+    {
+      kind: 'agent runtime',
+      adapter: runtimeAdapter('stable.runtime'),
+      register: (
+        registry: AdapterRegistry,
+        adapter: AgentRuntimeAdapter<unknown>
+      ) => registry.registerAgentRuntime(adapter),
+      require: (registry: AdapterRegistry) =>
+        registry.requireAgentRuntime('stable.runtime')
+    }
+  ])(
+    'rejects $kind identity drift after registration',
+    ({ adapter, register, require: requireAdapter }) => {
+      const registeredId = adapter.id
+      const registry = register(
+        new AdapterRegistry(),
+        adapter as never
+      )
+      Object.defineProperty(adapter, 'id', {
+        configurable: true,
+        value: `drifted.${registeredId}`,
+        writable: true
+      })
+
+      expect(() => registry.has(registeredId)).toThrow(
+        AdapterIdentityDriftError
+      )
+      expect(() => registry.list()).toThrow(AdapterIdentityDriftError)
+      expect(() => requireAdapter(registry)).toThrow(
+        AdapterIdentityDriftError
+      )
+    }
+  )
+
+  it.each([
+    'Uppercase',
+    'has spaces',
+    '',
+    '.prefix',
+    `a${'b'.repeat(200)}`
+  ])(
     'rejects malformed adapter id %j',
     (id) => {
       expect(() =>

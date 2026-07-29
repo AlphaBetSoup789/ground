@@ -18,6 +18,7 @@ import {
   type ListToolsResult
 } from '@ai-sdk/mcp'
 import { describe, expect, it, vi } from 'vitest'
+import { prepareMcpExecutionCall } from './execution-binding'
 import {
   McpService,
   McpServiceError,
@@ -32,6 +33,7 @@ import {
   type McpClientFactory,
   type McpClientFactoryInput,
   type McpClientLike,
+  type McpExecuteOptions,
   type McpServerConfig
 } from './mcp-service'
 
@@ -149,6 +151,26 @@ async function connectAndTrust(
     connected.fingerprints
   )
   return trusted.tools[0]?.definition.name as string
+}
+
+function approvedCallOptions(
+  service: McpService,
+  namespacedName: string,
+  input: unknown
+): Extract<McpExecuteOptions, { approvalGranted: true }> {
+  const exposed = service
+    .listTools()
+    .find((tool) => tool.definition.name === namespacedName)
+  if (!exposed) throw new Error('Expected an approved MCP tool fixture')
+  const prepared = prepareMcpExecutionCall(exposed, input)
+  return {
+    approvalGranted: true,
+    expectedServerId: prepared.serverId,
+    expectedConnectionFingerprint: prepared.connectionFingerprint,
+    expectedOriginalName: prepared.originalName,
+    expectedToolFingerprint: prepared.toolFingerprint,
+    expectedArgumentsSha256: prepared.argumentsSha256
+  }
 }
 
 describe('MCP service transport policy', () => {
@@ -497,6 +519,7 @@ describe('MCP service tools and trust', () => {
         source: 'mcp',
         approvalRequired: true,
         serverId: 'filesystem',
+        connectionFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u),
         originalName: 'read_file',
         trustStatus: 'pending'
       }
@@ -510,6 +533,37 @@ describe('MCP service tools and trust', () => {
     expect(trusted.tools[0]?.metadata.trustStatus).toBe('approved')
     expect(service.listTools()).toHaveLength(1)
     await service.close()
+  })
+
+  it('derives the same connection identity from equivalent canonical remote URLs', async () => {
+    const first = harness()
+    const second = harness()
+    const differentNamespace = harness()
+    const [firstSnapshot, secondSnapshot, namespacedSnapshot] = await Promise.all([
+      first.service.connect(
+        remoteConfig({ url: 'HTTPS://MCP.EXAMPLE.COM:443/rpc' })
+      ),
+      second.service.connect(
+        remoteConfig({ url: 'https://mcp.example.com/rpc' })
+      ),
+      differentNamespace.service.connect(
+        remoteConfig({
+          namespace: 'different',
+          url: 'https://mcp.example.com/rpc'
+        })
+      )
+    ])
+    expect(firstSnapshot.tools[0]?.metadata.connectionFingerprint).toBe(
+      secondSnapshot.tools[0]?.metadata.connectionFingerprint
+    )
+    expect(firstSnapshot.tools[0]?.metadata.connectionFingerprint).not.toBe(
+      namespacedSnapshot.tools[0]?.metadata.connectionFingerprint
+    )
+    await Promise.all([
+      first.service.close(),
+      second.service.close(),
+      differentNamespace.service.close()
+    ])
   })
 
   it('uses deterministic safe namespaces for server and tool names', () => {
@@ -546,6 +600,8 @@ describe('MCP service tools and trust', () => {
   it('detects changed and added definitions and blocks them until reapproved', async () => {
     const { client, service } = harness()
     const name = await connectAndTrust(service)
+    const input = { path: 'README.md' }
+    const executionOptions = approvedCallOptions(service, name, input)
     client.tools = [
       {
         name: 'read_file',
@@ -567,7 +623,7 @@ describe('MCP service tools and trust', () => {
     expect(refreshed.drift.added).toContain('mcp__filesystem__send_email')
     expect(service.listTools()).toEqual([])
     await expect(
-      service.executeTool(name, { path: 'README.md' }, { approvalGranted: true })
+      service.executeTool(name, input, executionOptions)
     ).rejects.toMatchObject({ code: 'tool-drift' } satisfies Partial<McpServiceError>)
 
     const reapproved = await service.trustToolDefinitions(
@@ -608,6 +664,8 @@ describe('MCP service tools and trust', () => {
     try {
       const originalIdentity = await resolveMcpExecutableIdentity(executable)
       const name = await connectAndTrust(service, config)
+      const input = { path: 'README.md' }
+      const executionOptions = approvedCallOptions(service, name, input)
       const trusted = service.inspectServer('local')
       const trustedFingerprint = trusted.fingerprints[name] as string
       expect(trusted.tools[0]?.metadata.trustStatus).toBe('approved')
@@ -630,8 +688,8 @@ describe('MCP service tools and trust', () => {
       await expect(
         service.executeTool(
           name,
-          { path: 'README.md' },
-          { approvalGranted: true }
+          input,
+          executionOptions
         )
       ).rejects.toMatchObject({
         code: 'tool-drift'
@@ -660,11 +718,21 @@ describe('MCP service execution lifecycle', () => {
     ).rejects.toMatchObject({
       code: 'approval-required'
     } satisfies Partial<McpServiceError>)
+    await expect(
+      service.executeTool(
+        name,
+        { path: 'README.md' },
+        { approvalGranted: true } as McpExecuteOptions
+      )
+    ).rejects.toMatchObject({
+      code: 'approval-required'
+    } satisfies Partial<McpServiceError>)
 
+    const input = { path: 'README.md' }
     const result = await service.executeTool(
       name,
-      { path: 'README.md' },
-      { approvalGranted: true }
+      input,
+      approvedCallOptions(service, name, input)
     )
     expect(client.calls).toEqual([
       { name: 'read_file', arguments: { path: 'README.md' } }
@@ -678,6 +746,154 @@ describe('MCP service execution lifecycle', () => {
         content: [{ type: 'text', text: 'hello' }]
       }
     })
+    await service.close()
+  })
+
+  it('runs a manager-owned authorization guard at the final dispatch boundary', async () => {
+    const { client, service } = harness()
+    const name = await connectAndTrust(service)
+    const input = { path: 'README.md' }
+    const assertDispatchAuthorized = vi.fn(() => {
+      throw new McpServiceError(
+        'tool-drift',
+        'The persisted MCP profile changed before dispatch'
+      )
+    })
+
+    await expect(
+      service.executeTool(
+        name,
+        input,
+        approvedCallOptions(service, name, input),
+        assertDispatchAuthorized
+      )
+    ).rejects.toMatchObject({
+      code: 'tool-drift'
+    } satisfies Partial<McpServiceError>)
+    expect(assertDispatchAuthorized).toHaveBeenCalledOnce()
+    expect(client.calls).toEqual([])
+    await service.close()
+  })
+
+  it('rejects dispatch evidence for a different server, tool, fingerprint, or arguments', async () => {
+    const { client, service } = harness()
+    const name = await connectAndTrust(service)
+    const input = { path: 'README.md' }
+    const exact = approvedCallOptions(service, name, input)
+    const mismatches: Array<{
+      options: Extract<McpExecuteOptions, { approvalGranted: true }>
+      input: unknown
+      code: McpServiceError['code']
+    }> = [
+      {
+        options: { ...exact, expectedServerId: 'different-server' },
+        input,
+        code: 'tool-drift'
+      },
+      {
+        options: {
+          ...exact,
+          expectedConnectionFingerprint:
+            exact.expectedConnectionFingerprint === 'd'.repeat(64)
+              ? 'c'.repeat(64)
+              : 'd'.repeat(64)
+        },
+        input,
+        code: 'tool-drift'
+      },
+      {
+        options: { ...exact, expectedOriginalName: 'different_tool' },
+        input,
+        code: 'tool-drift'
+      },
+      {
+        options: {
+          ...exact,
+          expectedToolFingerprint:
+            exact.expectedToolFingerprint === 'f'.repeat(64)
+              ? 'e'.repeat(64)
+              : 'f'.repeat(64)
+        },
+        input,
+        code: 'tool-drift'
+      },
+      {
+        options: exact,
+        input: { path: 'DIFFERENT.md' },
+        code: 'approval-required'
+      }
+    ]
+
+    for (const mismatch of mismatches) {
+      await expect(
+        service.executeTool(name, mismatch.input, mismatch.options)
+      ).rejects.toMatchObject({ code: mismatch.code })
+    }
+    expect(client.calls).toEqual([])
+    await service.close()
+  })
+
+  it('rejects an approved call after the same server identity moves to a different remote URL', async () => {
+    const { client, service } = harness()
+    const firstConfig = remoteConfig({
+      url: 'https://mcp-a.example.com/rpc'
+    })
+    const name = await connectAndTrust(service, firstConfig)
+    const input = { path: 'README.md' }
+    const approvedAtFirstUrl = approvedCallOptions(service, name, input)
+
+    await service.disconnect(firstConfig.id)
+    const second = await service.connect(
+      remoteConfig({
+        id: firstConfig.id,
+        name: firstConfig.name,
+        namespace: firstConfig.namespace,
+        url: 'https://mcp-b.example.com/rpc'
+      })
+    )
+    expect(second.tools[0]).toMatchObject({
+      definition: { name },
+      metadata: {
+        serverId: firstConfig.id,
+        serverName: firstConfig.name,
+        fingerprint: approvedAtFirstUrl.expectedToolFingerprint,
+        trustStatus: 'approved'
+      }
+    })
+    expect(second.tools[0]?.metadata.connectionFingerprint).not.toBe(
+      approvedAtFirstUrl.expectedConnectionFingerprint
+    )
+
+    await expect(
+      service.executeTool(name, input, approvedAtFirstUrl)
+    ).rejects.toMatchObject({
+      code: 'tool-drift'
+    } satisfies Partial<McpServiceError>)
+    expect(client.calls).toEqual([])
+    await service.close()
+  })
+
+  it('matches approved argument hashes independent of object key insertion order', async () => {
+    const { client, service } = harness()
+    const name = await connectAndTrust(service)
+    const reviewedInput = {
+      z: [{ beta: 2, alpha: 1 }],
+      a: { values: [3, 2, 1], nested: true }
+    }
+    const reorderedInput = {
+      a: { nested: true, values: [3, 2, 1] },
+      z: [{ alpha: 1, beta: 2 }]
+    }
+    await expect(
+      service.executeTool(
+        name,
+        reorderedInput,
+        approvedCallOptions(service, name, reviewedInput)
+      )
+    ).resolves.toMatchObject({ serverId: 'filesystem', toolName: name })
+    expect(client.calls).toEqual([
+      { name: 'read_file', arguments: reorderedInput }
+    ])
     await service.close()
   })
 
@@ -706,7 +922,12 @@ describe('MCP service execution lifecycle', () => {
       service,
       remoteConfig({ maxResultBytes: 2_000 } as Partial<McpServerConfig>)
     )
-    const result = await service.executeTool(name, {}, { approvalGranted: true })
+    const input = {}
+    const result = await service.executeTool(
+      name,
+      input,
+      approvedCallOptions(service, name, input)
+    )
     expect(result.truncated).toBe(true)
     const serialized = JSON.stringify(result.result)
     expect(serialized).not.toContain('ui://malicious-app')
@@ -727,15 +948,17 @@ describe('MCP service execution lifecycle', () => {
     )
     const { service } = harness(client)
     const name = await connectAndTrust(service)
+    const input = {}
+    const approved = approvedCallOptions(service, name, input)
     await expect(
-      service.executeTool(name, {}, { approvalGranted: true, timeoutMs: 250 })
+      service.executeTool(name, input, { ...approved, timeoutMs: 250 })
     ).rejects.toMatchObject({ code: 'timeout' } satisfies Partial<McpServiceError>)
 
     const controller = new AbortController()
     const pending = service.executeTool(
       name,
-      {},
-      { approvalGranted: true, signal: controller.signal }
+      input,
+      { ...approved, signal: controller.signal }
     )
     controller.abort(new Error('cancelled by user'))
     await expect(pending).rejects.toThrow('cancelled by user')

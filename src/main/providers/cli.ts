@@ -6,6 +6,9 @@ import { StringDecoder } from 'node:string_decoder'
 import type { CliAdapter, CliProvider, RunMode } from '../../shared/types'
 import { normalizeCliEnvironmentVariableNames } from '../cli-environment'
 import {
+  validateCliRuntimeAdapterBinding
+} from '../cli-runtime-bindings'
+import {
   executableCandidates,
   executableSearchPath,
   processLaunchArguments,
@@ -27,7 +30,7 @@ const MAX_CLI_ACTIVITY_TITLE_CHARACTERS = 500
 const MAX_CLI_ACTIVITY_DETAIL_CHARACTERS = 4_000
 const MAX_CLI_UNPARSED_DIAGNOSTIC_CHARACTERS = 500
 const TERMINATION_GRACE_MS = 3_000
-const CLI_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/
+const CLI_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/
 
 export interface CliUsage {
   inputTokens?: number
@@ -50,6 +53,7 @@ export type CliRuntimeEvent =
   | { type: 'session'; sessionId: string }
   | { type: 'text'; delta: string; final?: boolean }
   | { type: 'activity'; activity: CliActivity }
+  | { type: 'diagnostic'; detail: string }
   | { type: 'usage'; usage: CliUsage }
 
 export interface CliCallbacks {
@@ -65,6 +69,14 @@ export interface CliInvocationOptions {
   sessionId?: string
 }
 
+export interface CliRunOptions extends CliInvocationOptions {
+  /**
+   * The exact source-registered runtime adapter delegating to this launcher.
+   * It is mandatory so a custom adapter cannot inherit a built-in trust grant.
+   */
+  runtimeAdapterId: string
+}
+
 export type CliPromptSummary =
   | { transport: 'stdin' }
   | { transport: 'argument'; byteLength: number; sha256: string }
@@ -77,6 +89,7 @@ export interface CliInvocationAuthorizationRequest {
   prompt: CliPromptSummary
   promptMode: 'stdin' | 'argument'
   outputMode: 'plain' | 'ndjson'
+  runtimeAdapterId: string
   cliAdapter: CliAdapter
   environmentVariables: readonly string[]
   environmentFingerprint?: string
@@ -103,7 +116,7 @@ function clean(value: string): string {
 export function assertValidCliSessionId(sessionId: string): void {
   if (!CLI_SESSION_ID_PATTERN.test(sessionId)) {
     throw new Error(
-      'CLI session identifier must be 1-256 ASCII letters, numbers, dots, underscores, colons, or hyphens'
+      'CLI session identifier must be 1-200 ASCII letters, numbers, dots, underscores, colons, or hyphens'
     )
   }
 }
@@ -229,6 +242,30 @@ function configureKnownAdapterArgs(
     return args
   }
 
+  if (adapter === 'antigravity') {
+    const args = stripCliOptions(
+      originalArgs,
+      new Set(['--mode', '--conversation']),
+      new Set([
+        '--continue',
+        '-c',
+        '--dangerously-skip-permissions'
+      ])
+    )
+    if (
+      modelOverride &&
+      !args.some(
+        (argument) =>
+          argument === '--model' || argument.startsWith('--model=')
+      )
+    ) {
+      args.push('--model', modelOverride)
+    }
+    args.push('--mode', mode === 'ask' ? 'plan' : 'accept-edits')
+    if (options.sessionId) args.push('--conversation', options.sessionId)
+    return args
+  }
+
   return originalArgs
 }
 
@@ -239,6 +276,14 @@ export function expandCliArgs(
   options: CliInvocationOptions = {}
 ): { args: string[]; stdin?: string } {
   if (options.sessionId) assertValidCliSessionId(options.sessionId)
+  if (
+    provider.promptMode === 'stdin' &&
+    provider.args.some((argument) => argument.includes('{prompt}'))
+  ) {
+    throw new Error(
+      'A stdin CLI profile cannot also place {prompt} in process arguments'
+    )
+  }
   const replacements: Record<string, string> = {
     '{prompt}': prompt,
     '{model}': provider.model,
@@ -346,6 +391,23 @@ function extractSessionId(adapter: CliAdapter, event: Record<string, unknown>): 
   ) {
     return event.session_id
   }
+  if (adapter === 'antigravity') {
+    if (
+      event.event === 'init' &&
+      typeof event.conversation_id === 'string'
+    ) {
+      return event.conversation_id
+    }
+    const payload =
+      event.event === 'step_update'
+        ? asRecord(event.step_update)
+        : event.event === 'result'
+          ? asRecord(event.result)
+          : undefined
+    if (typeof payload?.conversation_id === 'string') {
+      return payload.conversation_id
+    }
+  }
   return undefined
 }
 
@@ -380,6 +442,24 @@ function extractTextEvent(
   if (adapter === 'gemini' && event.type === 'message' && event.role === 'assistant') {
     if (typeof event.content === 'string') {
       return { type: 'text', delta: event.content, final: event.delta !== true }
+    }
+  }
+
+  if (adapter === 'antigravity') {
+    if (event.event === 'step_update') {
+      const update = asRecord(event.step_update)
+      if (
+        update?.step_type === 'agent_response' &&
+        typeof update.text_delta === 'string'
+      ) {
+        return { type: 'text', delta: update.text_delta }
+      }
+    }
+    if (event.event === 'result') {
+      const result = asRecord(event.result)
+      if (typeof result?.response === 'string') {
+        return { type: 'text', delta: result.response, final: true }
+      }
     }
   }
 
@@ -439,25 +519,38 @@ function codexActivity(event: Record<string, unknown>): CliActivity | undefined 
       status: 'error'
     }
   }
-  if (event.type !== 'item.started' && event.type !== 'item.completed') return undefined
+  if (
+    event.type !== 'item.started' &&
+    event.type !== 'item.updated' &&
+    event.type !== 'item.completed'
+  ) {
+    return undefined
+  }
   const item = asRecord(event.item)
   if (!item || item.type === 'agent_message' || item.type === 'reasoning') return undefined
   const complete = event.type === 'item.completed'
   const itemType = typeof item.type === 'string' ? item.type : 'activity'
   const isCommand = itemType === 'command_execution'
-  const title =
-    typeof item.command === 'string'
-      ? item.command
-      : typeof item.name === 'string'
-        ? item.name
-        : itemType.replaceAll('_', ' ')
+  const isError = itemType === 'error'
+  const exitCode = asFiniteNumber(item.exit_code)
+  let title = itemType.replaceAll('_', ' ')
+  if (typeof item.name === 'string') title = item.name
+  if (typeof item.command === 'string') title = item.command
+  if (isError) title = 'Codex reported an error'
   return {
     runtimeId: cliActivityRuntimeId('codex', item.id),
-    activityType: isCommand ? 'command' : 'tool',
+    activityType: isError ? 'error' : isCommand ? 'command' : 'tool',
     title,
-    detail: compactJson(item.aggregated_output ?? item.changes ?? item),
+    detail:
+      isError && typeof item.message === 'string'
+        ? item.message
+        : compactJson(item.aggregated_output ?? item.changes ?? item),
     status:
-      complete && (item.status === 'failed' || asFiniteNumber(item.exit_code))
+      complete &&
+      (isError ||
+        item.status === 'failed' ||
+        item.status === 'declined' ||
+        (exitCode !== undefined && exitCode !== 0))
         ? 'error'
         : complete
           ? 'success'
@@ -465,9 +558,20 @@ function codexActivity(event: Record<string, unknown>): CliActivity | undefined 
   }
 }
 
-function claudeActivity(event: Record<string, unknown>): CliActivity | undefined {
+function claudeMessageContent(
+  event: Record<string, unknown>
+): Record<string, unknown>[] {
+  const message = asRecord(event.message)
+  if (!Array.isArray(message?.content)) return []
+  return message.content
+    .map((block) => asRecord(block))
+    .filter((block): block is Record<string, unknown> => Boolean(block))
+}
+
+function claudeActivities(event: Record<string, unknown>): CliActivity[] {
+  const activities: CliActivity[] = []
   if (event.type === 'system' && event.subtype === 'init') {
-    return {
+    activities.push({
       activityType: 'status',
       title: 'Claude session ready',
       detail: compactJson({
@@ -475,30 +579,54 @@ function claudeActivity(event: Record<string, unknown>): CliActivity | undefined
         permissionMode: event.permissionMode ?? event.permission_mode
       }),
       status: 'success'
-    }
+    })
   }
   if (event.type === 'stream_event') {
     const streamEvent = asRecord(event.event)
     const block = asRecord(streamEvent?.content_block)
     if (streamEvent?.type === 'content_block_start' && block?.type === 'tool_use') {
-      return {
+      activities.push({
         runtimeId: cliActivityRuntimeId('claude', block.id),
         activityType: block.name === 'Bash' ? 'command' : 'tool',
         title: typeof block.name === 'string' ? block.name : 'Claude tool',
         detail: compactJson(block.input),
         status: 'running'
-      }
+      })
+    }
+  }
+  if (event.type === 'assistant') {
+    for (const block of claudeMessageContent(event)) {
+      if (block.type !== 'tool_use') continue
+      activities.push({
+        runtimeId: cliActivityRuntimeId('claude', block.id),
+        activityType: block.name === 'Bash' ? 'command' : 'tool',
+        title: typeof block.name === 'string' ? block.name : 'Claude tool',
+        detail: compactJson(block.input),
+        status: 'running'
+      })
+    }
+  }
+  if (event.type === 'user') {
+    for (const block of claudeMessageContent(event)) {
+      if (block.type !== 'tool_result') continue
+      activities.push({
+        runtimeId: cliActivityRuntimeId('claude', block.tool_use_id),
+        activityType: 'tool',
+        title: 'Claude tool result',
+        detail: compactJson(block.content),
+        status: block.is_error === true ? 'error' : 'success'
+      })
     }
   }
   if (event.type === 'result' && event.is_error === true) {
-    return {
+    activities.push({
       activityType: 'error',
       title: 'Claude run failed',
       detail: typeof event.result === 'string' ? event.result : compactJson(event),
       status: 'error'
-    }
+    })
   }
-  return undefined
+  return activities
 }
 
 function geminiActivity(event: Record<string, unknown>): CliActivity | undefined {
@@ -528,12 +656,93 @@ function geminiActivity(event: Record<string, unknown>): CliActivity | undefined
       status: event.status === 'error' ? 'error' : 'success'
     }
   }
-  if (event.type === 'error') {
+  if (event.type === 'error' && event.severity !== 'warning') {
     return {
       activityType: 'error',
       title: 'Gemini reported an error',
-      detail: compactJson(event),
+      detail:
+        typeof event.message === 'string' ? event.message : compactJson(event),
       status: 'error'
+    }
+  }
+  return undefined
+}
+
+function antigravityActivities(
+  event: Record<string, unknown>
+): CliActivity[] {
+  if (event.event === 'init') {
+    const init = asRecord(event.init)
+    return [
+      {
+        activityType: 'status',
+        title: 'Antigravity session ready',
+        detail: compactJson({
+          model: init?.model,
+          permissionMode: init?.permission_mode
+        }),
+        status: 'success'
+      }
+    ]
+  }
+  if (event.event === 'step_update') {
+    const update = asRecord(event.step_update)
+    if (update?.step_type !== 'tool') return []
+    const toolInfo = asRecord(update.tool_info)
+    const toolError = asRecord(toolInfo?.error)
+    const toolName =
+      typeof toolInfo?.name === 'string'
+        ? toolInfo.name
+        : typeof update.tool_name === 'string'
+          ? update.tool_name
+          : 'Antigravity tool'
+    const complete = update.state === 'DONE'
+    return [
+      {
+        runtimeId: cliActivityRuntimeId('antigravity', update.step_index),
+        activityType: toolName === 'run_command' ? 'command' : 'tool',
+        title: toolName,
+        detail: complete
+          ? compactJson(toolInfo?.output ?? toolInfo?.error)
+          : compactJson(toolInfo?.parameters),
+        status: complete ? (toolError ? 'error' : 'success') : 'running'
+      }
+    ]
+  }
+  if (event.event === 'result') {
+    const result = asRecord(event.result)
+    if (result && result.status !== 'SUCCESS') {
+      return [
+        {
+          activityType: 'error',
+          title: 'Antigravity run failed',
+          detail:
+            typeof result.error === 'string'
+              ? result.error
+              : compactJson(result.error ?? { status: result.status }),
+          status: 'error'
+        }
+      ]
+    }
+  }
+  return []
+}
+
+function extractDiagnostic(
+  adapter: CliAdapter,
+  event: Record<string, unknown>
+): Extract<CliRuntimeEvent, { type: 'diagnostic' }> | undefined {
+  if (
+    adapter === 'gemini' &&
+    event.type === 'error' &&
+    event.severity === 'warning'
+  ) {
+    return {
+      type: 'diagnostic',
+      detail:
+        typeof event.message === 'string'
+          ? event.message
+          : compactJson(event) ?? 'Gemini reported a warning'
     }
   }
   return undefined
@@ -570,6 +779,17 @@ function extractUsage(adapter: CliAdapter, event: Record<string, unknown>): CliU
       totalTokens: asFiniteNumber(stats?.total_tokens)
     }
   }
+  if (adapter === 'antigravity' && event.event === 'result') {
+    const result = asRecord(event.result)
+    const usage = asRecord(result?.usage)
+    return {
+      inputTokens: asFiniteNumber(usage?.input_tokens),
+      outputTokens: asFiniteNumber(usage?.output_tokens),
+      cachedInputTokens: asFiniteNumber(usage?.cache_read_tokens),
+      reasoningTokens: asFiniteNumber(usage?.thinking_tokens),
+      totalTokens: asFiniteNumber(usage?.total_tokens)
+    }
+  }
   return undefined
 }
 
@@ -584,15 +804,25 @@ export function parseCliRuntimeEvent(
   if (sessionId) output.push({ type: 'session', sessionId })
   const textEvent = extractTextEvent(adapter, event)
   if (textEvent?.delta) output.push(textEvent)
-  const activity =
+  const diagnostic = extractDiagnostic(adapter, event)
+  if (diagnostic) output.push(diagnostic)
+  const activities =
     adapter === 'codex'
-      ? codexActivity(event)
+      ? [codexActivity(event)].filter(
+          (activity): activity is CliActivity => Boolean(activity)
+        )
       : adapter === 'claude'
-        ? claudeActivity(event)
+        ? claudeActivities(event)
         : adapter === 'gemini'
-          ? geminiActivity(event)
-          : undefined
-  if (activity) output.push({ type: 'activity', activity })
+          ? [geminiActivity(event)].filter(
+              (activity): activity is CliActivity => Boolean(activity)
+            )
+          : adapter === 'antigravity'
+            ? antigravityActivities(event)
+            : []
+  for (const activity of activities) {
+    output.push({ type: 'activity', activity })
+  }
   const usage = extractUsage(adapter, event)
   if (usage && Object.values(usage).some((value) => value !== undefined)) {
     output.push({ type: 'usage', usage })
@@ -641,7 +871,8 @@ const CLI_ADAPTER_ENVIRONMENT_KEYS: Readonly<
     'GOOGLE_CLOUD_QUOTA_PROJECT',
     'GOOGLE_GENAI_USE_GCA',
     'GOOGLE_GENAI_USE_VERTEXAI'
-  ])
+  ]),
+  antigravity: Object.freeze([])
 })
 
 const CLI_SENSITIVE_ENVIRONMENT_KEYS: Readonly<
@@ -673,6 +904,12 @@ const CLI_SENSITIVE_ENVIRONMENT_KEYS: Readonly<
   gemini: Object.freeze([
     'GEMINI_API_KEY',
     'GOOGLE_API_KEY',
+    'HTTP_PROXY',
+    'HTTPS_PROXY',
+    'http_proxy',
+    'https_proxy'
+  ]),
+  antigravity: Object.freeze([
     'HTTP_PROXY',
     'HTTPS_PROXY',
     'http_proxy',
@@ -761,15 +998,15 @@ function cliRedactionMarker(patterns: readonly string[]): string {
   for (const pattern of patterns) {
     for (const character of pattern) usedCharacters.add(character)
   }
-  if (!usedCharacters.has('█')) return '█'.repeat(5)
+  if (!usedCharacters.has('█')) return '█'.repeat(4)
   for (let codePoint = 0xe000; codePoint <= 0xf8ff; codePoint += 1) {
     const candidate = String.fromCharCode(codePoint)
-    if (!usedCharacters.has(candidate)) return candidate.repeat(5)
+    if (!usedCharacters.has(candidate)) return candidate.repeat(4)
   }
   // Environment values cannot contain NUL. It is an invisible last-resort
   // separator that still prevents two redaction boundaries from recreating a
   // configured value if every BMP private-use character was supplied.
-  return '\0'.repeat(5)
+  return '\0'.repeat(4)
 }
 
 function cliSecretRedactionPlan(
@@ -931,14 +1168,26 @@ export async function runCli(
   workspacePath: string,
   signal: AbortSignal,
   callbacks: CliCallbacks,
-  options: CliInvocationOptions = {},
+  options: CliRunOptions,
   authorizeInvocation?: CliInvocationAuthorizer,
   customEnvironment: Readonly<Record<string, string>> = {}
 ): Promise<CliRunResult> {
   signal.throwIfAborted()
+  if (
+    !options ||
+    typeof options.runtimeAdapterId !== 'string' ||
+    !options.runtimeAdapterId.trim()
+  ) {
+    throw new Error('A source-registered CLI runtime adapter identity is required')
+  }
   if (!authorizeInvocation) {
     throw new Error('A main-process CLI invocation authorizer is required')
   }
+  const cliAdapter = provider.cliAdapter ?? 'generic'
+  const runtimeAdapterId = validateCliRuntimeAdapterBinding(
+    options.runtimeAdapterId,
+    cliAdapter
+  )
   if (options.sessionId) assertValidCliSessionId(options.sessionId)
   const environmentVariables = normalizeCliEnvironmentVariableNames(
     provider.environmentVariables ?? []
@@ -1016,7 +1265,8 @@ export async function runCli(
     prompt: promptDetails.summary,
     promptMode: provider.promptMode,
     outputMode: provider.outputMode,
-    cliAdapter: provider.cliAdapter ?? 'generic',
+    runtimeAdapterId,
+    cliAdapter,
     environmentVariables,
     ...(provider.environmentFingerprint
       ? { environmentFingerprint: provider.environmentFingerprint }
@@ -1170,6 +1420,13 @@ export async function runCli(
       } else if (event.type === 'usage') {
         usage = event.usage
         callbacks.onUsage?.(event.usage)
+      } else if (event.type === 'diagnostic') {
+        const detail = redactAndBoundCliEnvironmentValue(
+          event.detail,
+          environmentSecrets,
+          MAX_CLI_ACTIVITY_DETAIL_CHARACTERS
+        )
+        if (detail) callbacks.onDiagnostic(`${detail}\n`)
       }
     }
   }

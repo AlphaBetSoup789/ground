@@ -51,7 +51,8 @@ function taskFixture(): Task {
     updatedAt: timestamp,
     runtimeSessions: {
       'provider-source-secret-id': {
-        adapter: 'codex',
+        adapterId: 'openai.codex-cli',
+        sessionCompatibilityId: 'codex',
         sessionId: 'native-cli-session-secret',
         providerRevision: 'native-provider-revision-secret',
         workspacePath,
@@ -217,6 +218,30 @@ function taskFixture(): Task {
           kind: 'anthropic',
           model: 'claude-history'
         }
+      },
+      {
+        id: 'managed-operation-source-id',
+        kind: 'activity',
+        runId: 'managed-operation-run-source-id',
+        activityType: 'tool',
+        title: 'Earlier uncertain write',
+        status: 'error',
+        toolName: 'write_file',
+        result: 'Outcome unknown; Ground did not retry it.',
+        createdAt: '2026-07-28T18:03:00.000Z',
+        managedExecution: {
+          version: 1,
+          operationId: 'managed-operation-source-id',
+          claim: 'approved',
+          kind: 'workspace-write',
+          actionSha256:
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          approvalSha256:
+            'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          phase: 'uncertain',
+          startedAt: '2026-07-28T18:02:30.000Z',
+          interruptedAt: '2026-07-28T18:03:00.000Z'
+        }
       }
     ]
   }
@@ -304,6 +329,8 @@ describe('Ground task portability', () => {
       'history-provider-source-secret-id',
       'conversation-message-source-id',
       'provider-native-call-secret',
+      'managed-operation-source-id',
+      'managed-operation-run-source-id',
       'private-endpoint.example.test'
     ]) {
       expect(serialized).not.toContain(forbidden)
@@ -321,6 +348,10 @@ describe('Ground task portability', () => {
       'provider_state',
       'runStatus',
       'approvalId',
+      'managedExecution',
+      'operationId',
+      'actionSha256',
+      'approvalSha256',
       'runId'
     ]) {
       expect(serialized).not.toContain(`"${forbiddenKey}"`)

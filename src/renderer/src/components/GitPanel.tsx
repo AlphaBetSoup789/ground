@@ -22,15 +22,19 @@ import {
   Minus,
   Plus,
   RefreshCw,
+  RotateCcw,
+  ShieldAlert,
+  ShieldCheck,
   Trash2
 } from 'lucide-react'
 import type {
+  DesktopTask,
   GitDiffResult,
   GitLogEntry,
   GitOverview,
+  GitRecoverySummary,
   GitStatusSummary,
-  GitWorktreeSummary,
-  Task
+  GitWorktreeSummary
 } from '../../../shared/types'
 import { desktop } from '../lib/desktop'
 
@@ -39,7 +43,7 @@ type GitPanelTab = 'changes' | 'history' | 'worktrees'
 interface GitPanelProps {
   taskId: string
   workspaceReady: boolean
-  onTaskCreated: (task: Task) => void
+  onTaskCreated: (task: DesktopTask) => void
   onWorkspaceTasksChanged: () => void
   onError: (error: unknown) => void
 }
@@ -47,6 +51,15 @@ interface GitPanelProps {
 interface LoadError {
   message: string
 }
+
+type GitMutation =
+  | 'stage'
+  | 'unstage'
+  | 'revert'
+  | 'undo-recovery'
+  | 'commit'
+  | 'create-worktree'
+  | 'remove-worktree'
 
 const TABS: ReadonlyArray<{
   id: GitPanelTab
@@ -69,15 +82,16 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
   const [createError, setCreateError] = useState<string>()
   const [selectedStagePaths, setSelectedStagePaths] = useState<string[]>([])
   const [selectedUnstagePaths, setSelectedUnstagePaths] = useState<string[]>([])
+  const [selectedRestorePaths, setSelectedRestorePaths] = useState<string[]>([])
   const [commitMessage, setCommitMessage] = useState('')
   const [authorName, setAuthorName] = useState('')
   const [authorEmail, setAuthorEmail] = useState('')
-  const [mutation, setMutation] = useState<
-    'stage' | 'unstage' | 'commit' | 'create-worktree' | 'remove-worktree'
-  >()
+  const [mutation, setMutation] = useState<GitMutation>()
   const [mutationError, setMutationError] = useState<string>()
   const [mutationStatus, setMutationStatus] = useState<string>()
   const [removingWorktree, setRemovingWorktree] = useState<string>()
+  const [undoingRecovery, setUndoingRecovery] = useState<string>()
+  const [choosingGit, setChoosingGit] = useState(false)
   const requestVersion = useRef(0)
   const tabButtons = useRef<Array<HTMLButtonElement | null>>([])
   const idPrefix = useId()
@@ -100,6 +114,12 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
           setOverview(nextOverview)
           setAuthorName((current) => current || nextOverview.identity?.name || '')
           setAuthorEmail((current) => current || nextOverview.identity?.email || '')
+          const eligibleRestorePaths = new Set(
+            eligibleGitRestorePaths(nextOverview.status)
+          )
+          setSelectedRestorePaths((current) =>
+            current.filter((candidate) => eligibleRestorePaths.has(candidate))
+          )
         }
       } catch (error) {
         if (request !== requestVersion.current) return
@@ -119,6 +139,7 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
     setCreateError(undefined)
     setSelectedStagePaths([])
     setSelectedUnstagePaths([])
+    setSelectedRestorePaths([])
     setCommitMessage('')
     setAuthorName('')
     setAuthorEmail('')
@@ -126,6 +147,7 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
     setMutationError(undefined)
     setMutationStatus(undefined)
     setRemovingWorktree(undefined)
+    setUndoingRecovery(undefined)
     void loadOverview(true)
     return () => {
       requestVersion.current += 1
@@ -264,6 +286,66 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
     }
   }
 
+  const restorePaths = async (paths: string[]): Promise<void> => {
+    if (!paths.length || mutation) return
+    setMutation('revert')
+    setMutationError(undefined)
+    setMutationStatus(undefined)
+    try {
+      const recovery = await desktop.revertGitPaths(props.taskId, paths)
+      if (!recovery) return
+      setSelectedRestorePaths([])
+      setSelectedStagePaths((current) =>
+        current.filter((candidate) => !paths.includes(candidate))
+      )
+      setMutationStatus(
+        `Restored ${paths.length} ${
+          paths.length === 1 ? 'path' : 'paths'
+        } with a recoverable undo.`
+      )
+      await loadOverview()
+    } catch (error) {
+      setMutationError(
+        errorMessage(error, 'Unable to restore the selected paths safely.')
+      )
+      props.onError(error)
+      await loadOverview()
+    } finally {
+      setMutation(undefined)
+    }
+  }
+
+  const undoRecovery = async (recoveryId: string): Promise<void> => {
+    if (mutation) return
+    setMutation('undo-recovery')
+    setUndoingRecovery(recoveryId)
+    setMutationError(undefined)
+    setMutationStatus(undefined)
+    try {
+      const recovery = await desktop.undoGitRecovery(
+        props.taskId,
+        recoveryId
+      )
+      if (!recovery) return
+      setMutationStatus(
+        'Returned the affected files to their exact pre-restore state.'
+      )
+      await loadOverview()
+    } catch (error) {
+      setMutationError(
+        errorMessage(
+          error,
+          'Ground refused to undo because the workspace or recovery changed.'
+        )
+      )
+      props.onError(error)
+      await loadOverview()
+    } finally {
+      setUndoingRecovery(undefined)
+      setMutation(undefined)
+    }
+  }
+
   const removeWorktree = async (relativePath: string): Promise<void> => {
     if (creating || mutation) return
     setMutation('remove-worktree')
@@ -288,7 +370,32 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
     }
   }
 
+  const chooseGitExecutable = async (): Promise<void> => {
+    if (choosingGit || mutation) return
+    setChoosingGit(true)
+    setLoadError(undefined)
+    setMutationError(undefined)
+    setMutationStatus(undefined)
+    try {
+      const selected = await desktop.chooseGitExecutable()
+      if (!selected) return
+      setMutationStatus('Trusted Git executable updated.')
+      await loadOverview(true)
+    } catch (error) {
+      setLoadError({
+        message: errorMessage(error, 'Unable to trust this Git executable.')
+      })
+      props.onError(error)
+    } finally {
+      setChoosingGit(false)
+    }
+  }
+
   const hasInitialError = Boolean(loadError && !overview)
+  const recoveryRequired =
+    overview?.recoveries.filter(
+      (recovery) => recovery.status === 'recovery-required'
+    ) ?? []
 
   return (
     <section className="git-panel" aria-label="Git workspace">
@@ -302,20 +409,45 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
             <p>{repositoryLabel(overview)}</p>
           </div>
         </div>
-        <button
-          className="git-panel-refresh"
-          type="button"
-          onClick={() => void loadOverview()}
-          disabled={!props.workspaceReady || loading}
-          aria-label={loading ? 'Refreshing Git status' : 'Refresh Git status'}
-          title="Refresh Git status"
-        >
-          {loading ? (
-            <LoaderCircle className="git-panel-spinner" size={15} aria-hidden="true" />
-          ) : (
-            <RefreshCw size={15} aria-hidden="true" />
-          )}
-        </button>
+        <div className="git-panel-header-actions">
+          <button
+            className="git-panel-executable"
+            type="button"
+            onClick={() => void chooseGitExecutable()}
+            disabled={choosingGit || Boolean(mutation)}
+            aria-label={
+              choosingGit
+                ? 'Choosing Git executable'
+                : 'Choose Git executable'
+            }
+            title="Choose Git executable"
+          >
+            {choosingGit ? (
+              <LoaderCircle
+                className="git-panel-spinner"
+                size={14}
+                aria-hidden="true"
+              />
+            ) : (
+              <FolderGit2 size={14} aria-hidden="true" />
+            )}
+            <span>Executable</span>
+          </button>
+          <button
+            className="git-panel-refresh"
+            type="button"
+            onClick={() => void loadOverview()}
+            disabled={!props.workspaceReady || loading}
+            aria-label={loading ? 'Refreshing Git status' : 'Refresh Git status'}
+            title="Refresh Git status"
+          >
+            {loading ? (
+              <LoaderCircle className="git-panel-spinner" size={15} aria-hidden="true" />
+            ) : (
+              <RefreshCw size={15} aria-hidden="true" />
+            )}
+          </button>
+        </div>
       </header>
 
       {!props.workspaceReady ? (
@@ -346,10 +478,25 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
       ) : overview && !overview.isRepository ? (
         <PanelState
           icon={<FolderGit2 size={22} />}
-          title="Not a Git repository"
+          title={
+            overview.requiresGitExecutable
+              ? 'Choose Git'
+              : 'Not a Git repository'
+          }
           description={
             overview.message ??
             'This workspace is not initialized as a Git repository yet.'
+          }
+          action={
+            overview.requiresGitExecutable ? (
+              <button
+                type="button"
+                onClick={() => void chooseGitExecutable()}
+                disabled={choosingGit}
+              >
+                {choosingGit ? 'Reviewing…' : 'Choose Git executable'}
+              </button>
+            ) : undefined
           }
         />
       ) : overview ? (
@@ -361,8 +508,16 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
 
           <div
             className="git-panel-feedback"
-            hidden={!loadError && !mutationError && !mutationStatus}
+            hidden={
+              !loadError &&
+              !mutationError &&
+              !mutationStatus &&
+              recoveryRequired.length === 0
+            }
           >
+            {recoveryRequired.length > 0 && (
+              <RecoveryRequiredNotice recoveries={recoveryRequired} />
+            )}
             {loadError && (
               <div className="git-panel-inline-error" role="alert">
                 <AlertCircle size={14} aria-hidden="true" />
@@ -430,17 +585,22 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
                 overview={overview}
                 selectedStagePaths={selectedStagePaths}
                 selectedUnstagePaths={selectedUnstagePaths}
+                selectedRestorePaths={selectedRestorePaths}
                 commitMessage={commitMessage}
                 authorName={authorName}
                 authorEmail={authorEmail}
                 mutation={mutation}
+                undoingRecovery={undoingRecovery}
                 onSelectedStagePathsChange={setSelectedStagePaths}
                 onSelectedUnstagePathsChange={setSelectedUnstagePaths}
+                onSelectedRestorePathsChange={setSelectedRestorePaths}
                 onCommitMessageChange={setCommitMessage}
                 onAuthorNameChange={setAuthorName}
                 onAuthorEmailChange={setAuthorEmail}
                 onStage={(paths) => void mutatePaths('stage', paths)}
                 onUnstage={(paths) => void mutatePaths('unstage', paths)}
+                onRestore={(paths) => void restorePaths(paths)}
+                onUndoRecovery={(recoveryId) => void undoRecovery(recoveryId)}
                 onCommit={commitChanges}
               />
             )}
@@ -528,21 +688,61 @@ function RepositorySummary(props: {
   )
 }
 
+export function eligibleGitRestorePaths(
+  status: GitStatusSummary | undefined
+): string[] {
+  if (!status) return []
+  const conflicts = new Set(status.conflicted)
+  return [...new Set([...status.unstaged, ...status.untracked])]
+    .filter((filePath) => !conflicts.has(filePath))
+    .sort((left, right) => left.localeCompare(right))
+}
+
+export function RecoveryRequiredNotice(props: {
+  recoveries: GitRecoverySummary[]
+}): React.JSX.Element {
+  const affectedPaths = new Set(
+    props.recoveries.flatMap((recovery) => [
+      ...recovery.trackedPaths,
+      ...recovery.untrackedPaths
+    ])
+  ).size
+  return (
+    <div className="git-recovery-required" role="alert">
+      <ShieldAlert size={15} aria-hidden="true" />
+      <div>
+        <strong>Git recovery required</strong>
+        <p>
+          Ground preserved pre-restore data for {affectedPaths}{' '}
+          {affectedPaths === 1 ? 'path' : 'paths'}, but the restore did not
+          finish cleanly. Avoid editing the affected paths and copy the
+          workspace before manual repair; automatic undo is disabled.
+        </p>
+      </div>
+    </div>
+  )
+}
+
 function ChangesView(props: {
   overview: GitOverview
   selectedStagePaths: string[]
   selectedUnstagePaths: string[]
+  selectedRestorePaths: string[]
   commitMessage: string
   authorName: string
   authorEmail: string
-  mutation?: 'stage' | 'unstage' | 'commit' | 'create-worktree' | 'remove-worktree'
+  mutation?: GitMutation
+  undoingRecovery?: string
   onSelectedStagePathsChange: (paths: string[]) => void
   onSelectedUnstagePathsChange: (paths: string[]) => void
+  onSelectedRestorePathsChange: (paths: string[]) => void
   onCommitMessageChange: (value: string) => void
   onAuthorNameChange: (value: string) => void
   onAuthorEmailChange: (value: string) => void
   onStage: (paths: string[]) => void
   onUnstage: (paths: string[]) => void
+  onRestore: (paths: string[]) => void
+  onUndoRecovery: (recoveryId: string) => void
   onCommit: (event: React.FormEvent<HTMLFormElement>) => Promise<void>
 }): React.JSX.Element {
   const { overview } = props
@@ -559,6 +759,7 @@ function ChangesView(props: {
   const stagedPaths = status?.staged.filter((filePath) => !conflicts.has(filePath)) ?? []
   const modifiedPaths =
     status?.unstaged.filter((filePath) => !conflicts.has(filePath)) ?? []
+  const restorePaths = eligibleGitRestorePaths(status)
   const busy = Boolean(props.mutation)
 
   const togglePath = (
@@ -574,7 +775,7 @@ function ChangesView(props: {
     )
   }
 
-  if (!hasFiles && !hasDiff) {
+  if (!hasFiles && !hasDiff && props.overview.recoveries.length === 0) {
     return (
       <EmptyView
         icon={<Check size={20} />}
@@ -586,6 +787,19 @@ function ChangesView(props: {
 
   return (
     <div className="git-changes-view">
+      {(restorePaths.length > 0 || overview.recoveries.length > 0) && (
+        <GitRecoveryActions
+          eligiblePaths={restorePaths}
+          selectedPaths={props.selectedRestorePaths}
+          recoveries={overview.recoveries}
+          recoveriesTruncated={overview.recoveriesTruncated}
+          mutation={props.mutation}
+          undoingRecovery={props.undoingRecovery}
+          onSelectedPathsChange={props.onSelectedRestorePathsChange}
+          onRestore={props.onRestore}
+          onUndoRecovery={props.onUndoRecovery}
+        />
+      )}
       {status && hasFiles && (
         <>
           <div className="git-index-actions" aria-label="Git index actions">
@@ -773,6 +987,160 @@ function ChangesView(props: {
       ) : null}
     </div>
   )
+}
+
+export function GitRecoveryActions(props: {
+  eligiblePaths: string[]
+  selectedPaths: string[]
+  recoveries: GitRecoverySummary[]
+  recoveriesTruncated: boolean
+  mutation?: GitMutation
+  undoingRecovery?: string
+  onSelectedPathsChange: (paths: string[]) => void
+  onRestore: (paths: string[]) => void
+  onUndoRecovery: (recoveryId: string) => void
+}): React.JSX.Element {
+  const titleId = useId()
+  const busy = Boolean(props.mutation)
+  const togglePath = (filePath: string, checked: boolean): void => {
+    props.onSelectedPathsChange(
+      checked
+        ? [...new Set([...props.selectedPaths, filePath])]
+        : props.selectedPaths.filter((candidate) => candidate !== filePath)
+    )
+  }
+
+  return (
+    <section className="git-recovery-actions" aria-labelledby={titleId}>
+      <div className="git-recovery-heading">
+        <ShieldCheck size={15} aria-hidden="true" />
+        <div>
+          <h3 id={titleId}>Recoverable restore</h3>
+          <p>
+            Restore working files to the current Git index while Ground keeps
+            private recovery copies. Staged changes remain staged.
+          </p>
+        </div>
+      </div>
+
+      {props.eligiblePaths.length > 0 && (
+        <fieldset className="git-restore-picker" disabled={busy}>
+          <legend>Select modified or untracked paths to restore</legend>
+          <ul>
+            {props.eligiblePaths.map((filePath) => (
+              <li key={filePath}>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={props.selectedPaths.includes(filePath)}
+                    onChange={(event) =>
+                      togglePath(filePath, event.target.checked)
+                    }
+                  />
+                  <code title={filePath}>{filePath}</code>
+                </label>
+              </li>
+            ))}
+          </ul>
+          <button
+            type="button"
+            onClick={() => props.onRestore(props.selectedPaths)}
+            disabled={busy || props.selectedPaths.length === 0}
+          >
+            {props.mutation === 'revert' ? (
+              <LoaderCircle
+                className="git-panel-spinner"
+                size={13}
+                aria-hidden="true"
+              />
+            ) : (
+              <RotateCcw size={13} aria-hidden="true" />
+            )}
+            {props.mutation === 'revert'
+              ? 'Restoring safely…'
+              : `Restore selected${
+                  props.selectedPaths.length
+                    ? ` (${props.selectedPaths.length})`
+                    : ''
+                }`}
+          </button>
+        </fieldset>
+      )}
+
+      {props.recoveries.length > 0 && (
+        <div className="git-recovery-history">
+          <h4>Recent restore recoveries</h4>
+          <ul aria-label="Recent recoverable Git restores">
+            {props.recoveries.map((recovery) => {
+              const paths = [
+                ...recovery.trackedPaths,
+                ...recovery.untrackedPaths
+              ]
+              return (
+                <li
+                  key={recovery.id}
+                  className={`git-recovery-record ${recovery.status}`}
+                >
+                  <div>
+                    <strong>{recoveryStatusLabel(recovery)}</strong>
+                    <span>
+                      <time dateTime={recovery.createdAt}>
+                        {formatRelativeDate(recovery.createdAt)}
+                      </time>
+                      {' · '}
+                      {paths.length} {paths.length === 1 ? 'path' : 'paths'}
+                    </span>
+                    <span className="git-recovery-paths">
+                      {paths.slice(0, 2).map((filePath) => (
+                        <code title={filePath} key={filePath}>
+                          {filePath}
+                        </code>
+                      ))}
+                      {paths.length > 2 && <em>+{paths.length - 2} more</em>}
+                    </span>
+                  </div>
+                  {recovery.canUndo && (
+                    <button
+                      type="button"
+                      onClick={() => props.onUndoRecovery(recovery.id)}
+                      disabled={busy}
+                      aria-label={`Undo recoverable restore from ${formatCommitDate(
+                        recovery.createdAt
+                      )}`}
+                    >
+                      {props.undoingRecovery === recovery.id ? (
+                        <LoaderCircle
+                          className="git-panel-spinner"
+                          size={13}
+                          aria-hidden="true"
+                        />
+                      ) : (
+                        <RotateCcw size={13} aria-hidden="true" />
+                      )}
+                      {props.undoingRecovery === recovery.id
+                        ? 'Undoing…'
+                        : 'Undo'}
+                    </button>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+          {props.recoveriesTruncated && (
+            <p className="git-recovery-truncated" role="note">
+              Showing the newest restore recoveries.
+            </p>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function recoveryStatusLabel(recovery: GitRecoverySummary): string {
+  if (recovery.status === 'recovery-required') return 'Recovery required'
+  if (recovery.status === 'restored') return 'Restore undone'
+  return recovery.canUndo ? 'Undo available' : 'Restore completed'
 }
 
 function FileGroup(props: {

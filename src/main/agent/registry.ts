@@ -42,6 +42,15 @@ export class AdapterKindMismatchError extends Error {
   }
 }
 
+export class AdapterIdentityDriftError extends Error {
+  constructor(readonly registeredAdapterId: string) {
+    super(
+      `Adapter "${registeredAdapterId}" changed identity after registration`
+    )
+    this.name = 'AdapterIdentityDriftError'
+  }
+}
+
 export class AdapterRegistry {
   private readonly adapters = new Map<string, RegisteredAdapter>()
 
@@ -62,7 +71,10 @@ export class AdapterRegistry {
   }
 
   has(adapterId: string): boolean {
-    return this.adapters.has(adapterId)
+    const registered = this.adapters.get(adapterId)
+    if (!registered) return false
+    this.assertStableIdentity(adapterId, registered)
+    return true
   }
 
   requireModel(adapterId: string): ModelAdapter<unknown> {
@@ -82,10 +94,13 @@ export class AdapterRegistry {
   }
 
   list(): AdapterRegistration[] {
-    return [...this.adapters.entries()].map(([id, registered]) => ({
-      id,
-      kind: registered.kind
-    }))
+    return [...this.adapters.entries()].map(([id, registered]) => {
+      this.assertStableIdentity(id, registered)
+      return {
+        id,
+        kind: registered.kind
+      }
+    })
   }
 
   private register(adapterId: string, registered: RegisteredAdapter): void {
@@ -97,14 +112,27 @@ export class AdapterRegistry {
   private require(adapterId: string): RegisteredAdapter {
     const adapter = this.adapters.get(adapterId)
     if (!adapter) throw new UnknownAdapterError(adapterId)
+    this.assertStableIdentity(adapterId, adapter)
     return adapter
+  }
+
+  private assertStableIdentity(
+    registeredAdapterId: string,
+    registered: RegisteredAdapter
+  ): void {
+    if (registered.adapter.id !== registeredAdapterId) {
+      throw new AdapterIdentityDriftError(registeredAdapterId)
+    }
   }
 }
 
 function assertAdapterId(adapterId: string): void {
-  if (!/^[a-z0-9][a-z0-9._-]*$/u.test(adapterId)) {
+  if (
+    adapterId.length > 200 ||
+    !/^[a-z0-9][a-z0-9._-]*$/u.test(adapterId)
+  ) {
     throw new TypeError(
-      'Adapter ids must begin with a lowercase letter or digit and contain only lowercase letters, digits, ".", "_", or "-"'
+      'Adapter ids must contain 1-200 characters, begin with a lowercase letter or digit, and use only lowercase letters, digits, ".", "_", or "-"'
     )
   }
 }

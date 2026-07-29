@@ -20,6 +20,11 @@ import type {
   TokenUsage,
   ToolCallPart
 } from './types'
+import {
+  closeAdapterIteratorBestEffort,
+  nextAdapterEvent,
+  toAsyncAdapterIterator
+} from './abortable-iteration'
 
 const USAGE_KEYS = [
   'inputTokens',
@@ -27,8 +32,11 @@ const USAGE_KEYS = [
   'totalTokens',
   'cachedInputTokens',
   'cacheWriteInputTokens',
-  'reasoningTokens'
+  'reasoningTokens',
+  'costUsd'
 ] as const satisfies ReadonlyArray<keyof TokenUsage>
+export const MAX_NORMALIZED_TOKEN_COUNT = 1_000_000_000_000
+export const MAX_NORMALIZED_COST_USD = 1_000_000
 
 const STOP_REASONS = new Set<ModelStopReason>([
   'complete',
@@ -82,7 +90,7 @@ export class ModelEventReducer {
     return this.emittedOutput
   }
 
-  push(value: unknown): void {
+  push(value: unknown): ModelEvent {
     const event = assertModelEvent(value)
     if (this.terminal) {
       throw this.protocolError(`Received ${event.type} after response.completed`)
@@ -108,32 +116,32 @@ export class ModelEventReducer {
           message: event.message,
           retry: event.retry ? { ...event.retry } : undefined
         })
-        return
+        return event
       case 'response.started':
         if (this.started) throw this.protocolError('Received response.started more than once')
         this.started = { ...event }
-        return
+        return event
       case 'part.started':
         this.requireStarted(event.type)
         this.startPart(event.part)
-        return
+        return event
       case 'part.delta':
         this.requireStarted(event.type)
         this.addDelta(event.partId, event.delta)
-        return
+        return event
       case 'part.completed':
         this.requireStarted(event.type)
         this.completePart(event.partId, event.part)
-        return
+        return event
       case 'usage.updated':
         this.requireStarted(event.type)
-        this.usageTotals = mergeUsage(
+        this.usageTotals = mergeTokenUsage(
           this.usageTotals,
           event.usage,
           event.semantics,
           (message) => this.protocolError(message)
         )
-        return
+        return event
       case 'response.completed':
         this.requireStarted(event.type)
         for (const partId of this.partOrder) {
@@ -144,14 +152,28 @@ export class ModelEventReducer {
           }
         }
         if (event.usage) {
-          this.usageTotals = mergeUsage(
+          this.usageTotals = mergeTokenUsage(
             this.usageTotals,
             event.usage,
             'cumulative',
             (message) => this.protocolError(message)
           )
         }
-        this.terminal = { ...event }
+        this.terminal = {
+          ...event,
+          usage: event.usage ? { ...event.usage } : undefined,
+          providerState: event.providerState
+            ? cloneProviderState(event.providerState)
+            : undefined,
+          checkpoint:
+            event.checkpoint === undefined
+              ? undefined
+              : cloneBoundedProviderJson(
+                  event.checkpoint,
+                  'Provider checkpoint'
+                )
+        }
+        return event
     }
   }
 
@@ -165,7 +187,7 @@ export class ModelEventReducer {
       if (!completed) {
         throw this.protocolError(`Part "${partId}" did not complete`)
       }
-      return completed
+      return cloneOutputPart(completed)
     })
     return {
       responseId: this.started?.responseId,
@@ -176,6 +198,8 @@ export class ModelEventReducer {
         role: 'assistant',
         parts: outputParts,
         providerState: terminal.providerState
+          ? cloneProviderState(terminal.providerState)
+          : undefined
       },
       stopReason: terminal.stopReason,
       providerStopReason: terminal.providerStopReason,
@@ -184,7 +208,13 @@ export class ModelEventReducer {
         ...notice,
         retry: notice.retry ? { ...notice.retry } : undefined
       })),
-      checkpoint: terminal.checkpoint
+      checkpoint:
+        terminal.checkpoint === undefined
+          ? undefined
+          : cloneBoundedProviderJson(
+              terminal.checkpoint,
+              'Provider checkpoint'
+            )
     }
   }
 
@@ -232,7 +262,6 @@ export class ModelEventReducer {
         `Part "${partId}" started as ${accumulator.header.kind}, but completed as ${candidate.kind}`
       )
     }
-    assertOutputPart(candidate)
 
     let completed: OutputMessagePart
     if (candidate.kind === 'tool-call' && accumulator.header.kind === 'tool-call') {
@@ -281,7 +310,7 @@ export class ModelEventReducer {
       throw this.protocolError(`Unsupported completed part for "${partId}"`)
     }
 
-    accumulator.completed = completed
+    accumulator.completed = cloneOutputPart(completed)
     this.emittedOutput = true
   }
 
@@ -352,16 +381,23 @@ export async function consumeModelEventStream(
       signal: options.signal
     })
   }
+  const iterator = toAsyncAdapterIterator(events)
+  let completed = false
 
   try {
-    for await (const event of events) {
+    while (true) {
+      const result = await nextAdapterEvent(iterator, options.signal)
+      if (result.done) {
+        completed = true
+        break
+      }
       if (options.signal?.aborted) {
         throw toProviderError(options.signal.reason, {
           signal: options.signal,
           partialOutput: reducer.hasSemanticOutput
         })
       }
-      reducer.push(event)
+      reducer.push(result.value)
     }
     if (options.signal?.aborted) {
       throw toProviderError(options.signal.reason, {
@@ -382,26 +418,37 @@ export async function consumeModelEventStream(
       signal: options.signal,
       partialOutput: reducer.hasSemanticOutput
     })
+  } finally {
+    if (!completed) closeAdapterIteratorBestEffort(iterator)
   }
 }
 
 export function assertModelEvent(value: unknown): ModelEvent {
   const event = asRecord(value, 'Model event')
-  const type = nonEmptyString(event.type, 'Model event type')
+  const type = boundedNonEmptyString(event.type, 'Model event type', 100)
 
   switch (type) {
-    case 'response.started':
-      optionalBoundedNonEmptyString(
+    case 'response.started': {
+      const responseId = optionalBoundedNonEmptyString(
         event.responseId,
         'responseId',
         MAX_NORMALIZED_IDENTIFIER_CHARACTERS
       )
-      optionalBoundedNonEmptyString(event.servingModel, 'servingModel', 200)
-      return value as ModelEvent
+      const servingModel = optionalBoundedNonEmptyString(
+        event.servingModel,
+        'servingModel',
+        200
+      )
+      return {
+        type,
+        ...(responseId === undefined ? {} : { responseId }),
+        ...(servingModel === undefined ? {} : { servingModel })
+      }
+    }
     case 'part.started': {
       const part = asRecord(event.part, 'Started part')
       const kind = nonEmptyString(part.kind, 'Started part kind')
-      boundedNonEmptyString(
+      const partId = boundedNonEmptyString(
         part.partId,
         'Started part id',
         MAX_NORMALIZED_IDENTIFIER_CHARACTERS
@@ -410,17 +457,32 @@ export function assertModelEvent(value: unknown): ModelEvent {
         throw protocolProviderError(`Unknown started part kind "${kind}"`)
       }
       if (kind === 'tool-call') {
-        optionalBoundedNonEmptyString(
+        const callId = optionalBoundedNonEmptyString(
           part.callId,
           'Tool call id',
           MAX_NORMALIZED_IDENTIFIER_CHARACTERS
         )
-        optionalBoundedNonEmptyString(part.name, 'Tool name', 200)
+        const name = optionalBoundedNonEmptyString(part.name, 'Tool name', 200)
+        return {
+          type,
+          part: {
+            kind,
+            partId,
+            ...(callId === undefined ? {} : { callId }),
+            ...(name === undefined ? {} : { name })
+          }
+        }
       }
-      return value as ModelEvent
+      return {
+        type,
+        part: {
+          kind: kind as 'text' | 'reasoning-summary',
+          partId
+        }
+      }
     }
     case 'part.delta': {
-      boundedNonEmptyString(
+      const partId = boundedNonEmptyString(
         event.partId,
         'Delta part id',
         MAX_NORMALIZED_IDENTIFIER_CHARACTERS
@@ -430,44 +492,69 @@ export function assertModelEvent(value: unknown): ModelEvent {
       if (!['text', 'reasoning-summary', 'tool-arguments'].includes(kind)) {
         throw protocolProviderError(`Unknown part delta kind "${kind}"`)
       }
-      stringValue(delta.text, 'Part delta text')
-      return value as ModelEvent
+      const text = stringValue(delta.text, 'Part delta text')
+      return {
+        type,
+        partId,
+        delta:
+          kind === 'text'
+            ? { kind, text }
+            : kind === 'reasoning-summary'
+              ? { kind, text }
+              : { kind: 'tool-arguments', text }
+      }
     }
-    case 'part.completed':
-      boundedNonEmptyString(
+    case 'part.completed': {
+      const partId = boundedNonEmptyString(
         event.partId,
         'Completed part id',
         MAX_NORMALIZED_IDENTIFIER_CHARACTERS
       )
-      assertOutputPart(event.part)
-      return value as ModelEvent
+      return {
+        type,
+        partId,
+        part: normalizeOutputPart(event.part)
+      }
+    }
     case 'provider.notice': {
       const level = nonEmptyString(event.level, 'Notice level')
       if (!['debug', 'info', 'warning'].includes(level)) {
         throw protocolProviderError(`Unknown provider notice level "${level}"`)
       }
-      boundedNonEmptyString(event.code, 'Notice code', 200)
-      boundedString(
+      const code = boundedNonEmptyString(event.code, 'Notice code', 200)
+      const message = boundedString(
         event.message,
         'Notice message',
         MAX_PROVIDER_NOTICE_CHARACTERS
       )
+      let retry: ProviderNotice['retry']
       if (event.retry !== undefined) {
-        const retry = asRecord(event.retry, 'Retry notice')
-        positiveInteger(retry.attempt, 'Retry attempt')
-        nonNegativeInteger(retry.delayMs, 'Retry delay')
+        const candidate = asRecord(event.retry, 'Retry notice')
+        retry = {
+          attempt: positiveInteger(candidate.attempt, 'Retry attempt'),
+          delayMs: nonNegativeInteger(candidate.delayMs, 'Retry delay')
+        }
       }
-      return value as ModelEvent
+      return {
+        type,
+        level: level as ProviderNotice['level'],
+        code,
+        message,
+        ...(retry ? { retry } : {})
+      }
     }
     case 'usage.updated': {
       if (event.semantics !== 'cumulative' && event.semantics !== 'delta') {
         throw protocolProviderError('Usage semantics must be cumulative or delta')
       }
-      assertTokenUsage(event.usage)
-      return value as ModelEvent
+      return {
+        type,
+        usage: normalizeTokenUsage(event.usage),
+        semantics: event.semantics
+      }
     }
-    case 'response.completed':
-      boundedNonEmptyString(
+    case 'response.completed': {
+      const messageId = boundedNonEmptyString(
         event.messageId,
         'Assistant message id',
         MAX_NORMALIZED_IDENTIFIER_CHARACTERS
@@ -475,81 +562,159 @@ export function assertModelEvent(value: unknown): ModelEvent {
       if (typeof event.stopReason !== 'string' || !STOP_REASONS.has(event.stopReason as ModelStopReason)) {
         throw protocolProviderError(`Unknown model stop reason "${String(event.stopReason)}"`)
       }
-      optionalBoundedNonEmptyString(
+      const providerStopReason = optionalBoundedNonEmptyString(
         event.providerStopReason,
         'Provider stop reason',
         500
       )
-      if (event.usage !== undefined) assertTokenUsage(event.usage)
-      if (event.providerState !== undefined) assertProviderState(event.providerState)
-      if (event.checkpoint !== undefined) {
-        try {
-          assertBoundedProviderJson(
-            event.checkpoint,
-            'Provider checkpoint'
-          )
-        } catch (error) {
-          if (error instanceof ProviderError) throw error
-          throw protocolProviderError('Provider checkpoint is not JSON-safe', error)
-        }
+      const usage =
+        event.usage === undefined
+          ? undefined
+          : normalizeTokenUsage(event.usage)
+      const providerState =
+        event.providerState === undefined
+          ? undefined
+          : normalizeProviderState(event.providerState)
+      const checkpoint =
+        event.checkpoint === undefined
+          ? undefined
+          : cloneBoundedProviderJson(
+              event.checkpoint,
+              'Provider checkpoint'
+            )
+      return {
+        type,
+        messageId,
+        stopReason: event.stopReason as ModelStopReason,
+        ...(providerStopReason === undefined ? {} : { providerStopReason }),
+        ...(usage === undefined ? {} : { usage }),
+        ...(providerState === undefined ? {} : { providerState }),
+        ...(checkpoint === undefined ? {} : { checkpoint })
       }
-      return value as ModelEvent
+    }
     default:
       throw protocolProviderError(`Unknown normalized model event "${type}"`)
   }
 }
 
-function assertOutputPart(value: unknown): asserts value is OutputMessagePart {
+function normalizeOutputPart(value: unknown): OutputMessagePart {
   const part = asRecord(value, 'Output part')
   const kind = nonEmptyString(part.kind, 'Output part kind')
+  const providerState =
+    part.providerState === undefined
+      ? undefined
+      : normalizeProviderState(part.providerState)
   if (kind === 'text' || kind === 'reasoning-summary') {
-    boundedString(
+    const text = boundedString(
       part.text,
       `${kind} text`,
       kind === 'text'
         ? MAX_NORMALIZED_TEXT_CHARACTERS
         : MAX_NORMALIZED_REASONING_CHARACTERS
     )
-  } else if (kind === 'tool-call') {
-    boundedNonEmptyString(
+    return {
+      kind,
+      text,
+      ...(providerState === undefined ? {} : { providerState })
+    }
+  }
+  if (kind === 'tool-call') {
+    const callId = boundedNonEmptyString(
       part.callId,
       'Tool call id',
       MAX_NORMALIZED_IDENTIFIER_CHARACTERS
     )
-    boundedNonEmptyString(part.name, 'Tool name', 200)
-    boundedString(
+    const name = boundedNonEmptyString(part.name, 'Tool name', 200)
+    const rawArguments = boundedString(
       part.rawArguments,
       'Raw tool arguments',
       MAX_NORMALIZED_TOOL_ARGUMENT_CHARACTERS
     )
+    let args: JsonObject | undefined
     if (part.arguments !== undefined) {
       try {
         assertJsonObject(part.arguments, 'Tool arguments')
+        args = cloneJsonValue(part.arguments)
       } catch (error) {
         throw protocolProviderError('Tool arguments are not a JSON-safe object', error)
       }
     }
+    let parseError: string | undefined
     if (part.parseError !== undefined) {
-      boundedString(part.parseError, 'Tool parse error', 10_000)
+      parseError = boundedString(part.parseError, 'Tool parse error', 10_000)
     }
-  } else {
-    throw protocolProviderError(`Unsupported output part kind "${kind}"`)
+    return {
+      kind,
+      callId,
+      name,
+      rawArguments,
+      ...(args === undefined ? {} : { arguments: args }),
+      ...(parseError === undefined ? {} : { parseError }),
+      ...(providerState === undefined ? {} : { providerState })
+    }
   }
-  if (part.providerState !== undefined) assertProviderState(part.providerState)
+  throw protocolProviderError(`Unsupported output part kind "${kind}"`)
 }
 
-function assertProviderState(value: unknown): asserts value is ProviderState {
+function normalizeProviderState(value: unknown): ProviderState {
   const state = asRecord(value, 'Provider state')
-  boundedNonEmptyString(state.adapterId, 'Provider state adapter id', 200)
+  const adapterId = boundedNonEmptyString(
+    state.adapterId,
+    'Provider state adapter id',
+    200
+  )
   if (state.schemaVersion !== 1) {
     throw protocolProviderError('Provider state schemaVersion must be 1')
   }
   try {
-    assertBoundedProviderJson(state.data, 'Provider state data')
+    return {
+      adapterId,
+      schemaVersion: 1,
+      data: cloneBoundedProviderJson(state.data, 'Provider state data')
+    }
   } catch (error) {
     if (error instanceof ProviderError) throw error
     throw protocolProviderError('Provider state data is not JSON-safe', error)
   }
+}
+
+function cloneProviderState(state: ProviderState): ProviderState {
+  return {
+    adapterId: state.adapterId,
+    schemaVersion: 1,
+    data: cloneBoundedProviderJson(state.data, 'Provider state data')
+  }
+}
+
+function cloneOutputPart(part: OutputMessagePart): OutputMessagePart {
+  return normalizeOutputPart(part)
+}
+
+function cloneBoundedProviderJson(value: unknown, label: string): JsonValue {
+  try {
+    assertBoundedProviderJson(value, label)
+    return cloneJsonValue(value as JsonValue)
+  } catch (error) {
+    if (error instanceof ProviderError) throw error
+    throw protocolProviderError(`${label} is not JSON-safe`, error)
+  }
+}
+
+function cloneJsonValue<T extends JsonValue>(value: T): T {
+  if (value === null || typeof value !== 'object') return value
+  if (Array.isArray(value)) {
+    return value.map((entry) => cloneJsonValue(entry)) as T
+  }
+  const output: JsonObject = {}
+  for (const [key, entry] of Object.entries(value)) {
+    Object.defineProperty(output, key, {
+      configurable: true,
+      enumerable: true,
+      value: cloneJsonValue(entry),
+      writable: true
+    })
+  }
+  return output as T
 }
 
 function assertBoundedProviderJson(value: unknown, label: string): void {
@@ -594,7 +759,7 @@ function assertBoundedProviderJson(value: unknown, label: string): void {
   }
 }
 
-function assertTokenUsage(value: unknown): asserts value is TokenUsage {
+export function assertTokenUsage(value: unknown): asserts value is TokenUsage {
   const usage = asRecord(value, 'Token usage')
   for (const key of Object.keys(usage)) {
     if (!USAGE_KEYS.includes(key as keyof TokenUsage)) {
@@ -602,16 +767,49 @@ function assertTokenUsage(value: unknown): asserts value is TokenUsage {
     }
   }
   for (const key of USAGE_KEYS) {
-    if (usage[key] !== undefined) nonNegativeInteger(usage[key], key)
+    if (usage[key] === undefined) continue
+    if (key === 'costUsd') {
+      const cost = usage[key]
+      if (
+        typeof cost !== 'number' ||
+        !Number.isFinite(cost) ||
+        cost < 0 ||
+        cost > MAX_NORMALIZED_COST_USD
+      ) {
+        throw protocolProviderError(
+          `costUsd must be a finite non-negative number no greater than ${MAX_NORMALIZED_COST_USD}`
+        )
+      }
+    } else {
+      const count = nonNegativeInteger(usage[key], key)
+      if (count > MAX_NORMALIZED_TOKEN_COUNT) {
+        throw protocolProviderError(
+          `${key} must be no greater than ${MAX_NORMALIZED_TOKEN_COUNT}`
+        )
+      }
+    }
   }
 }
 
-function mergeUsage(
+function normalizeTokenUsage(value: unknown): TokenUsage {
+  assertTokenUsage(value)
+  const usage = value as TokenUsage
+  const normalized: Record<string, number> = {}
+  for (const key of USAGE_KEYS) {
+    const amount = usage[key]
+    if (amount !== undefined) normalized[key] = amount
+  }
+  return normalized
+}
+
+export function mergeTokenUsage(
   current: TokenUsage | undefined,
   update: TokenUsage,
   semantics: 'cumulative' | 'delta',
-  createError: (message: string) => ProviderError
+  createError: (message: string) => ProviderError = (message) =>
+    protocolProviderError(message)
 ): TokenUsage {
+  if (current) assertTokenUsage(current)
   assertTokenUsage(update)
   const merged: TokenUsage = { ...current }
   for (const key of USAGE_KEYS) {
@@ -619,9 +817,22 @@ function mergeUsage(
     if (next === undefined) continue
     const previous = merged[key]
     if (semantics === 'delta') {
-      merged[key] = (previous ?? 0) + next
+      const total = (previous ?? 0) + next
+      const maximum =
+        key === 'costUsd'
+          ? MAX_NORMALIZED_COST_USD
+          : MAX_NORMALIZED_TOKEN_COUNT
+      if (!Number.isFinite(total) || total > maximum) {
+        throw createError(`Usage field "${key}" exceeded its supported limit`)
+      }
+      merged[key] = total
     } else {
-      if (previous !== undefined && next < previous) {
+      const decreased =
+        previous !== undefined &&
+        (key === 'costUsd'
+          ? next + Math.max(1, previous, next) * 1e-12 < previous
+          : next < previous)
+      if (decreased) {
         throw createError(
           `Cumulative usage field "${key}" decreased from ${previous} to ${next}`
         )
@@ -696,10 +907,10 @@ function optionalBoundedNonEmptyString(
   value: unknown,
   label: string,
   maximumCharacters: number
-): void {
-  if (value !== undefined) {
-    boundedNonEmptyString(value, label, maximumCharacters)
-  }
+): string | undefined {
+  return value === undefined
+    ? undefined
+    : boundedNonEmptyString(value, label, maximumCharacters)
 }
 
 function nonNegativeInteger(value: unknown, label: string): number {

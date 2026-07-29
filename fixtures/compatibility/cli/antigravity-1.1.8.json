@@ -1,0 +1,153 @@
+{
+  "schemaVersion": 1,
+  "suite": {
+    "id": "antigravity-cli-1.1.8",
+    "kind": "cli",
+    "adapter": "antigravity",
+    "runtime": "Antigravity CLI",
+    "version": "1.1.8",
+    "fixtureDate": "2026-07-29",
+    "provenance": "documented-example",
+    "provenanceNote": "Envelope shapes are adapted from Google's public Antigravity CLI headless documentation reviewed with release 1.1.8; response text is shortened and input was not captured from a live or authenticated run.",
+    "liveCapture": false
+  },
+  "cases": [
+    {
+      "id": "documented-session-and-response",
+      "description": "Normalize the documented init, agent response, terminal response, and token usage envelopes.",
+      "inputEvents": [
+        {
+          "event": "init",
+          "conversation_id": "c3b66b04-872b-4fbe-a3a4-058a026ef20a",
+          "init": {
+            "cwd": "/home/user/project",
+            "tools": [
+              "ask_permission",
+              "run_command",
+              "write_to_file",
+              "..."
+            ],
+            "permission_mode": "request-review"
+          }
+        },
+        {
+          "event": "step_update",
+          "step_update": {
+            "conversation_id": "c3b66b04-872b-4fbe-a3a4-058a026ef20a",
+            "step_index": 3,
+            "state": "DONE",
+            "step_type": "agent_response",
+            "text_delta": "Git rebase rewrites a branch's commit history.\n",
+            "duration_seconds": 6.28,
+            "usage": {
+              "input_tokens": 10302,
+              "output_tokens": 582,
+              "thinking_tokens": 551,
+              "cache_read_tokens": 8113,
+              "total_tokens": 10884
+            }
+          }
+        },
+        {
+          "event": "result",
+          "result": {
+            "conversation_id": "c3b66b04-872b-4fbe-a3a4-058a026ef20a",
+            "status": "SUCCESS",
+            "response": "Git rebase rewrites a branch's commit history.\n",
+            "duration_seconds": 6.88,
+            "num_turns": 1,
+            "usage": {
+              "input_tokens": 10418,
+              "output_tokens": 589,
+              "thinking_tokens": 551,
+              "cache_read_tokens": 8113,
+              "total_tokens": 11007
+            }
+          }
+        }
+      ],
+      "expectedCanonicalEvents": [
+        {
+          "type": "session",
+          "sessionId": "c3b66b04-872b-4fbe-a3a4-058a026ef20a"
+        },
+        {
+          "type": "activity",
+          "activity": {
+            "activityType": "status",
+            "title": "Antigravity session ready",
+            "detail": "{\"permissionMode\":\"request-review\"}",
+            "status": "success"
+          }
+        },
+        {
+          "type": "session",
+          "sessionId": "c3b66b04-872b-4fbe-a3a4-058a026ef20a"
+        },
+        {
+          "type": "text",
+          "delta": "Git rebase rewrites a branch's commit history.\n"
+        },
+        {
+          "type": "session",
+          "sessionId": "c3b66b04-872b-4fbe-a3a4-058a026ef20a"
+        },
+        {
+          "type": "text",
+          "delta": "Git rebase rewrites a branch's commit history.\n",
+          "final": true
+        },
+        {
+          "type": "usage",
+          "usage": {
+            "inputTokens": 10418,
+            "outputTokens": 589,
+            "cachedInputTokens": 8113,
+            "reasoningTokens": 551,
+            "totalTokens": 11007
+          }
+        }
+      ]
+    },
+    {
+      "id": "documented-command-result",
+      "description": "Normalize the documented completed run_command tool step.",
+      "inputEvents": [
+        {
+          "event": "step_update",
+          "step_update": {
+            "conversation_id": "edb1c8c1-50ba-4f3f-87eb-412d0e9d47c3",
+            "step_index": 4,
+            "state": "DONE",
+            "step_type": "tool",
+            "tool_name": "run_command",
+            "duration_seconds": 0.07,
+            "tool_info": {
+              "name": "run_command",
+              "parameters": {
+                "CommandLine": "echo hello_headless_demo"
+              },
+              "output": "hello_headless_demo\r\n"
+            }
+          }
+        }
+      ],
+      "expectedCanonicalEvents": [
+        {
+          "type": "session",
+          "sessionId": "edb1c8c1-50ba-4f3f-87eb-412d0e9d47c3"
+        },
+        {
+          "type": "activity",
+          "activity": {
+            "runtimeId": "antigravity:4",
+            "activityType": "command",
+            "title": "run_command",
+            "detail": "\"hello_headless_demo\\r\\n\"",
+            "status": "success"
+          }
+        }
+      ]
+    }
+  ]
+}

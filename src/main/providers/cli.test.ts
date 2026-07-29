@@ -1,14 +1,19 @@
 import { realpath } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
-import type { CliProvider } from '../../shared/types'
+import type { CliAdapter, CliProvider } from '../../shared/types'
+import { CLI_RUNTIME_ADAPTER_IDS } from '../cli-runtime-bindings'
 import { createProcessLaunchEnvelope } from '../process-launch'
 import {
+  assertValidCliSessionId,
+  cliSessionIdContainsSensitiveValue,
   expandCliArgs,
   parseCliRuntimeEvent,
   runCli,
   safeCliEnvironment,
-  type CliInvocationAuthorizer
+  type CliInvocationAuthorizer,
+  type CliInvocationOptions,
+  type CliRunOptions
 } from './cli'
 
 function provider(overrides: Partial<CliProvider> = {}): CliProvider {
@@ -32,7 +37,17 @@ const authorizeFixture: CliInvocationAuthorizer = async (request) => ({
   launch: await createProcessLaunchEnvelope(request.command),
   cwd: await realpath(request.cwd)
 })
-const REDACTION_MARKER = '█'.repeat(5)
+const REDACTION_MARKER = '█'.repeat(4)
+
+function runOptions(
+  adapter: CliAdapter = 'generic',
+  overrides: CliInvocationOptions = {}
+): CliRunOptions {
+  return {
+    ...overrides,
+    runtimeAdapterId: CLI_RUNTIME_ADAPTER_IDS[adapter]
+  }
+}
 
 describe('CLI adapter', () => {
   it('expands each argv entry without invoking a shell', () => {
@@ -45,6 +60,19 @@ describe('CLI adapter', () => {
       args: ['--model=model-x', '--root=/tmp/work space', 'write $(touch nope)'],
       stdin: undefined
     })
+  })
+
+  it('keeps stdin prompts out of process arguments', () => {
+    expect(() =>
+      expandCliArgs(
+        provider({
+          args: ['run', '--prompt={prompt}'],
+          promptMode: 'stdin'
+        }),
+        'private prompt',
+        '/tmp/workspace'
+      )
+    ).toThrow(/stdin.*cannot.*process arguments/i)
   })
 
   it('streams plain CLI output', async () => {
@@ -61,7 +89,7 @@ describe('CLI adapter', () => {
         },
         onDiagnostic: () => undefined
       },
-      {},
+      runOptions(),
       authorizeFixture
     )
     expect(output).toBe('Received: hello')
@@ -81,7 +109,7 @@ describe('CLI adapter', () => {
         },
         onDiagnostic: () => undefined
       },
-      {},
+      runOptions(),
       authorizeFixture
     )
     expect(output).toBe('Received: hello')
@@ -106,7 +134,7 @@ describe('CLI adapter', () => {
         },
         onDiagnostic: () => undefined
       },
-      {},
+      runOptions(),
       authorizeFixture
     )
     expect(output).toBe('Received 🌱: hello')
@@ -125,7 +153,7 @@ describe('CLI adapter', () => {
           onText: () => undefined,
           onDiagnostic: () => undefined
         },
-        {},
+        runOptions(),
         authorizeFixture
       )
     ).rejects.toThrow(/text output exceeded/i)
@@ -144,7 +172,8 @@ describe('CLI adapter', () => {
         {
           onText: () => undefined,
           onDiagnostic: () => undefined
-        }
+        },
+        runOptions()
       )
     ).rejects.toMatchObject({ name: 'AbortError' })
   })
@@ -171,7 +200,10 @@ describe('CLI adapter', () => {
         process.cwd(),
         new AbortController().signal,
         { onText: () => undefined, onDiagnostic: () => undefined },
-        { mode: 'agent', sessionId: 'session-1' },
+        runOptions('claude', {
+          mode: 'agent',
+          sessionId: 'session-1'
+        }),
         authorize
       )
     ).rejects.toThrow('authorization stopped for inspection')
@@ -179,6 +211,8 @@ describe('CLI adapter', () => {
     expect(authorize).toHaveBeenCalledTimes(1)
     const request = authorize.mock.calls[0]?.[0]
     expect(request?.invocationSha256).toMatch(/^[a-f0-9]{64}$/)
+    expect(request?.runtimeAdapterId).toBe('anthropic.claude-code')
+    expect(request?.cliAdapter).toBe('claude')
     expect(request?.displayArgs).toContain('--model=model-x')
     expect(request?.displayArgs).toContain(`--workspace=${process.cwd()}`)
     expect(request?.displayArgs.join('\n')).toContain('<prompt omitted;')
@@ -190,6 +224,59 @@ describe('CLI adapter', () => {
       transport: 'argument',
       byteLength: Buffer.byteLength(secretPrompt)
     })
+  })
+
+  it('forwards a delegated runtime identity and rejects a forged built-in dialect pair', async () => {
+    const authorize = vi.fn<CliInvocationAuthorizer>(async () => {
+      throw new Error('authorization stopped for inspection')
+    })
+    const generic = provider({ cliAdapter: 'generic' })
+
+    await expect(
+      runCli(
+        generic,
+        'Inspect this workspace.',
+        process.cwd(),
+        new AbortController().signal,
+        { onText: () => undefined, onDiagnostic: () => undefined },
+        { runtimeAdapterId: 'community.example-runtime' },
+        authorize
+      )
+    ).rejects.toThrow('authorization stopped for inspection')
+    expect(authorize.mock.calls[0]?.[0]).toMatchObject({
+      runtimeAdapterId: 'community.example-runtime',
+      cliAdapter: 'generic'
+    })
+
+    authorize.mockClear()
+    await expect(
+      runCli(
+        generic,
+        'Inspect this workspace.',
+        process.cwd(),
+        new AbortController().signal,
+        { onText: () => undefined, onDiagnostic: () => undefined },
+        { runtimeAdapterId: 'openai.codex-cli' },
+        authorize
+      )
+    ).rejects.toThrow(/runtime adapter does not match/i)
+    expect(authorize).not.toHaveBeenCalled()
+  })
+
+  it('rejects an omitted runtime identity before native authorization', async () => {
+    const authorize = vi.fn(authorizeFixture)
+    await expect(
+      runCli(
+        provider(),
+        'Inspect this workspace.',
+        process.cwd(),
+        new AbortController().signal,
+        { onText: () => undefined, onDiagnostic: () => undefined },
+        {} as CliRunOptions,
+        authorize
+      )
+    ).rejects.toThrow(/runtime adapter identity is required/i)
+    expect(authorize).not.toHaveBeenCalled()
   })
 
   it('reuses an stdin launch identity across prompt contents but binds argument prompts', async () => {
@@ -205,7 +292,7 @@ describe('CLI adapter', () => {
         process.cwd(),
         new AbortController().signal,
         { onText: () => undefined, onDiagnostic: () => undefined },
-        {},
+        runOptions(profile.cliAdapter ?? 'generic'),
         inspect
       ).catch(() => undefined)
     }
@@ -214,6 +301,7 @@ describe('CLI adapter', () => {
     await invoke(provider({ args: ['agent'], promptMode: 'stdin' }), 'second private prompt')
     expect(requests[0]?.prompt).toEqual({ transport: 'stdin' })
     expect(requests[1]?.prompt).toEqual({ transport: 'stdin' })
+    expect(requests[0]?.runtimeAdapterId).toBe('ground.cli.generic')
     expect(requests[0]?.invocationSha256).toBe(requests[1]?.invocationSha256)
 
     await invoke(
@@ -236,11 +324,20 @@ describe('CLI adapter', () => {
         process.cwd(),
         new AbortController().signal,
         { onText: () => undefined, onDiagnostic: () => undefined },
-        { sessionId: 'valid\n--dangerously-skip-permissions' },
+        runOptions('claude', {
+          sessionId: 'valid\n--dangerously-skip-permissions'
+        }),
         authorize
       )
     ).rejects.toThrow(/session identifier/i)
     expect(authorize).not.toHaveBeenCalled()
+  })
+
+  it('aligns native session identifiers to the canonical 200-character limit', () => {
+    expect(() => assertValidCliSessionId(`s${'a'.repeat(199)}`)).not.toThrow()
+    expect(() => assertValidCliSessionId(`s${'a'.repeat(200)}`)).toThrow(
+      /1-200/
+    )
   })
 
   it('enforces conservative known-runtime arguments and strips bypass flags', () => {
@@ -299,6 +396,37 @@ describe('CLI adapter', () => {
       'auto_edit',
       '--resume',
       'gemini-session'
+    ])
+
+    const antigravity = expandCliArgs(
+      provider({
+        cliAdapter: 'antigravity',
+        model: '',
+        promptMode: 'argument',
+        args: [
+          '-p',
+          '{prompt}',
+          '--output-format',
+          'stream-json',
+          '--continue',
+          '--conversation=wrong-session',
+          '--mode=accept-edits',
+          '--dangerously-skip-permissions'
+        ]
+      }),
+      'inspect',
+      '/tmp/project',
+      { mode: 'ask', sessionId: 'antigravity-session' }
+    )
+    expect(antigravity.args).toEqual([
+      '-p',
+      'inspect',
+      '--output-format',
+      'stream-json',
+      '--mode',
+      'plan',
+      '--conversation',
+      'antigravity-session'
     ])
   })
 
@@ -439,6 +567,30 @@ describe('CLI adapter', () => {
       '--resume',
       'gemini-session'
     ])
+
+    const antigravity = expandCliArgs(
+      provider({
+        cliAdapter: 'antigravity',
+        model: 'gemini-3.6-pro',
+        promptMode: 'argument',
+        args: ['-p', '{prompt}', '--output-format', 'stream-json']
+      }),
+      'continue',
+      '/tmp/project',
+      { mode: 'agent', sessionId: 'antigravity-session' }
+    )
+    expect(antigravity.args).toEqual([
+      '-p',
+      'continue',
+      '--output-format',
+      'stream-json',
+      '--model',
+      'gemini-3.6-pro',
+      '--mode',
+      'accept-edits',
+      '--conversation',
+      'antigravity-session'
+    ])
   })
 
   it('rejects ambiguous Codex native-resume templates', () => {
@@ -479,9 +631,34 @@ describe('CLI adapter', () => {
     expect(
       parseCliRuntimeEvent('codex', {
         type: 'item.completed',
-        item: { type: 'agent_message', text: 'Done' }
+        item: { id: 'message-1', type: 'agent_message', text: 'Done' }
       })
     ).toEqual([{ type: 'text', delta: 'Done', final: true }])
+
+    expect(
+      parseCliRuntimeEvent('codex', {
+        type: 'item.updated',
+        item: {
+          id: 'command-1',
+          type: 'command_execution',
+          command: 'npm test',
+          aggregated_output: 'running',
+          exit_code: null,
+          status: 'in_progress'
+        }
+      })
+    ).toEqual([
+      {
+        type: 'activity',
+        activity: {
+          runtimeId: 'codex:command-1',
+          activityType: 'command',
+          title: 'npm test',
+          detail: '"running"',
+          status: 'running'
+        }
+      }
+    ])
 
     expect(
       parseCliRuntimeEvent('codex', {
@@ -491,7 +668,8 @@ describe('CLI adapter', () => {
           type: 'command_execution',
           command: 'npm test',
           aggregated_output: 'passed',
-          exit_code: 0
+          exit_code: 0,
+          status: 'completed'
         }
       })
     ).toEqual([
@@ -509,12 +687,58 @@ describe('CLI adapter', () => {
 
     expect(
       parseCliRuntimeEvent('codex', {
+        type: 'item.completed',
+        item: {
+          id: 'command-2',
+          type: 'command_execution',
+          command: 'git push',
+          aggregated_output: '',
+          exit_code: null,
+          status: 'declined'
+        }
+      })
+    ).toEqual([
+      {
+        type: 'activity',
+        activity: {
+          runtimeId: 'codex:command-2',
+          activityType: 'command',
+          title: 'git push',
+          detail: '""',
+          status: 'error'
+        }
+      }
+    ])
+
+    expect(
+      parseCliRuntimeEvent('codex', {
+        type: 'item.completed',
+        item: {
+          id: 'warning-1',
+          type: 'error',
+          message: 'An optional MCP server did not start'
+        }
+      })
+    ).toEqual([
+      {
+        type: 'activity',
+        activity: {
+          runtimeId: 'codex:warning-1',
+          activityType: 'error',
+          title: 'Codex reported an error',
+          detail: 'An optional MCP server did not start',
+          status: 'error'
+        }
+      }
+    ])
+
+    expect(
+      parseCliRuntimeEvent('codex', {
         type: 'turn.completed',
         usage: {
           input_tokens: 120,
           cached_input_tokens: 90,
-          output_tokens: 12,
-          reasoning_output_tokens: 5
+          output_tokens: 12
         }
       })
     ).toEqual([
@@ -533,7 +757,7 @@ describe('CLI adapter', () => {
           inputTokens: 120,
           outputTokens: 12,
           cachedInputTokens: 90,
-          reasoningTokens: 5
+          reasoningTokens: undefined
         }
       }
     ])
@@ -576,6 +800,93 @@ describe('CLI adapter', () => {
           title: 'Bash',
           detail: '{"command":"npm test"}',
           status: 'running'
+        }
+      }
+    ])
+
+    expect(
+      parseCliRuntimeEvent('claude', {
+        type: 'assistant',
+        session_id: 'claude-1',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              id: 'toolu_1',
+              name: 'Bash',
+              input: { command: 'npm test' }
+            },
+            {
+              type: 'tool_use',
+              id: 'toolu_2',
+              name: 'Read',
+              input: { file_path: 'package.json' }
+            }
+          ]
+        }
+      })
+    ).toEqual([
+      { type: 'session', sessionId: 'claude-1' },
+      {
+        type: 'activity',
+        activity: {
+          runtimeId: 'claude:toolu_1',
+          activityType: 'command',
+          title: 'Bash',
+          detail: '{"command":"npm test"}',
+          status: 'running'
+        }
+      },
+      {
+        type: 'activity',
+        activity: {
+          runtimeId: 'claude:toolu_2',
+          activityType: 'tool',
+          title: 'Read',
+          detail: '{"file_path":"package.json"}',
+          status: 'running'
+        }
+      }
+    ])
+
+    expect(
+      parseCliRuntimeEvent('claude', {
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_1',
+              content: 'passed'
+            },
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_2',
+              content: 'not found',
+              is_error: true
+            }
+          ]
+        }
+      })
+    ).toEqual([
+      {
+        type: 'activity',
+        activity: {
+          runtimeId: 'claude:toolu_1',
+          activityType: 'tool',
+          title: 'Claude tool result',
+          detail: '"passed"',
+          status: 'success'
+        }
+      },
+      {
+        type: 'activity',
+        activity: {
+          runtimeId: 'claude:toolu_2',
+          activityType: 'tool',
+          title: 'Claude tool result',
+          detail: '"not found"',
+          status: 'error'
         }
       }
     ])
@@ -644,6 +955,208 @@ describe('CLI adapter', () => {
         }
       }
     ])
+
+    expect(
+      parseCliRuntimeEvent('gemini', {
+        type: 'error',
+        severity: 'warning',
+        message: 'Loop detected, stopping execution'
+      })
+    ).toEqual([
+      {
+        type: 'diagnostic',
+        detail: 'Loop detected, stopping execution'
+      }
+    ])
+
+    expect(
+      parseCliRuntimeEvent('gemini', {
+        type: 'error',
+        severity: 'error',
+        message: 'Maximum session turns exceeded'
+      })
+    ).toEqual([
+      {
+        type: 'activity',
+        activity: {
+          activityType: 'error',
+          title: 'Gemini reported an error',
+          detail: 'Maximum session turns exceeded',
+          status: 'error'
+        }
+      }
+    ])
+  })
+
+  it('normalizes Antigravity headless sessions, text, tools, failures, and usage', () => {
+    expect(
+      parseCliRuntimeEvent('antigravity', {
+        event: 'init',
+        conversation_id: 'antigravity-session-1',
+        init: {
+          cwd: '/tmp/project',
+          tools: ['run_command'],
+          permission_mode: 'request-review'
+        }
+      })
+    ).toEqual([
+      { type: 'session', sessionId: 'antigravity-session-1' },
+      {
+        type: 'activity',
+        activity: {
+          activityType: 'status',
+          title: 'Antigravity session ready',
+          detail: '{"permissionMode":"request-review"}',
+          status: 'success'
+        }
+      }
+    ])
+
+    expect(
+      parseCliRuntimeEvent('antigravity', {
+        event: 'step_update',
+        step_update: {
+          conversation_id: 'antigravity-session-1',
+          step_index: 3,
+          state: 'ACTIVE',
+          step_type: 'agent_response',
+          text_delta: 'Working'
+        }
+      })
+    ).toEqual([
+      { type: 'session', sessionId: 'antigravity-session-1' },
+      { type: 'text', delta: 'Working' }
+    ])
+
+    expect(
+      parseCliRuntimeEvent('antigravity', {
+        event: 'step_update',
+        step_update: {
+          conversation_id: 'antigravity-session-1',
+          step_index: 4,
+          state: 'ACTIVE',
+          step_type: 'tool',
+          tool_name: 'run_command',
+          tool_info: {
+            name: 'run_command',
+            parameters: { CommandLine: 'npm test' }
+          }
+        }
+      })
+    ).toEqual([
+      { type: 'session', sessionId: 'antigravity-session-1' },
+      {
+        type: 'activity',
+        activity: {
+          runtimeId: 'antigravity:4',
+          activityType: 'command',
+          title: 'run_command',
+          detail: '{"CommandLine":"npm test"}',
+          status: 'running'
+        }
+      }
+    ])
+
+    expect(
+      parseCliRuntimeEvent('antigravity', {
+        event: 'step_update',
+        step_update: {
+          conversation_id: 'antigravity-session-1',
+          step_index: 4,
+          state: 'DONE',
+          step_type: 'tool',
+          tool_name: 'run_command',
+          tool_info: {
+            name: 'run_command',
+            parameters: { CommandLine: 'npm test' },
+            output: 'passed'
+          }
+        }
+      })
+    ).toEqual([
+      { type: 'session', sessionId: 'antigravity-session-1' },
+      {
+        type: 'activity',
+        activity: {
+          runtimeId: 'antigravity:4',
+          activityType: 'command',
+          title: 'run_command',
+          detail: '"passed"',
+          status: 'success'
+        }
+      }
+    ])
+
+    expect(
+      parseCliRuntimeEvent('antigravity', {
+        event: 'result',
+        result: {
+          conversation_id: 'antigravity-session-1',
+          status: 'SUCCESS',
+          response: 'Done.',
+          usage: {
+            input_tokens: 20,
+            output_tokens: 8,
+            thinking_tokens: 5,
+            cache_read_tokens: 11,
+            total_tokens: 28
+          }
+        }
+      })
+    ).toEqual([
+      { type: 'session', sessionId: 'antigravity-session-1' },
+      { type: 'text', delta: 'Done.', final: true },
+      {
+        type: 'usage',
+        usage: {
+          inputTokens: 20,
+          outputTokens: 8,
+          cachedInputTokens: 11,
+          reasoningTokens: 5,
+          totalTokens: 28
+        }
+      }
+    ])
+
+    expect(
+      parseCliRuntimeEvent('antigravity', {
+        event: 'result',
+        result: {
+          conversation_id: 'antigravity-session-1',
+          status: 'ERROR',
+          response: '',
+          error: 'invalid model selection',
+          usage: {
+            input_tokens: 0,
+            output_tokens: 0,
+            thinking_tokens: 0,
+            cache_read_tokens: 0,
+            total_tokens: 0
+          }
+        }
+      })
+    ).toEqual([
+      { type: 'session', sessionId: 'antigravity-session-1' },
+      {
+        type: 'activity',
+        activity: {
+          activityType: 'error',
+          title: 'Antigravity run failed',
+          detail: 'invalid model selection',
+          status: 'error'
+        }
+      },
+      {
+        type: 'usage',
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cachedInputTokens: 0,
+          reasoningTokens: 0,
+          totalTokens: 0
+        }
+      }
+    ])
   })
 
   it('inherits only adapter-scoped authentication and reviewed network variables', () => {
@@ -694,6 +1207,13 @@ describe('CLI adapter', () => {
     expect(gemini.OPENAI_API_KEY).toBeUndefined()
     expect(gemini.ANTHROPIC_API_KEY).toBeUndefined()
 
+    const antigravity = safeCliEnvironment('antigravity', source, 'linux')
+    expect(antigravity.GEMINI_API_KEY).toBeUndefined()
+    expect(antigravity.GOOGLE_API_KEY).toBeUndefined()
+    expect(antigravity.OPENAI_API_KEY).toBeUndefined()
+    expect(antigravity.ANTHROPIC_API_KEY).toBeUndefined()
+    expect(antigravity.HTTPS_PROXY).toBe('https://proxy.example.test')
+
     const generic = safeCliEnvironment('generic', source, 'linux')
     expect(generic.CODEX_API_KEY).toBeUndefined()
     expect(generic.OPENAI_API_KEY).toBeUndefined()
@@ -714,6 +1234,24 @@ describe('CLI adapter', () => {
     )
     expect(environment.CODEX_API_KEY).toBeUndefined()
     expect(environment.HTTPS_PROXY).toBeUndefined()
+  })
+
+  it('treats inherited Antigravity proxy credentials as sensitive', () => {
+    const previous = process.env.HTTPS_PROXY
+    const secret = 'proxy-session-secret'
+    process.env.HTTPS_PROXY = secret
+    try {
+      expect(
+        cliSessionIdContainsSensitiveValue(
+          provider({ cliAdapter: 'antigravity' }),
+          secret,
+          {}
+        )
+      ).toBe(true)
+    } finally {
+      if (previous === undefined) delete process.env.HTTPS_PROXY
+      else process.env.HTTPS_PROXY = previous
+    }
   })
 
   it('redacts an inherited adapter credential if the CLI echoes it', async () => {
@@ -742,7 +1280,7 @@ describe('CLI adapter', () => {
           },
           onDiagnostic: () => undefined
         },
-        {},
+        runOptions('codex'),
         authorizeFixture
       )
     } finally {
@@ -778,13 +1316,15 @@ describe('CLI adapter', () => {
         },
         onDiagnostic: () => undefined
       },
-      {},
+      runOptions(),
       authorize,
       { ACME_AGENT_TOKEN: secret }
     )
 
     expect(authorize).toHaveBeenCalledWith(
       expect.objectContaining({
+        runtimeAdapterId: 'ground.cli.generic',
+        cliAdapter: 'generic',
         environmentVariables: ['ACME_AGENT_TOKEN'],
         environmentFingerprint: fingerprint
       })
@@ -812,7 +1352,7 @@ describe('CLI adapter', () => {
           onText: () => undefined,
           onDiagnostic: () => undefined
         },
-        { sessionId: secret },
+        runOptions('codex', { sessionId: secret }),
         authorize,
         { ACME_AGENT_TOKEN: secret }
       )
@@ -846,7 +1386,7 @@ describe('CLI adapter', () => {
           onDiagnostic: () => undefined,
           onSession
         },
-        {},
+        runOptions('codex'),
         authorizeFixture,
         { ACME_AGENT_TOKEN: secret }
       )
@@ -892,7 +1432,7 @@ describe('CLI adapter', () => {
         onDiagnostic: () => undefined,
         onActivity: (activity) => activities.push(activity)
       },
-      {},
+      runOptions('codex'),
       authorizeFixture,
       {
         BOUNDARY_SECRET: boundarySecret,
@@ -952,7 +1492,7 @@ describe('CLI adapter', () => {
           diagnostic += value
         }
       },
-      {},
+      runOptions(),
       authorizeFixture,
       { ACME_AGENT_TOKEN: secret }
     )
@@ -960,6 +1500,41 @@ describe('CLI adapter', () => {
     expect(diagnostic).toContain(REDACTION_MARKER)
     expect(diagnostic).not.toContain(secret)
     expect(diagnostic).not.toContain(JSON.stringify(secret).slice(1, -1))
+  })
+
+  it('redacts and bounds structured warning diagnostics', async () => {
+    const secret = 'gemini-structured-warning-secret'
+    const diagnostics: string[] = []
+    await runCli(
+      provider({
+        cliAdapter: 'gemini',
+        model: '',
+        args: [
+          '-e',
+          'process.stdout.write(JSON.stringify({type:"error",severity:"warning",message:process.env.ACME_AGENT_TOKEN+"x".repeat(5000)})+"\\n")',
+          '--'
+        ],
+        outputMode: 'ndjson',
+        environmentVariables: ['ACME_AGENT_TOKEN'],
+        environmentFingerprint: 'e'.repeat(64)
+      }),
+      'hello',
+      process.cwd(),
+      new AbortController().signal,
+      {
+        onText: () => undefined,
+        onDiagnostic: (value) => {
+          diagnostics.push(value)
+        }
+      },
+      runOptions('gemini'),
+      authorizeFixture,
+      { ACME_AGENT_TOKEN: secret }
+    )
+
+    expect(diagnostics[0]?.length).toBeLessThanOrEqual(4_001)
+    expect(diagnostics[0]).toContain(REDACTION_MARKER)
+    expect(JSON.stringify(diagnostics)).not.toContain(secret)
   })
 
   it('uses a collision-free marker that cannot recreate another secret', async () => {
@@ -990,7 +1565,7 @@ describe('CLI adapter', () => {
         },
         onDiagnostic: () => undefined
       },
-      {},
+      runOptions(),
       authorizeFixture,
       customEnvironment
     )
@@ -1010,26 +1585,29 @@ describe('CLI adapter', () => {
     ).toThrow(/invalid value/i)
   })
 
-  it('bounds text again after credential redaction expansion', async () => {
-    await expect(
-      runCli(
-        provider({
-          model: '',
-          args: ['-e', 'process.stdout.write("aaaa".repeat(150000))'],
-          environmentVariables: ['ACME_AGENT_TOKEN'],
-          environmentFingerprint: 'f'.repeat(64)
-        }),
-        'hello',
-        process.cwd(),
-        new AbortController().signal,
-        {
-          onText: () => undefined,
-          onDiagnostic: () => undefined
+  it('never expands durable text characters while redacting credentials', async () => {
+    let output = ''
+    await runCli(
+      provider({
+        model: '',
+        args: ['-e', 'process.stdout.write("aaaa".repeat(150000))'],
+        environmentVariables: ['ACME_AGENT_TOKEN'],
+        environmentFingerprint: 'f'.repeat(64)
+      }),
+      'hello',
+      process.cwd(),
+      new AbortController().signal,
+      {
+        onText: (delta) => {
+          output += delta
         },
-        {},
-        authorizeFixture,
-        { ACME_AGENT_TOKEN: 'aaaa' }
-      )
-    ).rejects.toThrow(/after credential redaction/i)
+        onDiagnostic: () => undefined
+      },
+      runOptions(),
+      authorizeFixture,
+      { ACME_AGENT_TOKEN: 'aaaa' }
+    )
+    expect(output).toHaveLength(600_000)
+    expect(output).not.toContain('aaaa')
   })
 })

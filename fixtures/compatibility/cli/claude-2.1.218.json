@@ -1,0 +1,179 @@
+{
+  "schemaVersion": 1,
+  "suite": {
+    "id": "claude-code-2.1.218",
+    "kind": "cli",
+    "adapter": "claude",
+    "runtime": "Claude Code",
+    "version": "2.1.218",
+    "fixtureDate": "2026-07-29",
+    "provenance": "synthetic-contract",
+    "provenanceNote": "Hand-authored from Ground's reviewed parser contract for the locally observed help and embedded event-construction surfaces; not captured from a live or authenticated Claude Code run.",
+    "liveCapture": false
+  },
+  "cases": [
+    {
+      "id": "session-text-and-tool",
+      "description": "Normalize session initialization, streamed assistant text, and a Bash tool start.",
+      "inputEvents": [
+        {
+          "type": "system",
+          "subtype": "init",
+          "session_id": "claude-session-1",
+          "model": "claude-fixture",
+          "permission_mode": "plan"
+        },
+        {
+          "type": "stream_event",
+          "event": {
+            "type": "content_block_delta",
+            "delta": {
+              "type": "text_delta",
+              "text": "hello"
+            }
+          }
+        },
+        {
+          "type": "stream_event",
+          "event": {
+            "type": "content_block_start",
+            "content_block": {
+              "type": "tool_use",
+              "id": "toolu_1",
+              "name": "Bash",
+              "input": {
+                "command": "npm test"
+              }
+            }
+          }
+        }
+      ],
+      "expectedCanonicalEvents": [
+        {
+          "type": "session",
+          "sessionId": "claude-session-1"
+        },
+        {
+          "type": "activity",
+          "activity": {
+            "activityType": "status",
+            "title": "Claude session ready",
+            "detail": "{\"model\":\"claude-fixture\",\"permissionMode\":\"plan\"}",
+            "status": "success"
+          }
+        },
+        {
+          "type": "text",
+          "delta": "hello"
+        },
+        {
+          "type": "activity",
+          "activity": {
+            "runtimeId": "claude:toolu_1",
+            "activityType": "command",
+            "title": "Bash",
+            "detail": "{\"command\":\"npm test\"}",
+            "status": "running"
+          }
+        }
+      ]
+    },
+    {
+      "id": "result-and-usage",
+      "description": "Normalize a final result string and token/cost usage.",
+      "inputEvents": [
+        {
+          "type": "result",
+          "result": "Finished",
+          "total_cost_usd": 0.0025,
+          "usage": {
+            "input_tokens": 25,
+            "output_tokens": 7,
+            "cache_read_input_tokens": 4
+          }
+        }
+      ],
+      "expectedCanonicalEvents": [
+        {
+          "type": "text",
+          "delta": "Finished",
+          "final": true
+        },
+        {
+          "type": "usage",
+          "usage": {
+            "inputTokens": 25,
+            "outputTokens": 7,
+            "cachedInputTokens": 4,
+            "costUsd": 0.0025
+          }
+        }
+      ]
+    },
+    {
+      "id": "top-level-tool-lifecycle",
+      "description": "Normalize complete tool inputs and results from Claude's top-level assistant and user messages.",
+      "inputEvents": [
+        {
+          "type": "assistant",
+          "session_id": "claude-session-1",
+          "message": {
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_2",
+                "name": "Read",
+                "input": {
+                  "file_path": "package.json"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "session_id": "claude-session-1",
+          "message": {
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_2",
+                "content": "read complete"
+              }
+            ]
+          }
+        }
+      ],
+      "expectedCanonicalEvents": [
+        {
+          "type": "session",
+          "sessionId": "claude-session-1"
+        },
+        {
+          "type": "activity",
+          "activity": {
+            "runtimeId": "claude:toolu_2",
+            "activityType": "tool",
+            "title": "Read",
+            "detail": "{\"file_path\":\"package.json\"}",
+            "status": "running"
+          }
+        },
+        {
+          "type": "session",
+          "sessionId": "claude-session-1"
+        },
+        {
+          "type": "activity",
+          "activity": {
+            "runtimeId": "claude:toolu_2",
+            "activityType": "tool",
+            "title": "Claude tool result",
+            "detail": "\"read complete\"",
+            "status": "success"
+          }
+        }
+      ]
+    }
+  ]
+}

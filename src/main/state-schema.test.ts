@@ -71,24 +71,126 @@ function stateWithCliProvider(
   return state
 }
 
+function managedActivity(
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  const timestamp = '2026-07-28T12:00:00.000Z'
+  return {
+    id: 'managed-operation',
+    kind: 'activity',
+    runId: 'run-1',
+    callId: 'call-1',
+    activityType: 'tool',
+    title: 'Write src/app.ts',
+    toolName: 'write_file',
+    status: 'running',
+    createdAt: timestamp,
+    managedExecution: {
+      version: 1,
+      operationId: 'managed-operation',
+      claim: 'approved',
+      kind: 'workspace-write',
+      actionSha256: 'a'.repeat(64),
+      approvalSha256: 'b'.repeat(64),
+      phase: 'started',
+      startedAt: timestamp
+    },
+    ...overrides
+  }
+}
+
 describe('persisted task lifecycle validation', () => {
+  it('migrates version 1 documents through the current schema', () => {
+    expect(parsePersistedState(stateWithTask()).version).toBe(2)
+    expect(() =>
+      parsePersistedState({
+        ...(stateWithTask() as Record<string, unknown>),
+        version: 3
+      })
+    ).toThrow(/newer/i)
+  })
+
   it('accepts an inert archived task', () => {
     expect(parsePersistedState(stateWithTask()).tasks[0]?.archivedAt).toBe(
       '2026-07-28T12:00:00.000Z'
     )
   })
 
+  it('accepts bounded provider verification while keeping legacy profiles unverified', () => {
+    const legacy = parsePersistedState(stateWithTask())
+    expect(legacy.providers[0]?.verification).toBeUndefined()
+
+    const state = stateWithTask() as {
+      providers: Array<Record<string, unknown>>
+    }
+    state.providers[0]!.verification = {
+      status: 'passed',
+      scope: 'connection',
+      checkedAt: '2026-07-29T12:30:00.000Z'
+    }
+    expect(parsePersistedState(state).providers[0]?.verification).toEqual({
+      status: 'passed',
+      scope: 'connection',
+      checkedAt: '2026-07-29T12:30:00.000Z'
+    })
+
+    state.providers[0]!.verification = {
+      status: 'passed',
+      scope: 'connection',
+      checkedAt: '2026-07-29T12:30:00.000Z',
+      detail: 'Unbounded provider response text must not be persisted'
+    }
+    expect(() => parsePersistedState(state)).toThrow()
+  })
+
+  it('retains a bounded opaque API credential revision while accepting legacy profiles', () => {
+    const legacy = parsePersistedState(stateWithTask())
+    expect(
+      legacy.providers[0]?.kind === 'cli'
+        ? undefined
+        : legacy.providers[0]?.credentialRevision
+    ).toBeUndefined()
+
+    const state = stateWithTask() as {
+      providers: Array<Record<string, unknown>>
+    }
+    state.providers[0]!.hasApiKey = true
+    state.providers[0]!.credentialRevision = 'credential_revision-one'
+    const provider = parsePersistedState(state).providers[0]
+    if (!provider || provider.kind === 'cli') {
+      throw new Error('Expected an API provider')
+    }
+    expect(provider.credentialRevision).toBe('credential_revision-one')
+
+    state.providers[0]!.credentialRevision = 'x'.repeat(201)
+    expect(() => parsePersistedState(state)).toThrow()
+
+    state.providers[0]!.credentialRevision = 'credential_revision-one'
+    state.providers[0]!.hasApiKey = false
+    expect(() => parsePersistedState(state)).toThrow(/saved API key/i)
+  })
+
   it('requires consistent, safe CLI environment metadata', () => {
     const valid = parsePersistedState(
+      stateWithCliProvider({
+        environmentVariables: ['ACME_AGENT_TOKEN'],
+        environmentFingerprint: 'a'.repeat(64),
+        environmentRevision: 'b'.repeat(64)
+      })
+    )
+    expect(valid.providers[0]).toMatchObject({
+      environmentVariables: ['ACME_AGENT_TOKEN'],
+      environmentFingerprint: 'a'.repeat(64),
+      environmentRevision: 'b'.repeat(64)
+    })
+
+    const legacy = parsePersistedState(
       stateWithCliProvider({
         environmentVariables: ['ACME_AGENT_TOKEN'],
         environmentFingerprint: 'a'.repeat(64)
       })
     )
-    expect(valid.providers[0]).toMatchObject({
-      environmentVariables: ['ACME_AGENT_TOKEN'],
-      environmentFingerprint: 'a'.repeat(64)
-    })
+    expect(legacy.providers[0]).not.toHaveProperty('environmentRevision')
 
     expect(() =>
       parsePersistedState(
@@ -120,6 +222,22 @@ describe('persisted task lifecycle validation', () => {
         })
       )
     ).toThrow(/duplicated/i)
+    expect(() =>
+      parsePersistedState(
+        stateWithCliProvider({
+          environmentRevision: 'b'.repeat(64)
+        })
+      )
+    ).toThrow(/revision/i)
+    expect(() =>
+      parsePersistedState(
+        stateWithCliProvider({
+          environmentVariables: ['ACME_AGENT_TOKEN'],
+          environmentFingerprint: 'a'.repeat(64),
+          environmentRevision: 'too-short'
+        })
+      )
+    ).toThrow()
   })
 
   it('returns a normalized graph without unknown authority fields', () => {
@@ -136,6 +254,74 @@ describe('persisted task lifecycle validation', () => {
     expect(() => JSON.stringify(parsed)).not.toThrow()
   })
 
+  it('normalizes legacy CLI sessions into adapter and compatibility identities', () => {
+    const legacy = parsePersistedState(
+      stateWithTask({
+        runtimeSessions: {
+          'cli-provider': {
+            adapter: 'codex',
+            sessionId: 'session-1',
+            providerRevision: '2026-07-28T12:00:00.000Z',
+            workspacePath: '/workspace',
+            mode: 'agent',
+            updatedAt: '2026-07-28T12:00:00.000Z'
+          }
+        }
+      })
+    )
+    expect(legacy.tasks[0]?.runtimeSessions?.['cli-provider']).toEqual({
+      adapterId: 'openai.codex-cli',
+      sessionCompatibilityId: 'codex',
+      sessionId: 'session-1',
+      providerRevision: '2026-07-28T12:00:00.000Z',
+      workspacePath: '/workspace',
+      mode: 'agent',
+      updatedAt: '2026-07-28T12:00:00.000Z'
+    })
+
+    const canonical = parsePersistedState(
+      stateWithTask({
+        runtimeSessions: {
+          'cli-provider': {
+            adapterId: 'community.runtime',
+            sessionCompatibilityId: 'format-v2',
+            sessionId: 'session-2',
+            providerRevision: '2026-07-28T12:00:00.000Z',
+            workspacePath: '/workspace',
+            mode: 'ask',
+            updatedAt: '2026-07-28T12:00:00.000Z'
+          }
+        }
+      })
+    )
+    expect(canonical.tasks[0]?.runtimeSessions?.['cli-provider']).toMatchObject({
+      adapterId: 'community.runtime',
+      sessionCompatibilityId: 'format-v2',
+      sessionId: 'session-2',
+      mode: 'ask'
+    })
+  })
+
+  it('drops native sessions outside the canonical 200-character boundary', () => {
+    const parsed = parsePersistedState(
+      stateWithTask({
+        runtimeSessions: {
+          'cli-provider': {
+            adapterId: 'community.runtime',
+            sessionCompatibilityId: 'format-v2',
+            sessionId: 's'.repeat(201),
+            providerRevision: '2026-07-28T12:00:00.000Z',
+            workspacePath: '/workspace',
+            mode: 'agent',
+            updatedAt: '2026-07-28T12:00:00.000Z'
+          }
+        }
+      })
+    )
+
+    expect(parsed.tasks[0]?.runtimeSessions).toEqual({})
+  })
+
   it('rejects malformed archive timestamps and archived active runs', () => {
     expect(() =>
       parsePersistedState(stateWithTask({ archivedAt: 'yesterday' }))
@@ -148,6 +334,184 @@ describe('persisted task lifecycle validation', () => {
         stateWithTask({ runStatus: 'awaiting-approval' })
       )
     ).toThrow('Archived tasks cannot contain an active run')
+  })
+
+  it('accepts strict started, completed, and explicitly legacy uncertain execution markers', () => {
+    const started = parsePersistedState(
+      stateWithTask({
+        archivedAt: undefined,
+        runStatus: 'running',
+        items: [managedActivity()]
+      })
+    )
+    expect(
+      started.tasks[0]?.items[0]
+    ).toMatchObject({
+      status: 'running',
+      managedExecution: {
+        version: 1,
+        operationId: 'managed-operation',
+        claim: 'approved',
+        phase: 'started'
+      }
+    })
+
+    const completed = parsePersistedState(
+      stateWithTask({
+        archivedAt: undefined,
+        items: [
+          managedActivity({
+            status: 'success',
+            managedExecution: {
+              version: 1,
+              operationId: 'managed-operation',
+              claim: 'approved',
+              kind: 'workspace-write',
+              actionSha256: 'a'.repeat(64),
+              approvalSha256: 'b'.repeat(64),
+              phase: 'completed',
+              startedAt: '2026-07-28T12:00:00.000Z',
+              completedAt: '2026-07-28T12:00:01.000Z'
+            }
+          })
+        ]
+      })
+    )
+    expect(completed.tasks[0]?.items[0]).toMatchObject({
+      status: 'success',
+      managedExecution: { phase: 'completed' }
+    })
+
+    const legacy = parsePersistedState(
+      stateWithTask({
+        archivedAt: undefined,
+        items: [
+          managedActivity({
+            callId: undefined,
+            status: 'error',
+            managedExecution: {
+              version: 1,
+              operationId: 'managed-operation',
+              claim: 'legacy-untracked',
+              kind: 'workspace-write',
+              phase: 'uncertain',
+              startedAt: '2026-07-28T12:00:00.000Z',
+              interruptedAt: '2026-07-28T12:00:01.000Z'
+            }
+          })
+        ]
+      })
+    )
+    expect(legacy.tasks[0]?.items[0]).toMatchObject({
+      managedExecution: {
+        claim: 'legacy-untracked',
+        phase: 'uncertain'
+      }
+    })
+  })
+
+  it('rejects malformed or internally inconsistent managed execution claims', () => {
+    const invalidClaims = [
+      managedActivity({
+        managedExecution: {
+          version: 2,
+          operationId: 'managed-operation',
+          claim: 'approved',
+          kind: 'workspace-write',
+          actionSha256: 'a'.repeat(64),
+          approvalSha256: 'b'.repeat(64),
+          phase: 'started',
+          startedAt: '2026-07-28T12:00:00.000Z'
+        }
+      }),
+      managedActivity({
+        managedExecution: {
+          version: 1,
+          operationId: 'different-operation',
+          claim: 'approved',
+          kind: 'workspace-write',
+          actionSha256: 'not-a-hash',
+          approvalSha256: 'b'.repeat(64),
+          phase: 'started',
+          startedAt: '2026-07-28T12:00:00.000Z'
+        }
+      }),
+      managedActivity({
+        callId: undefined
+      }),
+      managedActivity({
+        toolName: 'run_command'
+      }),
+      managedActivity({
+        status: 'success'
+      }),
+      managedActivity({
+        status: 'success',
+        managedExecution: {
+          version: 1,
+          operationId: 'managed-operation',
+          claim: 'approved',
+          kind: 'workspace-write',
+          actionSha256: 'a'.repeat(64),
+          approvalSha256: 'b'.repeat(64),
+          phase: 'completed',
+          startedAt: '2026-07-28T12:00:02.000Z',
+          completedAt: '2026-07-28T12:00:01.000Z'
+        }
+      }),
+      managedActivity({
+        status: 'error',
+        managedExecution: {
+          version: 1,
+          operationId: 'managed-operation',
+          claim: 'legacy-untracked',
+          kind: 'workspace-write',
+          actionSha256: 'a'.repeat(64),
+          phase: 'uncertain',
+          startedAt: '2026-07-28T12:00:00.000Z',
+          interruptedAt: '2026-07-28T12:00:01.000Z'
+        }
+      })
+    ]
+
+    for (const activity of invalidClaims) {
+      expect(() =>
+        parsePersistedState(
+          stateWithTask({
+            archivedAt: undefined,
+            runStatus:
+              activity.status === 'running' ? 'running' : 'idle',
+            items: [activity]
+          })
+        )
+      ).toThrow()
+    }
+  })
+
+  it('rejects duplicate or conflicting approved claims for one run call', () => {
+    const duplicate = {
+      ...managedActivity(),
+      id: 'second-operation',
+      managedExecution: {
+        version: 1,
+        operationId: 'second-operation',
+        claim: 'approved',
+        kind: 'workspace-write',
+        actionSha256: 'c'.repeat(64),
+        approvalSha256: 'd'.repeat(64),
+        phase: 'started',
+        startedAt: '2026-07-28T12:00:00.000Z'
+      }
+    }
+    expect(() =>
+      parsePersistedState(
+        stateWithTask({
+          archivedAt: undefined,
+          runStatus: 'running',
+          items: [managedActivity(), duplicate]
+        })
+      )
+    ).toThrow(/conflicting action hashes/i)
   })
 
   it('migrates a missing or invalid default provider to the selected task provider', () => {

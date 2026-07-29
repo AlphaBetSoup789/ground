@@ -4,6 +4,7 @@ import {
   Archive,
   ChevronDown,
   CircleDot,
+  Command,
   FileUp,
   FolderOpen,
   Inbox,
@@ -15,17 +16,22 @@ import {
   TerminalSquare,
   X
 } from 'lucide-react'
-import type { AppSnapshot, Task } from '../../../shared/types'
-import { timeAgo, workspaceName } from '../lib/format'
+import type {
+  AppSnapshot,
+  DesktopTask
+} from '../../../shared/types'
+import { timeAgo } from '../lib/format'
 
 interface SidebarProps {
   open: boolean
+  backgroundInert?: boolean
   snapshot: AppSnapshot
   selectedTaskId?: string
   onSelectTask: (taskId: string) => void
   onCreateTask: () => void
   onChooseWorkspace: () => void
   onImportTask: () => void
+  onOpenCommands: () => void
   onOpenSettings: () => void
   onClose: () => void
 }
@@ -54,14 +60,7 @@ export function Sidebar(props: SidebarProps): React.JSX.Element {
       )
       return taskMatchesQuery(task, provider?.name, provider?.model, normalizedQuery)
     })
-    return Object.entries(
-      filtered.reduce<Record<string, Task[]>>((result, task) => {
-        const key = task.workspacePath ?? ''
-        result[key] ??= []
-        result[key].push(task)
-        return result
-      }, {})
-    )
+    return groupTasksByWorkspace(filtered)
   }, [
     normalizedQuery,
     props.snapshot.providers,
@@ -104,8 +103,8 @@ export function Sidebar(props: SidebarProps): React.JSX.Element {
     <aside
       className={`sidebar ${props.open ? 'sidebar-open' : 'sidebar-closed'}`}
       aria-label="Task navigation"
-      aria-hidden={!props.open}
-      inert={!props.open}
+      aria-hidden={!props.open || props.backgroundInert}
+      inert={!props.open || props.backgroundInert}
     >
       <div className="sidebar-drag-region">
         <div className="sidebar-brand">
@@ -231,11 +230,14 @@ export function Sidebar(props: SidebarProps): React.JSX.Element {
 
       <div className="task-groups" id="task-search-results">
         {groups.length ? (
-          groups.map(([workspacePath, tasks]) => (
-            <section className="task-group" key={workspacePath || 'scratch'}>
+          groups.map(([workspaceGrantId, tasks]) => (
+            <section
+              className="task-group"
+              key={workspaceGrantId || 'scratch'}
+            >
               <h2 className="task-group-header">
                 <ChevronDown size={12} />
-                <span>{workspaceName(workspacePath)}</span>
+                <span>{tasks[0]?.workspace?.name ?? 'No workspace'}</span>
                 <span className="task-count">{tasks.length}</span>
               </h2>
               <div className="task-list">
@@ -284,6 +286,17 @@ export function Sidebar(props: SidebarProps): React.JSX.Element {
       </div>
 
       <div className="sidebar-footer">
+        <button
+          type="button"
+          onClick={props.onOpenCommands}
+          aria-keyshortcuts="Meta+Shift+P Control+Shift+P F1"
+        >
+          <span className="footer-icon">
+            <Command size={15} />
+          </span>
+          Commands
+          <kbd>⇧⌘P / Ctrl⇧P</kbd>
+        </button>
         <button type="button" onClick={props.onOpenSettings}>
           <span className="footer-icon">
             <Settings2 size={15} />
@@ -300,7 +313,7 @@ export function Sidebar(props: SidebarProps): React.JSX.Element {
   )
 }
 
-function TaskStatus({ task }: { task: Task }): React.JSX.Element {
+function TaskStatus({ task }: { task: DesktopTask }): React.JSX.Element {
   if (task.archivedAt) {
     return (
       <span className="task-status archived" title="Archived">
@@ -348,16 +361,28 @@ const SEARCH_TIMELINE_ITEM_LIMIT = 80
 const SEARCH_TIMELINE_CHARACTER_LIMIT = 48_000
 const SEARCH_FIELD_CHARACTER_LIMIT = 4_000
 
+export function groupTasksByWorkspace(
+  tasks: readonly DesktopTask[]
+): Array<[string, DesktopTask[]]> {
+  return Object.entries(
+    tasks.reduce<Record<string, DesktopTask[]>>((result, task) => {
+      const key = task.workspace?.id ?? ''
+      result[key] ??= []
+      result[key].push(task)
+      return result
+    }, {})
+  )
+}
+
 export function taskMatchesQuery(
-  task: Task,
+  task: DesktopTask,
   providerName: string | undefined,
   providerModel: string | undefined,
   normalizedQuery: string
 ): boolean {
   const metadata = [
     task.title,
-    task.workspacePath,
-    workspaceName(task.workspacePath),
+    task.workspace?.name,
     providerName,
     providerModel
   ]

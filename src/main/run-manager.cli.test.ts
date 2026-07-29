@@ -10,8 +10,10 @@ import type {
   Task
 } from '../shared/types'
 import { createProcessLaunchEnvelope } from './process-launch'
+import { providerConfigurationFingerprint } from './provider-revision'
 import type { CliInvocationAuthorizer } from './providers/cli'
 import { RunManager } from './run-manager'
+import { BUILT_IN_CLI_RUNTIME_BINDINGS } from './cli-runtime-bindings'
 import { SecretVault } from './secrets'
 import { StateStore } from './store'
 
@@ -19,7 +21,7 @@ const authorizeFixture: CliInvocationAuthorizer = async (request) => ({
   launch: await createProcessLaunchEnvelope(request.command),
   cwd: await realpath(request.cwd)
 })
-const REDACTION_MARKER = '█'.repeat(5)
+const REDACTION_MARKER = '█'.repeat(4)
 
 const FIXTURE_SOURCE = `
 const dialect = process.argv.find((value) => value.startsWith('--dialect='))?.split('=')[1]
@@ -51,6 +53,72 @@ process.stdin.on('end', () => {
     emit({
       type: 'item.completed',
       item: { type: 'agent_message', text: 'Codex finished.' }
+    })
+    return
+  }
+  if (dialect === 'antigravity') {
+    emit({
+      event: 'init',
+      conversation_id: 'antigravity-session',
+      init: {
+        cwd: process.cwd(),
+        tools: ['run_command'],
+        permission_mode: 'request-review'
+      }
+    })
+    emit({
+      event: 'step_update',
+      step_update: {
+        conversation_id: 'antigravity-session',
+        step_index: 4,
+        state: 'ACTIVE',
+        step_type: 'tool',
+        tool_name: 'run_command',
+        tool_info: {
+          name: 'run_command',
+          parameters: { CommandLine: 'npm test' }
+        }
+      }
+    })
+    emit({
+      event: 'step_update',
+      step_update: {
+        conversation_id: 'antigravity-session',
+        step_index: 4,
+        state: 'DONE',
+        step_type: 'tool',
+        tool_name: 'run_command',
+        tool_info: {
+          name: 'run_command',
+          parameters: { CommandLine: 'npm test' },
+          output: 'passed'
+        }
+      }
+    })
+    emit({
+      event: 'step_update',
+      step_update: {
+        conversation_id: 'antigravity-session',
+        step_index: 5,
+        state: 'DONE',
+        step_type: 'agent_response',
+        text_delta: 'Antigravity finished.'
+      }
+    })
+    emit({
+      event: 'result',
+      result: {
+        conversation_id: 'antigravity-session',
+        status: 'SUCCESS',
+        response: 'Antigravity finished.',
+        usage: {
+          input_tokens: 5,
+          output_tokens: 2,
+          thinking_tokens: 1,
+          cache_read_tokens: 3,
+          total_tokens: 7
+        }
+      }
     })
     return
   }
@@ -112,6 +180,7 @@ async function runCliFixture(
     environmentSecret?: string
     emitSensitiveActivity?: boolean
     savedSessionId?: string
+    savedSessionEnvironmentRevision?: string
   } = {}
 ): Promise<{
   activities: ActivityItem[]
@@ -121,12 +190,13 @@ async function runCliFixture(
   terminal: RunEvent
 }> {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-cli-run-'))
-  const workspace = path.join(directory, 'workspace')
+  const workspaceCandidate = path.join(directory, 'workspace')
   const fixture = path.join(directory, 'runtime-fixture.mjs')
   await Promise.all([
-    mkdir(workspace),
+    mkdir(workspaceCandidate),
     writeFile(fixture, FIXTURE_SOURCE, { mode: 0o600 })
   ])
+  const workspace = await realpath(workspaceCandidate)
 
   const store = new StateStore(path.join(directory, 'state.json'))
   await store.load()
@@ -140,24 +210,39 @@ async function runCliFixture(
     args:
       adapter === 'codex'
         ? [fixture, 'exec', '--json', `--dialect=${adapter}`, '-']
-        : [
-            fixture,
-            `--dialect=${adapter}`,
-            ...(options.emitSensitiveActivity
-              ? ['--sensitive-runtime']
-              : []),
-            ...(options.stopAfterFirstRuntimeActivity ? ['--hold'] : [])
-          ],
-    promptMode: 'stdin',
+        : adapter === 'antigravity'
+          ? [
+              fixture,
+              `--dialect=${adapter}`,
+              '-p',
+              '{prompt}',
+              '--output-format',
+              'stream-json'
+            ]
+          : [
+              fixture,
+              `--dialect=${adapter}`,
+              ...(options.emitSensitiveActivity
+                ? ['--sensitive-runtime']
+                : []),
+              ...(options.stopAfterFirstRuntimeActivity ? ['--hold'] : [])
+            ],
+    promptMode: adapter === 'antigravity' ? 'argument' : 'stdin',
     outputMode: 'ndjson',
     cliAdapter: adapter,
     ...(options.environmentSecret
       ? {
           environmentVariables: ['ACME_AGENT_TOKEN'],
-          environmentFingerprint: 'f'.repeat(64)
+          environmentFingerprint: 'f'.repeat(64),
+          environmentRevision: 'e'.repeat(64)
         }
       : {}),
     trustConfirmed: true,
+    verification: {
+      status: 'passed',
+      scope: 'configuration',
+      checkedAt: timestamp
+    },
     createdAt: timestamp,
     updatedAt: timestamp
   }
@@ -166,11 +251,23 @@ async function runCliFixture(
   await store.mutateTask(task.id, (mutable) => {
     mutable.providerId = provider.id
     if (options.savedSessionId && adapter !== 'generic') {
+      const binding = BUILT_IN_CLI_RUNTIME_BINDINGS[adapter]
       mutable.runtimeSessions = {
         [provider.id]: {
-          adapter,
+          adapterId: binding.adapterId,
+          sessionCompatibilityId: binding.sessionCompatibilityId,
           sessionId: options.savedSessionId,
           providerRevision: provider.updatedAt,
+          providerFingerprint:
+            providerConfigurationFingerprint(
+              options.savedSessionEnvironmentRevision
+                ? {
+                    ...provider,
+                    environmentRevision:
+                      options.savedSessionEnvironmentRevision
+                  }
+                : provider
+            ),
           workspacePath: workspace,
           mode: 'agent',
           updatedAt: timestamp
@@ -208,7 +305,11 @@ async function runCliFixture(
       if (
         event.type === 'item-added' &&
         event.item.kind === 'activity' &&
-        event.item.callId
+        event.item.callId &&
+        (
+          !options.stopAfterFirstRuntimeActivity ||
+          event.item.title === 'read_file'
+        )
       ) {
         resolveRuntimeActivity()
       }
@@ -225,7 +326,9 @@ async function runCliFixture(
     async (request) => {
       authorizationArgs.push([...request.displayArgs])
       return authorizeFixture(request)
-    }
+    },
+    undefined,
+    (candidate) => realpath(candidate)
   )
 
   await manager.start(task.id, 'Inspect the workspace')
@@ -251,7 +354,9 @@ describe('RunManager CLI activity lifecycle', () => {
     const run = await runCliFixture('codex')
     expect(run.terminal).toMatchObject({ type: 'run-completed' })
     const command = run.activities.filter(
-      (item) => item.callId === 'codex:command-1'
+      (item) =>
+        item.activityType === 'command' &&
+        item.title === 'npm test'
     )
     expect(command).toHaveLength(1)
     expect(command[0]).toMatchObject({
@@ -261,11 +366,18 @@ describe('RunManager CLI activity lifecycle', () => {
       status: 'success'
     })
     expect(
-      run.activities.find((item) => item.callId === 'codex:inspection-1')
+      run.activities.find((item) => item.title === 'inspect_workspace')
     ).toMatchObject({ title: 'inspect_workspace', status: 'success' })
     expect(
-      run.activities.filter((item) => item.callId === 'codex:turn')
+      run.activities.filter((item) => item.title === 'Codex turn')
     ).toHaveLength(1)
+    expect(
+      run.activities
+        .filter((item) => item.callId)
+        .every((item) =>
+          /^runtime-activity_[0-9a-f-]{36}$/u.test(item.callId as string)
+        )
+    ).toBe(true)
     expect(run.activities.some((item) => item.status === 'running')).toBe(false)
   })
 
@@ -273,7 +385,9 @@ describe('RunManager CLI activity lifecycle', () => {
     const run = await runCliFixture('gemini')
     expect(run.terminal).toMatchObject({ type: 'run-completed' })
     const command = run.activities.filter(
-      (item) => item.callId === 'gemini:shell-1'
+      (item) =>
+        item.activityType === 'command' &&
+        item.title === 'run_shell_command'
     )
     expect(command).toHaveLength(1)
     expect(command[0]).toMatchObject({
@@ -283,13 +397,29 @@ describe('RunManager CLI activity lifecycle', () => {
       status: 'success'
     })
     expect(
-      run.activities.find((item) => item.callId === 'gemini:read-1')
+      run.activities.find((item) => item.title === 'read_file')
     ).toMatchObject({ title: 'read_file', status: 'success' })
     expect(
       run.activities.find(
-        (item) => item.title === 'search_file' && item.callId === undefined
+        (item) => item.title === 'search_file'
       )
     ).toMatchObject({ status: 'success' })
+    expect(run.activities.some((item) => item.status === 'running')).toBe(false)
+  })
+
+  it('runs Antigravity structured events through the canonical lifecycle', async () => {
+    const run = await runCliFixture('antigravity')
+    expect(run.terminal).toMatchObject({ type: 'run-completed' })
+    expect(
+      run.activities.find((item) => item.title === 'run_command')
+    ).toMatchObject({
+      activityType: 'command',
+      detail: '"passed"',
+      status: 'success'
+    })
+    expect(
+      run.task.runtimeSessions?.['antigravity-fixture']?.sessionId
+    ).toBe('antigravity-session')
     expect(run.activities.some((item) => item.status === 'running')).toBe(false)
   })
 
@@ -299,10 +429,10 @@ describe('RunManager CLI activity lifecycle', () => {
     })
     expect(run.terminal).toMatchObject({ type: 'run-stopped' })
     expect(
-      run.activities.find((item) => item.callId === 'gemini:held-1')
+      run.activities.find((item) => item.title === 'read_file')
     ).toMatchObject({
       status: 'error',
-      detail: expect.stringMatching(/run stopped before/i)
+      detail: expect.stringMatching(/cancelled|stopped before/i)
     })
     expect(run.activities.some((item) => item.status === 'running')).toBe(false)
   })
@@ -319,9 +449,10 @@ describe('RunManager CLI activity lifecycle', () => {
     )
     expect(sensitiveActivity).toMatchObject({
       detail: expect.stringContaining(REDACTION_MARKER),
-      status: 'success'
+      status: 'success',
+      callId: expect.stringMatching(/^runtime-activity_[0-9a-f-]{36}$/u)
     })
-    expect(sensitiveActivity).not.toHaveProperty('callId')
+    expect(sensitiveActivity?.callId).not.toContain(secret)
     expect(JSON.stringify(run.task)).not.toContain(secret)
   })
 
@@ -337,5 +468,20 @@ describe('RunManager CLI activity lifecycle', () => {
       run.task.runtimeSessions?.['gemini-fixture']?.sessionId
     ).toBe('gemini-session')
     expect(JSON.stringify(run.task)).not.toContain(secret)
+  })
+
+  it('does not resume a same-timestamp session after the CLI environment revision changes', async () => {
+    const previousSession = 'previous-environment-session'
+    const run = await runCliFixture('gemini', {
+      environmentSecret: 'current-environment-secret',
+      savedSessionId: previousSession,
+      savedSessionEnvironmentRevision: 'd'.repeat(64)
+    })
+
+    expect(run.terminal).toMatchObject({ type: 'run-completed' })
+    expect(run.authorizationArgs.flat()).not.toContain(previousSession)
+    expect(
+      run.task.runtimeSessions?.['gemini-fixture']?.sessionId
+    ).toBe('gemini-session')
   })
 })

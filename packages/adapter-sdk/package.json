@@ -1,0 +1,38 @@
+{
+  "name": "@ground-app/adapter-sdk",
+  "version": "0.1.0",
+  "description": "Versioned provider-neutral adapter contracts and conformance tools for Ground.",
+  "license": "MIT",
+  "author": "Ground contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AlphaBetSoup789/ground.git",
+    "directory": "packages/adapter-sdk"
+  },
+  "homepage": "https://github.com/AlphaBetSoup789/ground/tree/main/packages/adapter-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/AlphaBetSoup789/ground/issues"
+  },
+  "type": "commonjs",
+  "main": "./dist/sdk.js",
+  "types": "./dist/sdk.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/sdk.d.ts",
+      "require": "./dist/sdk.js",
+      "default": "./dist/sdk.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

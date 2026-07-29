@@ -1,6 +1,19 @@
 import { spawn } from 'node:child_process'
+import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
-import { access, lstat, realpath, stat } from 'node:fs/promises'
+import {
+  access,
+  link,
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  realpath,
+  rename,
+  stat,
+  unlink
+} from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
 import path from 'node:path'
 import { terminateProcessTree } from './process-tree'
 
@@ -20,6 +33,15 @@ const MAX_MUTATION_PATH_BYTES = 4_096
 const MAX_MUTATION_PATH_TOTAL_BYTES = 32_768
 const MAX_COMMIT_MESSAGE_BYTES = 65_536
 const MAX_IDENTITY_BYTES = 1_024
+const MAX_REVERT_PREVIEW_BYTES = 4_000_000
+const MAX_REVERT_FILE_BYTES = 32_000_000
+const MAX_REVERT_TOTAL_BYTES = 128_000_000
+const MAX_RECOVERY_MANIFEST_BYTES = 2_000_000
+const RECOVERY_DIRECTORY_NAME = '.ground-recovery'
+const RECOVERY_MANIFEST_NAME = 'manifest.json'
+const RECOVERY_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u
+const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 const SENSITIVE_METADATA_SEGMENTS = new Set(['.git', '.hg', '.svn'])
 
 type TerminationReason = 'abort' | 'timeout' | 'output-limit'
@@ -94,6 +116,12 @@ export interface GitServiceOptions {
    * system installation locations are searched.
    */
   gitExecutable?: string
+  /**
+   * Optional main-process trust callback. When provided, Ground invokes it
+   * immediately before every Git process launch and requires it to return the
+   * same canonical executable path selected when this service was opened.
+   */
+  revalidateGitExecutable?: () => Promise<string>
   timeoutMs?: number
   maxOutputBytes?: number
   signal?: AbortSignal
@@ -192,17 +220,139 @@ export interface PreparedGitPathMutation {
 }
 
 export interface PreparedGitCommit {
+  readonly version: 1
   readonly treeOid: string
   readonly expectedHeadOid: string | null
-  readonly branch: string | null
-  readonly detached: boolean
+  /** The exact checked-out local branch ref approved by the user. */
+  readonly symbolicRef: string
+  readonly branch: string
+  readonly detached: false
+  readonly repositoryIdentitySha256: string
+  readonly worktreeIdentitySha256: string
   readonly stagedPaths: readonly string[]
+  readonly message: string
+  readonly authorName: string
+  readonly authorEmail: string
+  readonly preview: string
+  readonly previewSha256: string
+  readonly actionSha256: string
 }
 
 export interface GitCommitOptions extends GitOperationOptions {
   message: string
   authorName: string
   authorEmail: string
+}
+
+interface FilesystemIdentity {
+  readonly device: string
+  readonly inode: string
+  readonly size: string
+  readonly mode: number
+  readonly modifiedNs: string
+  readonly changedNs: string
+}
+
+interface StableDirectoryBinding {
+  readonly canonicalPath: string
+  readonly identity: FilesystemIdentity
+}
+
+interface GitCommitAuthority {
+  readonly workspace: StableDirectoryBinding
+  readonly gitDirectory: StableDirectoryBinding
+  readonly commonDirectory: StableDirectoryBinding
+  readonly expectedHeadOid: string | null
+  readonly symbolicRef: string
+  readonly message: string
+  readonly authorName: string
+  readonly authorEmail: string
+}
+
+interface ParentDirectoryIdentity {
+  readonly relativePath: string
+  readonly identity: FilesystemIdentity
+}
+
+interface GitWorkingPathSnapshot {
+  readonly relativePath: string
+  readonly existed: boolean
+  readonly sha256?: string
+  readonly identity?: FilesystemIdentity
+  readonly parents: readonly ParentDirectoryIdentity[]
+}
+
+interface GitIndexEntry {
+  readonly relativePath: string
+  readonly mode: '100644' | '100755'
+  readonly oid: string
+}
+
+export interface PreparedGitPathRevert {
+  readonly version: 1
+  readonly trackedPaths: readonly string[]
+  readonly untrackedPaths: readonly string[]
+  readonly indexEntries: readonly GitIndexEntry[]
+  readonly workingSnapshots: readonly GitWorkingPathSnapshot[]
+  readonly preview: string
+  readonly previewSha256: string
+  readonly actionSha256: string
+}
+
+export type GitRecoveryStatus =
+  | 'applied'
+  | 'recovery-required'
+  | 'restored'
+
+export interface GitRecoverySummary {
+  readonly id: string
+  readonly createdAt: string
+  readonly status: GitRecoveryStatus
+  readonly trackedPaths: readonly string[]
+  readonly untrackedPaths: readonly string[]
+  readonly canUndo: boolean
+}
+
+export interface GitPathRevertResult {
+  readonly recovery: GitRecoverySummary
+}
+
+export interface PreparedGitRecoveryUndo {
+  readonly version: 1
+  readonly recoveryId: string
+  readonly manifestSha256: string
+  readonly currentSnapshots: readonly GitWorkingPathSnapshot[]
+  readonly preview: string
+  readonly previewSha256: string
+  readonly actionSha256: string
+}
+
+interface RecoveryTrackedEntry {
+  relativePath: string
+  indexEntry: GitIndexEntry
+  before: GitWorkingPathSnapshot
+  backupName?: string
+  after?: GitWorkingPathSnapshot
+}
+
+interface RecoveryUntrackedEntry {
+  relativePath: string
+  before: GitWorkingPathSnapshot
+  quarantineName: string
+  moved: boolean
+  after?: GitWorkingPathSnapshot
+}
+
+interface GitRecoveryManifest {
+  version: 1
+  id: string
+  createdAt: string
+  updatedAt: string
+  status: GitRecoveryStatus | 'prepared' | 'mutating' | 'undoing'
+  actionSha256: string
+  tracked: RecoveryTrackedEntry[]
+  untracked: RecoveryUntrackedEntry[]
+  error?: string
 }
 
 function samePath(left: string, right: string): boolean {
@@ -491,6 +641,51 @@ export async function resolveGitExecutable(
   return undefined
 }
 
+export function gitSupportsRequiredFeatures(versionOutput: string): boolean {
+  const match = /^git version (\d{1,9})\.(\d{1,9})(?:\.\d{1,9})?(?:[.\s-]|$)/u.exec(
+    versionOutput.trim()
+  )
+  if (!match) return false
+  const major = Number(match[1])
+  const minor = Number(match[2])
+  return major > 2 || (major === 2 && minor >= 23)
+}
+
+/**
+ * Probe an explicitly approved executable without involving repository
+ * configuration. Callers must still retain and revalidate their executable
+ * identity before every later launch.
+ */
+export async function verifyGitExecutableVersion(
+  explicitExecutable: string,
+  options: {
+    cwd: string
+    signal?: AbortSignal
+  }
+): Promise<string> {
+  const executable = await resolveGitExecutable(explicitExecutable)
+  if (!executable) {
+    throw new GitServiceError(
+      'NOT_FOUND',
+      'The selected Git executable is no longer available'
+    )
+  }
+  const cwd = await canonicalDirectory(options.cwd, 'Git probe directory')
+  const result = await runAbsoluteProcess(executable, ['--version'], {
+    cwd,
+    signal: options.signal,
+    timeoutMs: 5_000,
+    maxOutputBytes: 16_384
+  })
+  if (!gitSupportsRequiredFeatures(result.stdout)) {
+    throw new GitServiceError(
+      'INVALID_ARGUMENT',
+      'Ground requires Git 2.23 or newer'
+    )
+  }
+  return result.stdout.trim()
+}
+
 function parseStatus(output: string): GitStatusSummary {
   let branch: string | null = null
   let detached = false
@@ -705,6 +900,582 @@ function validateAuthorEmail(value: string): string {
   return normalized
 }
 
+function sha256(value: string | Buffer): string {
+  return createHash('sha256').update(value).digest('hex')
+}
+
+interface BigIntStatLike {
+  dev: bigint
+  ino: bigint
+  size: bigint
+  mode: bigint
+  mtimeNs: bigint
+  ctimeNs: bigint
+}
+
+function filesystemIdentity(details: BigIntStatLike): FilesystemIdentity {
+  return Object.freeze({
+    device: details.dev.toString(),
+    inode: details.ino.toString(),
+    size: details.size.toString(),
+    mode: Number(details.mode & 0o777n),
+    modifiedNs: details.mtimeNs.toString(),
+    changedNs: details.ctimeNs.toString()
+  })
+}
+
+function sameFilesystemIdentity(
+  left: Readonly<FilesystemIdentity> | undefined,
+  right: Readonly<FilesystemIdentity> | undefined
+): boolean {
+  return (
+    left !== undefined &&
+    right !== undefined &&
+    left.device === right.device &&
+    left.inode === right.inode &&
+    left.size === right.size &&
+    left.mode === right.mode &&
+    left.modifiedNs === right.modifiedNs &&
+    left.changedNs === right.changedNs
+  )
+}
+
+function sameParentDirectoryIdentity(
+  left: Readonly<FilesystemIdentity>,
+  right: Readonly<FilesystemIdentity>
+): boolean {
+  // Child creation/removal legitimately changes a directory's size and
+  // timestamps. The stable directory identity is its device/inode plus type
+  // and mode; every capture separately rejects symlinks and re-canonicalizes
+  // the full parent chain.
+  return (
+    left.device === right.device &&
+    left.inode === right.inode &&
+    left.mode === right.mode
+  )
+}
+
+function freezeStableDirectoryBinding(
+  binding: StableDirectoryBinding
+): StableDirectoryBinding {
+  return Object.freeze({
+    canonicalPath: binding.canonicalPath,
+    identity: Object.freeze({ ...binding.identity })
+  })
+}
+
+function sameStableDirectoryBinding(
+  left: Readonly<StableDirectoryBinding>,
+  right: Readonly<StableDirectoryBinding>
+): boolean {
+  return (
+    samePath(left.canonicalPath, right.canonicalPath) &&
+    sameParentDirectoryIdentity(left.identity, right.identity)
+  )
+}
+
+function stableDirectoryFingerprint(
+  label: 'repository' | 'worktree',
+  bindings: readonly Readonly<StableDirectoryBinding>[]
+): string {
+  return sha256(
+    JSON.stringify({
+      version: 1,
+      label,
+      directories: bindings.map((binding) => ({
+        canonicalPath:
+          process.platform === 'win32'
+            ? binding.canonicalPath.toLowerCase()
+            : binding.canonicalPath,
+        device: binding.identity.device,
+        inode: binding.identity.inode,
+        mode: binding.identity.mode
+      }))
+    })
+  )
+}
+
+function reviewedCommitValue(value: string): string {
+  return JSON.stringify(value).replace(
+    /[\u202a-\u202e\u2066-\u2069]/gu,
+    (character) =>
+      `\\u{${character.codePointAt(0)?.toString(16).padStart(4, '0')}}`
+  )
+}
+
+function preparedCommitFingerprint(
+  prepared: Omit<PreparedGitCommit, 'actionSha256'>
+): string {
+  return sha256(
+    JSON.stringify({
+      version: prepared.version,
+      treeOid: prepared.treeOid,
+      expectedHeadOid: prepared.expectedHeadOid,
+      symbolicRef: prepared.symbolicRef,
+      branch: prepared.branch,
+      detached: prepared.detached,
+      repositoryIdentitySha256: prepared.repositoryIdentitySha256,
+      worktreeIdentitySha256: prepared.worktreeIdentitySha256,
+      stagedPaths: prepared.stagedPaths,
+      message: prepared.message,
+      authorName: prepared.authorName,
+      authorEmail: prepared.authorEmail,
+      previewSha256: prepared.previewSha256
+    })
+  )
+}
+
+function freezeParentIdentity(
+  parent: ParentDirectoryIdentity
+): ParentDirectoryIdentity {
+  return Object.freeze({
+    relativePath: parent.relativePath,
+    identity: Object.freeze({ ...parent.identity })
+  })
+}
+
+function freezeWorkingSnapshot(
+  snapshot: GitWorkingPathSnapshot
+): GitWorkingPathSnapshot {
+  return Object.freeze({
+    relativePath: snapshot.relativePath,
+    existed: snapshot.existed,
+    ...(snapshot.sha256 ? { sha256: snapshot.sha256 } : {}),
+    ...(snapshot.identity
+      ? { identity: Object.freeze({ ...snapshot.identity }) }
+      : {}),
+    parents: Object.freeze(snapshot.parents.map(freezeParentIdentity))
+  })
+}
+
+function freezeIndexEntry(entry: GitIndexEntry): GitIndexEntry {
+  return Object.freeze({ ...entry })
+}
+
+function sameWorkingSnapshot(
+  left: Readonly<GitWorkingPathSnapshot>,
+  right: Readonly<GitWorkingPathSnapshot>
+): boolean {
+  if (
+    left.relativePath !== right.relativePath ||
+    left.existed !== right.existed ||
+    left.sha256 !== right.sha256 ||
+    !(
+      (left.identity === undefined && right.identity === undefined) ||
+      sameFilesystemIdentity(left.identity, right.identity)
+    ) ||
+    left.parents.length !== right.parents.length
+  ) {
+    return false
+  }
+  return left.parents.every((parent, index) => {
+    const candidate = right.parents[index]
+    return (
+      candidate !== undefined &&
+      parent.relativePath === candidate.relativePath &&
+      sameParentDirectoryIdentity(parent.identity, candidate.identity)
+    )
+  })
+}
+
+function sameWorkingFileState(
+  left: Readonly<GitWorkingPathSnapshot>,
+  right: Readonly<GitWorkingPathSnapshot>
+): boolean {
+  return (
+    left.relativePath === right.relativePath &&
+    left.existed === right.existed &&
+    left.sha256 === right.sha256 &&
+    ((left.identity === undefined && right.identity === undefined) ||
+      sameFilesystemIdentity(left.identity, right.identity))
+  )
+}
+
+function sameIndexEntry(
+  left: Readonly<GitIndexEntry>,
+  right: Readonly<GitIndexEntry>
+): boolean {
+  return (
+    left.relativePath === right.relativePath &&
+    left.mode === right.mode &&
+    left.oid === right.oid
+  )
+}
+
+function preparedRevertFingerprint(
+  prepared: Omit<PreparedGitPathRevert, 'actionSha256'>
+): string {
+  return sha256(
+    JSON.stringify({
+      version: prepared.version,
+      trackedPaths: prepared.trackedPaths,
+      untrackedPaths: prepared.untrackedPaths,
+      indexEntries: prepared.indexEntries,
+      workingSnapshots: prepared.workingSnapshots,
+      previewSha256: prepared.previewSha256
+    })
+  )
+}
+
+function preparedUndoFingerprint(
+  prepared: Omit<PreparedGitRecoveryUndo, 'actionSha256'>
+): string {
+  return sha256(
+    JSON.stringify({
+      version: prepared.version,
+      recoveryId: prepared.recoveryId,
+      manifestSha256: prepared.manifestSha256,
+      currentSnapshots: prepared.currentSnapshots,
+      previewSha256: prepared.previewSha256
+    })
+  )
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function requiredString(
+  record: Record<string, unknown>,
+  key: string,
+  maximum = 8_192
+): string {
+  const value = record[key]
+  if (
+    typeof value !== 'string' ||
+    value.length < 1 ||
+    value.length > maximum ||
+    value.includes('\0')
+  ) {
+    throw new GitServiceError(
+      'UNSAFE_CONFIGURATION',
+      'Git recovery manifest is invalid'
+    )
+  }
+  return value
+}
+
+function parseFilesystemIdentity(value: unknown): FilesystemIdentity {
+  if (!isRecord(value)) {
+    throw new GitServiceError(
+      'UNSAFE_CONFIGURATION',
+      'Git recovery manifest identity is invalid'
+    )
+  }
+  const device = requiredString(value, 'device', 100)
+  const inode = requiredString(value, 'inode', 100)
+  const size = requiredString(value, 'size', 100)
+  const modifiedNs = requiredString(value, 'modifiedNs', 100)
+  const changedNs = requiredString(value, 'changedNs', 100)
+  const mode = value.mode
+  if (
+    ![device, inode, size, modifiedNs, changedNs].every((candidate) =>
+      /^\d+$/u.test(candidate)
+    ) ||
+    typeof mode !== 'number' ||
+    !Number.isInteger(mode) ||
+    mode < 0 ||
+    mode > 0o777
+  ) {
+    throw new GitServiceError(
+      'UNSAFE_CONFIGURATION',
+      'Git recovery manifest identity is invalid'
+    )
+  }
+  return Object.freeze({
+    device,
+    inode,
+    size,
+    mode,
+    modifiedNs,
+    changedNs
+  })
+}
+
+function parseWorkingSnapshot(value: unknown): GitWorkingPathSnapshot {
+  if (!isRecord(value) || typeof value.existed !== 'boolean') {
+    throw new GitServiceError(
+      'UNSAFE_CONFIGURATION',
+      'Git recovery manifest path snapshot is invalid'
+    )
+  }
+  const relativePath = requiredString(value, 'relativePath')
+  if (!Array.isArray(value.parents) || value.parents.length > 512) {
+    throw new GitServiceError(
+      'UNSAFE_CONFIGURATION',
+      'Git recovery manifest parent snapshot is invalid'
+    )
+  }
+  const parents = value.parents.map((candidate): ParentDirectoryIdentity => {
+    if (!isRecord(candidate)) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        'Git recovery manifest parent snapshot is invalid'
+      )
+    }
+    return freezeParentIdentity({
+      relativePath: requiredString(candidate, 'relativePath'),
+      identity: parseFilesystemIdentity(candidate.identity)
+    })
+  })
+  if (!value.existed) {
+    if (value.sha256 !== undefined || value.identity !== undefined) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        'Git recovery manifest missing-path snapshot is invalid'
+      )
+    }
+    return freezeWorkingSnapshot({
+      relativePath,
+      existed: false,
+      parents
+    })
+  }
+  const digest = requiredString(value, 'sha256', 64)
+  if (!SHA256_PATTERN.test(digest)) {
+    throw new GitServiceError(
+      'UNSAFE_CONFIGURATION',
+      'Git recovery manifest path digest is invalid'
+    )
+  }
+  return freezeWorkingSnapshot({
+    relativePath,
+    existed: true,
+    sha256: digest,
+    identity: parseFilesystemIdentity(value.identity),
+    parents
+  })
+}
+
+function parseIndexEntry(value: unknown): GitIndexEntry {
+  if (!isRecord(value)) {
+    throw new GitServiceError(
+      'UNSAFE_CONFIGURATION',
+      'Git recovery manifest index entry is invalid'
+    )
+  }
+  const relativePath = requiredString(value, 'relativePath')
+  const mode = requiredString(value, 'mode', 6)
+  const oid = requiredString(value, 'oid', 64)
+  if (
+    (mode !== '100644' && mode !== '100755') ||
+    !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(oid)
+  ) {
+    throw new GitServiceError(
+      'UNSAFE_CONFIGURATION',
+      'Git recovery manifest index entry is invalid'
+    )
+  }
+  return freezeIndexEntry({ relativePath, mode, oid })
+}
+
+function recoveryPayloadName(value: unknown, prefix: string): string {
+  if (
+    typeof value !== 'string' ||
+    !new RegExp(`^${prefix}-\\d{6}\\.bin$`, 'u').test(value)
+  ) {
+    throw new GitServiceError(
+      'UNSAFE_CONFIGURATION',
+      'Git recovery manifest payload name is invalid'
+    )
+  }
+  return value
+}
+
+function parseRecoveryManifest(value: unknown): GitRecoveryManifest {
+  if (!isRecord(value) || value.version !== 1) {
+    throw new GitServiceError(
+      'UNSAFE_CONFIGURATION',
+      'Git recovery manifest is invalid'
+    )
+  }
+  const id = requiredString(value, 'id', 64)
+  const createdAt = requiredString(value, 'createdAt', 100)
+  const updatedAt = requiredString(value, 'updatedAt', 100)
+  const actionSha256 = requiredString(value, 'actionSha256', 64)
+  const status = value.status
+  if (
+    !RECOVERY_ID_PATTERN.test(id) ||
+    !SHA256_PATTERN.test(actionSha256) ||
+    ![
+      'prepared',
+      'mutating',
+      'applied',
+      'recovery-required',
+      'undoing',
+      'restored'
+    ].includes(typeof status === 'string' ? status : '') ||
+    !Array.isArray(value.tracked) ||
+    !Array.isArray(value.untracked) ||
+    value.tracked.length + value.untracked.length < 1 ||
+    value.tracked.length + value.untracked.length > MAX_MUTATION_PATHS
+  ) {
+    throw new GitServiceError(
+      'UNSAFE_CONFIGURATION',
+      'Git recovery manifest is invalid'
+    )
+  }
+
+  const tracked = value.tracked.map((candidate, index): RecoveryTrackedEntry => {
+    if (!isRecord(candidate)) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        'Git recovery tracked entry is invalid'
+      )
+    }
+    const before = parseWorkingSnapshot(candidate.before)
+    const relativePath = requiredString(candidate, 'relativePath')
+    if (before.relativePath !== relativePath) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        'Git recovery tracked entry does not match its path'
+      )
+    }
+    const backupName =
+      candidate.backupName === undefined
+        ? undefined
+        : recoveryPayloadName(candidate.backupName, 'tracked')
+    if (before.existed !== Boolean(backupName)) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        'Git recovery tracked backup is invalid'
+      )
+    }
+    const expectedName = `tracked-${index.toString().padStart(6, '0')}.bin`
+    if (backupName && backupName !== expectedName) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        'Git recovery tracked backup order is invalid'
+      )
+    }
+    return {
+      relativePath,
+      indexEntry: parseIndexEntry(candidate.indexEntry),
+      before,
+      ...(backupName ? { backupName } : {}),
+      ...(candidate.after === undefined
+        ? {}
+        : { after: parseWorkingSnapshot(candidate.after) })
+    }
+  })
+  const untracked = value.untracked.map(
+    (candidate, index): RecoveryUntrackedEntry => {
+      if (!isRecord(candidate) || typeof candidate.moved !== 'boolean') {
+        throw new GitServiceError(
+          'UNSAFE_CONFIGURATION',
+          'Git recovery untracked entry is invalid'
+        )
+      }
+      const before = parseWorkingSnapshot(candidate.before)
+      const relativePath = requiredString(candidate, 'relativePath')
+      const quarantineName = recoveryPayloadName(
+        candidate.quarantineName,
+        'untracked'
+      )
+      if (
+        !before.existed ||
+        before.relativePath !== relativePath ||
+        quarantineName !==
+          `untracked-${index.toString().padStart(6, '0')}.bin`
+      ) {
+        throw new GitServiceError(
+          'UNSAFE_CONFIGURATION',
+          'Git recovery untracked entry does not match its path'
+        )
+      }
+      return {
+        relativePath,
+        before,
+        quarantineName,
+        moved: candidate.moved,
+        ...(candidate.after === undefined
+          ? {}
+          : { after: parseWorkingSnapshot(candidate.after) })
+      }
+    }
+  )
+
+  for (const entry of tracked) {
+    if (entry.indexEntry.relativePath !== entry.relativePath) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        'Git recovery index entry does not match its path'
+      )
+    }
+  }
+
+  return {
+    version: 1,
+    id,
+    createdAt,
+    updatedAt,
+    status: status as GitRecoveryManifest['status'],
+    actionSha256,
+    tracked,
+    untracked,
+    ...(typeof value.error === 'string'
+      ? { error: value.error.slice(0, 4_000) }
+      : {})
+  }
+}
+
+async function syncDirectory(directory: string): Promise<void> {
+  try {
+    const handle = await open(directory, constants.O_RDONLY)
+    try {
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+  } catch (error) {
+    // Windows and some filesystems do not support fsync on directories. Real
+    // I/O failures still fail closed before the workspace mutation continues.
+    if (
+      !['EINVAL', 'EPERM', 'EISDIR', 'ENOTSUP', 'EBADF'].includes(
+        (error as NodeJS.ErrnoException).code ?? ''
+      )
+    ) {
+      throw error
+    }
+  }
+}
+
+async function readExactlyBounded(
+  handle: FileHandle,
+  expectedBytes: number,
+  maximumBytes: number
+): Promise<Buffer> {
+  if (
+    !Number.isSafeInteger(expectedBytes) ||
+    expectedBytes < 0 ||
+    expectedBytes > maximumBytes
+  ) {
+    throw new GitServiceError(
+      'OUTPUT_LIMIT',
+      'File exceeds Ground’s bounded recovery read limit'
+    )
+  }
+  const bounded = Buffer.allocUnsafe(expectedBytes + 1)
+  let offset = 0
+  while (offset < bounded.byteLength) {
+    const { bytesRead } = await handle.read(
+      bounded,
+      offset,
+      bounded.byteLength - offset,
+      null
+    )
+    if (bytesRead === 0) break
+    offset += bytesRead
+  }
+  if (offset !== expectedBytes) {
+    throw new GitServiceError(
+      'UNSAFE_PATH',
+      'File changed while Ground was reading its bounded snapshot'
+    )
+  }
+  return Buffer.from(bounded.subarray(0, offset))
+}
+
 export class GitWorkspaceService {
   readonly gitExecutable: string
   private readonly workspacePath: string
@@ -713,14 +1484,17 @@ export class GitWorkspaceService {
   private readonly maxOutputBytes: number
   private readonly filterDiscovery = new Map<string, Promise<string[]>>()
   private readonly preparedPathMutations = new WeakSet<object>()
-  private readonly preparedCommits = new WeakSet<object>()
+  private readonly preparedCommits = new WeakMap<object, GitCommitAuthority>()
+  private readonly preparedPathReverts = new WeakSet<object>()
+  private readonly preparedRecoveryUndos = new WeakSet<object>()
 
   private constructor(
     gitExecutable: string,
     workspacePath: string,
     worktreeRoot: string,
     defaultTimeoutMs: number,
-    maxOutputBytes: number
+    maxOutputBytes: number,
+    private readonly revalidateGitExecutable?: () => Promise<string>
   ) {
     this.gitExecutable = gitExecutable
     this.workspacePath = workspacePath
@@ -762,15 +1536,19 @@ export class GitWorkspaceService {
       workspacePath,
       worktreeRoot,
       timeoutMs,
-      maxOutputBytes
+      maxOutputBytes,
+      options.revalidateGitExecutable
     )
     const version = await service.runGit(['--version'], {
       signal: options.signal,
       timeoutMs,
       maxOutputBytes: 16_384
     })
-    if (!/^git version \d/u.test(version.stdout.trim())) {
-      throw new GitServiceError('INVALID_ARGUMENT', 'Configured executable is not Git')
+    if (!gitSupportsRequiredFeatures(version.stdout)) {
+      throw new GitServiceError(
+        'INVALID_ARGUMENT',
+        'Ground requires Git 2.23 or newer'
+      )
     }
     let topLevel: ProcessResult
     try {
@@ -814,6 +1592,7 @@ export class GitWorkspaceService {
   ): Promise<ProcessResult> {
     const cwd = options.cwd ?? this.workspacePath
     await this.assertPinnedDirectory(cwd, 'Git working directory')
+    await this.currentGitExecutable()
     const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null'
     const baseArguments = [
       '--no-pager',
@@ -834,10 +1613,11 @@ export class GitWorkspaceService {
       ? await this.discoverFilterOverrides(cwd, {
           signal: options.signal,
           timeoutMs: options.timeoutMs
-        })
+      })
       : []
+    const executable = await this.currentGitExecutable()
     return runAbsoluteProcess(
-      this.gitExecutable,
+      executable,
       [
         ...baseArguments,
         ...filterOverrides,
@@ -851,6 +1631,27 @@ export class GitWorkspaceService {
         allowTruncation: options.allowTruncation
       }
     )
+  }
+
+  private async currentGitExecutable(): Promise<string> {
+    if (!this.revalidateGitExecutable) return this.gitExecutable
+    let executable: string
+    try {
+      executable = await this.revalidateGitExecutable()
+    } catch (error) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        'The trusted Git executable changed or became unavailable',
+        { cause: error }
+      )
+    }
+    if (!samePath(executable, this.gitExecutable)) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        'Git executable trust resolved to a different path'
+      )
+    }
+    return executable
   }
 
   /**
@@ -872,8 +1673,9 @@ export class GitWorkspaceService {
       const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null'
       let result: ProcessResult
       try {
+        const executable = await this.currentGitExecutable()
         result = await runAbsoluteProcess(
-          this.gitExecutable,
+          executable,
           [
             '--no-pager',
             '-c',
@@ -1028,6 +1830,1587 @@ export class GitWorkspaceService {
     return resolved
   }
 
+  private async parentDirectorySnapshots(
+    relativePath: string
+  ): Promise<readonly ParentDirectoryIdentity[]> {
+    const segments = relativePath.split(path.sep)
+    segments.pop()
+    const directories = [this.workspacePath]
+    let current = this.workspacePath
+    for (const segment of segments) {
+      current = path.join(current, segment)
+      directories.push(current)
+    }
+
+    const snapshots: ParentDirectoryIdentity[] = []
+    for (const directory of directories) {
+      let details: Awaited<ReturnType<typeof lstat>>
+      try {
+        details = await lstat(directory, { bigint: true })
+      } catch (error) {
+        throw new GitServiceError(
+          'UNSAFE_PATH',
+          `Selected path parent does not exist: ${toDisplayPath(relativePath)}`,
+          { cause: error }
+        )
+      }
+      if (details.isSymbolicLink() || !details.isDirectory()) {
+        throw new GitServiceError(
+          'UNSAFE_PATH',
+          `Selected path parent is not a regular directory: ${toDisplayPath(relativePath)}`
+        )
+      }
+      const canonical = await realpath(directory)
+      if (
+        !samePath(canonical, directory) ||
+        (!samePath(canonical, this.workspacePath) &&
+          !isPathInside(this.workspacePath, canonical))
+      ) {
+        throw new GitServiceError(
+          'UNSAFE_PATH',
+          `Selected path parent leaves the workspace: ${toDisplayPath(relativePath)}`
+        )
+      }
+      snapshots.push(
+        freezeParentIdentity({
+          relativePath:
+            samePath(directory, this.workspacePath)
+              ? '.'
+              : path.relative(this.workspacePath, directory),
+          identity: filesystemIdentity(details)
+        })
+      )
+    }
+    return Object.freeze(snapshots)
+  }
+
+  private async captureWorkspacePath(
+    relativePath: string,
+    allowMissing: boolean
+  ): Promise<{
+    snapshot: GitWorkingPathSnapshot
+    contents?: Buffer
+  }> {
+    const target = this.resolveWorkspacePath(relativePath)
+    const parents = await this.parentDirectorySnapshots(target.relative)
+    let lexicalDetails: Awaited<ReturnType<typeof lstat>>
+    try {
+      lexicalDetails = await lstat(target.absolute, { bigint: true })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && allowMissing) {
+        return {
+          snapshot: freezeWorkingSnapshot({
+            relativePath: target.relative,
+            existed: false,
+            parents
+          })
+        }
+      }
+      throw new GitServiceError(
+        'NOT_FOUND',
+        `Selected path does not exist: ${toDisplayPath(target.relative)}`,
+        { cause: error }
+      )
+    }
+    if (lexicalDetails.isSymbolicLink() || !lexicalDetails.isFile()) {
+      throw new GitServiceError(
+        'UNSAFE_PATH',
+        `Selected path must be a regular file, not a directory, symlink, or submodule: ${toDisplayPath(target.relative)}`
+      )
+    }
+    if (lexicalDetails.size > BigInt(MAX_REVERT_FILE_BYTES)) {
+      throw new GitServiceError(
+        'OUTPUT_LIMIT',
+        `Selected file exceeds the ${MAX_REVERT_FILE_BYTES} byte recovery limit: ${toDisplayPath(target.relative)}`
+      )
+    }
+    const canonical = await realpath(target.absolute)
+    if (!samePath(canonical, target.absolute)) {
+      throw new GitServiceError(
+        'UNSAFE_PATH',
+        `Selected path is not canonical: ${toDisplayPath(target.relative)}`
+      )
+    }
+
+    const noFollow =
+      typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0
+    const handle = await open(target.absolute, constants.O_RDONLY | noFollow)
+    try {
+      const before = await handle.stat({ bigint: true })
+      if (
+        !before.isFile() ||
+        before.dev !== lexicalDetails.dev ||
+        before.ino !== lexicalDetails.ino ||
+        before.size > BigInt(MAX_REVERT_FILE_BYTES)
+      ) {
+        throw new GitServiceError(
+          'UNSAFE_PATH',
+          `Selected path changed while it was inspected: ${toDisplayPath(target.relative)}`
+        )
+      }
+      const contents = await readExactlyBounded(
+        handle,
+        Number(before.size),
+        MAX_REVERT_FILE_BYTES
+      )
+      const after = await handle.stat({ bigint: true })
+      if (
+        contents.byteLength !== Number(before.size) ||
+        before.dev !== after.dev ||
+        before.ino !== after.ino ||
+        before.size !== after.size ||
+        before.mtimeNs !== after.mtimeNs ||
+        before.ctimeNs !== after.ctimeNs
+      ) {
+        throw new GitServiceError(
+          'UNSAFE_PATH',
+          `Selected path changed while it was read: ${toDisplayPath(target.relative)}`
+        )
+      }
+      return {
+        snapshot: freezeWorkingSnapshot({
+          relativePath: target.relative,
+          existed: true,
+          sha256: sha256(contents),
+          identity: filesystemIdentity(after),
+          parents
+        }),
+        contents
+      }
+    } finally {
+      await handle.close()
+    }
+  }
+
+  private async captureIndexEntries(
+    paths: readonly string[],
+    options: GitOperationOptions = {}
+  ): Promise<readonly GitIndexEntry[]> {
+    if (paths.length === 0) return Object.freeze([])
+    const result = await this.runGit(
+      ['ls-files', '--stage', '-z', '--', ...paths],
+      {
+        signal: options.signal,
+        timeoutMs: this.operationTimeout(options),
+        maxOutputBytes: Math.min(this.maxOutputBytes, 2_000_000)
+      }
+    )
+    const entriesByPath = new Map<string, GitIndexEntry[]>()
+    for (const record of result.stdout.split('\0').filter(Boolean)) {
+      const separator = record.indexOf('\t')
+      if (separator < 0) {
+        throw new GitServiceError(
+          'COMMAND_FAILED',
+          'Git returned an invalid index entry'
+        )
+      }
+      const header = record.slice(0, separator)
+      const rawPath = record.slice(separator + 1)
+      const match = /^([0-7]{6}) ([0-9a-f]{40}|[0-9a-f]{64}) ([0-3])$/u.exec(
+        header
+      )
+      if (!match) {
+        throw new GitServiceError(
+          'COMMAND_FAILED',
+          'Git returned an invalid index entry'
+        )
+      }
+      const normalizedPath = this.resolveWorkspacePath(rawPath).relative
+      const mode = match[1]
+      if (match[3] !== '0') {
+        throw new GitServiceError(
+          'INVALID_ARGUMENT',
+          `Conflicted paths cannot be restored in Ground: ${toDisplayPath(normalizedPath)}`
+        )
+      }
+      if (mode === '160000') {
+        throw new GitServiceError(
+          'INVALID_ARGUMENT',
+          `Submodules cannot be restored in Ground: ${toDisplayPath(normalizedPath)}`
+        )
+      }
+      if (mode === '120000') {
+        throw new GitServiceError(
+          'INVALID_ARGUMENT',
+          `Tracked symlinks cannot be restored in Ground: ${toDisplayPath(normalizedPath)}`
+        )
+      }
+      if (mode !== '100644' && mode !== '100755') {
+        throw new GitServiceError(
+          'INVALID_ARGUMENT',
+          `Unsupported tracked file mode for restore: ${toDisplayPath(normalizedPath)}`
+        )
+      }
+      const entry = freezeIndexEntry({
+        relativePath: normalizedPath,
+        mode,
+        oid: match[2] as string
+      })
+      const existing = entriesByPath.get(normalizedPath) ?? []
+      existing.push(entry)
+      entriesByPath.set(normalizedPath, existing)
+    }
+
+    return Object.freeze(
+      paths.map((selectedPath) => {
+        const entries = entriesByPath.get(selectedPath)
+        if (!entries || entries.length !== 1) {
+          throw new GitServiceError(
+            'INVALID_ARGUMENT',
+            `Selected tracked path no longer has one ordinary index entry: ${toDisplayPath(selectedPath)}`
+          )
+        }
+        return entries[0] as GitIndexEntry
+      })
+    )
+  }
+
+  private async selectedWorkingDiff(
+    trackedPaths: readonly string[],
+    options: GitOperationOptions = {}
+  ): Promise<string> {
+    if (trackedPaths.length === 0) return ''
+    const previewLimit = Math.min(
+      MAX_REVERT_PREVIEW_BYTES,
+      this.maxOutputBytes
+    )
+    try {
+      const result = await this.runGit(
+        [
+          'diff',
+          '--binary',
+          '--full-index',
+          '--no-color',
+          '--no-ext-diff',
+          '--no-textconv',
+          '--',
+          ...trackedPaths
+        ],
+        {
+          signal: options.signal,
+          timeoutMs: this.operationTimeout(options),
+          maxOutputBytes: previewLimit,
+          neutralizeFilters: true
+        }
+      )
+      return result.stdout
+    } catch (error) {
+      if (
+        error instanceof GitServiceError &&
+        error.code === 'OUTPUT_LIMIT'
+      ) {
+        throw new GitServiceError(
+          'OUTPUT_LIMIT',
+          'The complete selected restore preview exceeds Ground’s safety limit'
+        )
+      }
+      throw error
+    }
+  }
+
+  private revertPreview(
+    trackedDiff: string,
+    untrackedSnapshots: readonly GitWorkingPathSnapshot[]
+  ): string {
+    const sections: string[] = []
+    if (trackedDiff) {
+      sections.push(
+        [
+          'Tracked working-tree changes that will be restored to the current Git index:',
+          '',
+          trackedDiff.replace(/\n+$/u, '')
+        ].join('\n')
+      )
+    }
+    if (untrackedSnapshots.length > 0) {
+      sections.push(
+        [
+          'Untracked files that will be moved into Ground recovery (not deleted):',
+          '',
+          ...untrackedSnapshots.map(
+            (snapshot, index) =>
+              `${index + 1}. ${toDisplayPath(snapshot.relativePath)} — ${
+                snapshot.identity?.size ?? '0'
+              } bytes — SHA-256 ${snapshot.sha256 ?? '(missing)'}`
+          )
+        ].join('\n')
+      )
+    }
+    const preview = sections.join('\n\n')
+    if (
+      !preview ||
+      Buffer.byteLength(preview, 'utf8') > MAX_REVERT_PREVIEW_BYTES
+    ) {
+      throw new GitServiceError(
+        'OUTPUT_LIMIT',
+        'The complete selected restore preview exceeds Ground’s safety limit'
+      )
+    }
+    return preview
+  }
+
+  private async assertPreparedPathRevertCurrent(
+    prepared: PreparedGitPathRevert,
+    options: GitOperationOptions = {}
+  ): Promise<void> {
+    const status = await this.status(options)
+    const conflicts = new Set(status.conflicted)
+    const trackedEligible = new Set(status.unstaged)
+    const untrackedEligible = new Set(status.untracked)
+    for (const selectedPath of prepared.trackedPaths) {
+      const displayPath = toDisplayPath(selectedPath)
+      if (
+        conflicts.has(displayPath) ||
+        !trackedEligible.has(displayPath)
+      ) {
+        throw new GitServiceError(
+          'INVALID_ARGUMENT',
+          `Selected tracked path changed since review: ${displayPath}`
+        )
+      }
+    }
+    for (const selectedPath of prepared.untrackedPaths) {
+      const displayPath = toDisplayPath(selectedPath)
+      if (!untrackedEligible.has(displayPath)) {
+        throw new GitServiceError(
+          'INVALID_ARGUMENT',
+          `Selected untracked path changed since review: ${displayPath}`
+        )
+      }
+    }
+
+    const currentIndex = await this.captureIndexEntries(
+      prepared.trackedPaths,
+      options
+    )
+    if (
+      currentIndex.length !== prepared.indexEntries.length ||
+      currentIndex.some(
+        (entry, index) =>
+          !sameIndexEntry(
+            entry,
+            prepared.indexEntries[index] as GitIndexEntry
+          )
+      )
+    ) {
+      throw new GitServiceError(
+        'INVALID_ARGUMENT',
+        'The selected Git index entries changed since review'
+      )
+    }
+
+    const currentSnapshots: GitWorkingPathSnapshot[] = []
+    for (const selectedPath of [
+      ...prepared.trackedPaths,
+      ...prepared.untrackedPaths
+    ]) {
+      currentSnapshots.push(
+        (
+          await this.captureWorkspacePath(
+            selectedPath,
+            prepared.trackedPaths.includes(selectedPath)
+          )
+        ).snapshot
+      )
+    }
+    if (
+      currentSnapshots.length !== prepared.workingSnapshots.length ||
+      currentSnapshots.some(
+        (snapshot, index) =>
+          !sameWorkingSnapshot(
+            snapshot,
+            prepared.workingSnapshots[index] as GitWorkingPathSnapshot
+          )
+      )
+    ) {
+      throw new GitServiceError(
+        'INVALID_ARGUMENT',
+        'Selected working-tree contents or parents changed since review'
+      )
+    }
+
+    const trackedDiff = await this.selectedWorkingDiff(
+      prepared.trackedPaths,
+      options
+    )
+    const preview = this.revertPreview(
+      trackedDiff,
+      currentSnapshots.slice(prepared.trackedPaths.length)
+    )
+    if (
+      sha256(preview) !== prepared.previewSha256 ||
+      preview !== prepared.preview
+    ) {
+      throw new GitServiceError(
+        'INVALID_ARGUMENT',
+        'The complete selected restore preview changed since review'
+      )
+    }
+  }
+
+  private async assertTrackedRevertCurrent(
+    prepared: PreparedGitPathRevert,
+    options: GitOperationOptions = {}
+  ): Promise<void> {
+    const currentIndex = await this.captureIndexEntries(
+      prepared.trackedPaths,
+      options
+    )
+    if (
+      currentIndex.length !== prepared.indexEntries.length ||
+      currentIndex.some(
+        (entry, index) =>
+          !sameIndexEntry(
+            entry,
+            prepared.indexEntries[index] as GitIndexEntry
+          )
+      )
+    ) {
+      throw new GitServiceError(
+        'INVALID_ARGUMENT',
+        'The selected Git index entries changed before restore'
+      )
+    }
+    for (let index = 0; index < prepared.trackedPaths.length; index += 1) {
+      const selectedPath = prepared.trackedPaths[index] as string
+      const current = (
+        await this.captureWorkspacePath(selectedPath, true)
+      ).snapshot
+      if (
+        !sameWorkingFileState(
+          current,
+          prepared.workingSnapshots[index] as GitWorkingPathSnapshot
+        )
+      ) {
+        throw new GitServiceError(
+          'INVALID_ARGUMENT',
+          `Selected tracked path changed before restore: ${toDisplayPath(selectedPath)}`
+        )
+      }
+    }
+  }
+
+  private preparedPathRevertIntegrity(
+    prepared: PreparedGitPathRevert
+  ): boolean {
+    if (
+      !Object.isFrozen(prepared) ||
+      prepared.version !== 1 ||
+      !Object.isFrozen(prepared.trackedPaths) ||
+      !Object.isFrozen(prepared.untrackedPaths) ||
+      !Object.isFrozen(prepared.indexEntries) ||
+      !Object.isFrozen(prepared.workingSnapshots) ||
+      sha256(prepared.preview) !== prepared.previewSha256
+    ) {
+      return false
+    }
+    const {
+      actionSha256: _actionSha256,
+      ...withoutFingerprint
+    } = prepared
+    return (
+      SHA256_PATTERN.test(prepared.actionSha256) &&
+      preparedRevertFingerprint(withoutFingerprint) ===
+        prepared.actionSha256
+    )
+  }
+
+  async preparePathRevert(
+    inputPaths: readonly string[],
+    options: GitOperationOptions = {}
+  ): Promise<PreparedGitPathRevert> {
+    await this.assertRootStillPinned()
+    const paths = this.resolveMutationPaths(inputPaths).sort((left, right) =>
+      toDisplayPath(left).localeCompare(toDisplayPath(right))
+    )
+    const status = await this.status(options)
+    const conflicted = new Set(status.conflicted)
+    const unstaged = new Set(status.unstaged)
+    const untracked = new Set(status.untracked)
+    const trackedPaths: string[] = []
+    const untrackedPaths: string[] = []
+    for (const selectedPath of paths) {
+      const displayPath = toDisplayPath(selectedPath)
+      if (conflicted.has(displayPath)) {
+        throw new GitServiceError(
+          'INVALID_ARGUMENT',
+          `Resolve this conflict before restoring it in Ground: ${displayPath}`
+        )
+      }
+      if (unstaged.has(displayPath)) {
+        trackedPaths.push(selectedPath)
+        continue
+      }
+      if (untracked.has(displayPath)) {
+        untrackedPaths.push(selectedPath)
+        continue
+      }
+      throw new GitServiceError(
+        'INVALID_ARGUMENT',
+        `Selected path is no longer an unstaged or untracked file: ${displayPath}`
+      )
+    }
+
+    const indexEntries = await this.captureIndexEntries(
+      trackedPaths,
+      options
+    )
+    const workingSnapshots: GitWorkingPathSnapshot[] = []
+    let totalBytes = 0
+    for (const selectedPath of [...trackedPaths, ...untrackedPaths]) {
+      const captured = await this.captureWorkspacePath(
+        selectedPath,
+        trackedPaths.includes(selectedPath)
+      )
+      if (
+        untrackedPaths.includes(selectedPath) &&
+        !captured.snapshot.existed
+      ) {
+        throw new GitServiceError(
+          'INVALID_ARGUMENT',
+          `Selected untracked file disappeared during review: ${toDisplayPath(selectedPath)}`
+        )
+      }
+      totalBytes += Number(captured.snapshot.identity?.size ?? '0')
+      if (totalBytes > MAX_REVERT_TOTAL_BYTES) {
+        throw new GitServiceError(
+          'OUTPUT_LIMIT',
+          `Selected files exceed the ${MAX_REVERT_TOTAL_BYTES} byte recovery limit`
+        )
+      }
+      workingSnapshots.push(captured.snapshot)
+    }
+    const trackedDiff = await this.selectedWorkingDiff(
+      trackedPaths,
+      options
+    )
+    if (trackedPaths.length > 0 && !trackedDiff) {
+      throw new GitServiceError(
+        'INVALID_ARGUMENT',
+        'Selected tracked changes disappeared during review'
+      )
+    }
+    const preview = this.revertPreview(
+      trackedDiff,
+      workingSnapshots.slice(trackedPaths.length)
+    )
+    const base = {
+      version: 1 as const,
+      trackedPaths: Object.freeze([...trackedPaths]),
+      untrackedPaths: Object.freeze([...untrackedPaths]),
+      indexEntries: Object.freeze(indexEntries.map(freezeIndexEntry)),
+      workingSnapshots: Object.freeze(
+        workingSnapshots.map(freezeWorkingSnapshot)
+      ),
+      preview,
+      previewSha256: sha256(preview)
+    }
+    const prepared = Object.freeze({
+      ...base,
+      actionSha256: preparedRevertFingerprint(base)
+    }) satisfies PreparedGitPathRevert
+    await this.assertPreparedPathRevertCurrent(prepared, options)
+    this.preparedPathReverts.add(prepared)
+    return prepared
+  }
+
+  private async recoveryRoot(
+    create: boolean
+  ): Promise<string | undefined> {
+    await this.assertRootStillPinned()
+    const candidate = path.join(this.worktreeRoot, RECOVERY_DIRECTORY_NAME)
+    let details: Awaited<ReturnType<typeof lstat>> | undefined
+    try {
+      details = await lstat(candidate, { bigint: true })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    if (!details && !create) return undefined
+    if (!details) {
+      try {
+        await mkdir(candidate, { mode: 0o700 })
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      }
+      details = await lstat(candidate, { bigint: true })
+      await syncDirectory(this.worktreeRoot)
+    }
+    if (details.isSymbolicLink() || !details.isDirectory()) {
+      throw new GitServiceError(
+        'UNSAFE_PATH',
+        'Ground’s Git recovery root is not a regular directory'
+      )
+    }
+    const canonical = await realpath(candidate)
+    if (
+      !samePath(canonical, candidate) ||
+      !isPathInside(this.worktreeRoot, canonical)
+    ) {
+      throw new GitServiceError(
+        'UNSAFE_PATH',
+        'Ground’s Git recovery root is not canonical'
+      )
+    }
+    return canonical
+  }
+
+  private async recoveryOperationDirectory(
+    recoveryId: string,
+    create: boolean
+  ): Promise<string> {
+    if (!RECOVERY_ID_PATTERN.test(recoveryId)) {
+      throw new GitServiceError(
+        'INVALID_ARGUMENT',
+        'Git recovery identifier is invalid'
+      )
+    }
+    const root = await this.recoveryRoot(create)
+    if (!root) {
+      throw new GitServiceError('NOT_FOUND', 'Git recovery was not found')
+    }
+    const operationDirectory = path.join(root, recoveryId)
+    if (create) {
+      await mkdir(operationDirectory, { mode: 0o700 })
+      await syncDirectory(root)
+    }
+    const details = await lstat(operationDirectory, { bigint: true }).catch(
+      (error: unknown) => {
+        throw new GitServiceError('NOT_FOUND', 'Git recovery was not found', {
+          cause: error
+        })
+      }
+    )
+    if (details.isSymbolicLink() || !details.isDirectory()) {
+      throw new GitServiceError(
+        'UNSAFE_PATH',
+        'Git recovery operation is not a regular directory'
+      )
+    }
+    const canonical = await realpath(operationDirectory)
+    if (
+      !samePath(canonical, operationDirectory) ||
+      !isPathInside(root, canonical)
+    ) {
+      throw new GitServiceError(
+        'UNSAFE_PATH',
+        'Git recovery operation is not canonical'
+      )
+    }
+    return canonical
+  }
+
+  private recoveryPayloadPath(
+    operationDirectory: string,
+    name: string
+  ): string {
+    if (
+      !/^(?:tracked|untracked|undo-current)-\d{6}\.bin$/u.test(name)
+    ) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        'Git recovery payload name is invalid'
+      )
+    }
+    const candidate = path.join(operationDirectory, name)
+    if (!isPathInside(operationDirectory, candidate)) {
+      throw new GitServiceError(
+        'UNSAFE_PATH',
+        'Git recovery payload escapes its operation'
+      )
+    }
+    return candidate
+  }
+
+  private async writeRecoveryPayload(
+    operationDirectory: string,
+    name: string,
+    contents: Buffer,
+    mode: number
+  ): Promise<void> {
+    const target = this.recoveryPayloadPath(operationDirectory, name)
+    const noFollow =
+      typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0
+    const handle = await open(
+      target,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        noFollow,
+      0o600
+    )
+    try {
+      await handle.writeFile(contents)
+      await handle.chmod(mode)
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+    await syncDirectory(operationDirectory)
+  }
+
+  private async readRecoveryPayload(
+    operationDirectory: string,
+    name: string,
+    expected: GitWorkingPathSnapshot,
+    requireOriginalFileIdentity = false
+  ): Promise<Buffer> {
+    if (!expected.existed || !expected.sha256 || !expected.identity) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        'Git recovery payload has no expected file identity'
+      )
+    }
+    const target = this.recoveryPayloadPath(operationDirectory, name)
+    const lexical = await lstat(target, { bigint: true }).catch(
+      (error: unknown) => {
+        throw new GitServiceError(
+          'NOT_FOUND',
+          'Git recovery payload is missing',
+          { cause: error }
+        )
+      }
+    )
+    if (
+      lexical.isSymbolicLink() ||
+      !lexical.isFile() ||
+      lexical.size > BigInt(MAX_REVERT_FILE_BYTES)
+    ) {
+      throw new GitServiceError(
+        'UNSAFE_PATH',
+        'Git recovery payload is not a bounded regular file'
+      )
+    }
+    const noFollow =
+      typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0
+    const handle = await open(target, constants.O_RDONLY | noFollow)
+    try {
+      const before = await handle.stat({ bigint: true })
+      const contents = await readExactlyBounded(
+        handle,
+        Number(before.size),
+        MAX_REVERT_FILE_BYTES
+      )
+      const after = await handle.stat({ bigint: true })
+      if (
+        before.dev !== lexical.dev ||
+        before.ino !== lexical.ino ||
+        before.dev !== after.dev ||
+        before.ino !== after.ino ||
+        before.size !== after.size ||
+        before.mtimeNs !== after.mtimeNs ||
+        before.ctimeNs !== after.ctimeNs ||
+        contents.byteLength !== Number(after.size) ||
+        after.size.toString() !== expected.identity.size ||
+        Number(after.mode & 0o777n) !== expected.identity.mode ||
+        (requireOriginalFileIdentity &&
+          (after.dev.toString() !== expected.identity.device ||
+            after.ino.toString() !== expected.identity.inode)) ||
+        sha256(contents) !== expected.sha256
+      ) {
+        throw new GitServiceError(
+          'UNSAFE_CONFIGURATION',
+          'Git recovery payload changed or failed validation'
+        )
+      }
+      return contents
+    } finally {
+      await handle.close()
+    }
+  }
+
+  private serializedRecoveryManifest(
+    manifest: GitRecoveryManifest
+  ): string {
+    const serialized = `${JSON.stringify(manifest, null, 2)}\n`
+    if (
+      Buffer.byteLength(serialized, 'utf8') >
+      MAX_RECOVERY_MANIFEST_BYTES
+    ) {
+      throw new GitServiceError(
+        'OUTPUT_LIMIT',
+        'Git recovery manifest exceeds Ground’s safety limit'
+      )
+    }
+    return serialized
+  }
+
+  private async writeRecoveryManifest(
+    operationDirectory: string,
+    manifest: GitRecoveryManifest
+  ): Promise<void> {
+    const serialized = this.serializedRecoveryManifest(manifest)
+    const target = path.join(operationDirectory, RECOVERY_MANIFEST_NAME)
+    const temporary = path.join(
+      operationDirectory,
+      `.manifest-${randomUUID()}.tmp`
+    )
+    const handle = await open(
+      temporary,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+      0o600
+    )
+    let temporaryExists = true
+    try {
+      await handle.writeFile(serialized, 'utf8')
+      await handle.sync()
+      await handle.close()
+      await rename(temporary, target)
+      temporaryExists = false
+      await syncDirectory(operationDirectory)
+    } finally {
+      await handle.close().catch(() => undefined)
+      if (temporaryExists) await unlink(temporary).catch(() => undefined)
+    }
+  }
+
+  private async loadRecoveryManifest(
+    recoveryId: string
+  ): Promise<{
+    manifest: GitRecoveryManifest
+    operationDirectory: string
+    serialized: string
+  }> {
+    const operationDirectory = await this.recoveryOperationDirectory(
+      recoveryId,
+      false
+    )
+    const manifestPath = path.join(
+      operationDirectory,
+      RECOVERY_MANIFEST_NAME
+    )
+    const lexical = await lstat(manifestPath, { bigint: true }).catch(
+      (error: unknown) => {
+        throw new GitServiceError(
+          'NOT_FOUND',
+          'Git recovery manifest is missing',
+          { cause: error }
+        )
+      }
+    )
+    if (
+      lexical.isSymbolicLink() ||
+      !lexical.isFile() ||
+      lexical.size > BigInt(MAX_RECOVERY_MANIFEST_BYTES)
+    ) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        'Git recovery manifest is not a bounded regular file'
+      )
+    }
+    const noFollow =
+      typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0
+    const handle = await open(manifestPath, constants.O_RDONLY | noFollow)
+    let serialized: string
+    try {
+      const before = await handle.stat({ bigint: true })
+      if (
+        before.dev !== lexical.dev ||
+        before.ino !== lexical.ino ||
+        before.size > BigInt(MAX_RECOVERY_MANIFEST_BYTES)
+      ) {
+        throw new GitServiceError(
+          'UNSAFE_CONFIGURATION',
+          'Git recovery manifest changed before it was read'
+        )
+      }
+      const contents = await readExactlyBounded(
+        handle,
+        Number(before.size),
+        MAX_RECOVERY_MANIFEST_BYTES
+      )
+      const after = await handle.stat({ bigint: true })
+      if (contents.byteLength !== Number(lexical.size)) {
+        throw new GitServiceError(
+          'UNSAFE_CONFIGURATION',
+          'Git recovery manifest changed while it was read'
+        )
+      }
+      if (
+        before.dev !== after.dev ||
+        before.ino !== after.ino ||
+        before.size !== after.size ||
+        before.mtimeNs !== after.mtimeNs ||
+        before.ctimeNs !== after.ctimeNs
+      ) {
+        throw new GitServiceError(
+          'UNSAFE_CONFIGURATION',
+          'Git recovery manifest changed while it was read'
+        )
+      }
+      serialized = contents.toString('utf8')
+    } finally {
+      await handle.close()
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(serialized)
+    } catch (error) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        'Git recovery manifest is invalid JSON',
+        { cause: error }
+      )
+    }
+    const manifest = parseRecoveryManifest(parsed)
+    if (manifest.id !== recoveryId) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        'Git recovery manifest identifier does not match its directory'
+      )
+    }
+    const resolvedPaths = this.resolveMutationPaths([
+      ...manifest.tracked.map((entry) => entry.relativePath),
+      ...manifest.untracked.map((entry) => entry.relativePath)
+    ])
+    const manifestPaths = [
+      ...manifest.tracked.map((entry) => entry.relativePath),
+      ...manifest.untracked.map((entry) => entry.relativePath)
+    ]
+    if (
+      resolvedPaths.length !== manifestPaths.length ||
+      resolvedPaths.some(
+        (candidate, index) => candidate !== manifestPaths[index]
+      )
+    ) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        'Git recovery manifest paths are invalid'
+      )
+    }
+    return { manifest, operationDirectory, serialized }
+  }
+
+  private recoverySummary(
+    manifest: GitRecoveryManifest
+  ): GitRecoverySummary {
+    const publicStatus: GitRecoveryStatus =
+      manifest.status === 'applied' ||
+      manifest.status === 'restored' ||
+      manifest.status === 'recovery-required'
+        ? manifest.status
+        : 'recovery-required'
+    return Object.freeze({
+      id: manifest.id,
+      createdAt: manifest.createdAt,
+      status: publicStatus,
+      trackedPaths: Object.freeze(
+        manifest.tracked.map((entry) => toDisplayPath(entry.relativePath))
+      ),
+      untrackedPaths: Object.freeze(
+        manifest.untracked.map((entry) => toDisplayPath(entry.relativePath))
+      ),
+      canUndo: manifest.status === 'applied'
+    })
+  }
+
+  async executePreparedPathRevert(
+    prepared: PreparedGitPathRevert,
+    options: GitOperationOptions = {}
+  ): Promise<GitPathRevertResult> {
+    if (
+      !prepared ||
+      !this.preparedPathReverts.has(prepared) ||
+      !this.preparedPathRevertIntegrity(prepared)
+    ) {
+      throw new GitServiceError(
+        'INVALID_ARGUMENT',
+        'Git path restore was not prepared by this workspace'
+      )
+    }
+    this.preparedPathReverts.delete(prepared)
+    await this.assertRootStillPinned()
+    await this.assertPreparedPathRevertCurrent(prepared, options)
+
+    const recoveryId = randomUUID()
+    const operationDirectory = await this.recoveryOperationDirectory(
+      recoveryId,
+      true
+    )
+    const timestamp = new Date().toISOString()
+    const manifest: GitRecoveryManifest = {
+      version: 1,
+      id: recoveryId,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      status: 'prepared',
+      actionSha256: prepared.actionSha256,
+      tracked: prepared.trackedPaths.map((relativePath, index) => ({
+        relativePath,
+        indexEntry: prepared.indexEntries[index] as GitIndexEntry,
+        before:
+          prepared.workingSnapshots[index] as GitWorkingPathSnapshot,
+        ...((prepared.workingSnapshots[index] as GitWorkingPathSnapshot)
+          .existed
+          ? {
+              backupName: `tracked-${index
+                .toString()
+                .padStart(6, '0')}.bin`
+            }
+          : {})
+      })),
+      untracked: prepared.untrackedPaths.map((relativePath, index) => ({
+        relativePath,
+        before: prepared.workingSnapshots[
+          prepared.trackedPaths.length + index
+        ] as GitWorkingPathSnapshot,
+        quarantineName: `untracked-${index
+          .toString()
+          .padStart(6, '0')}.bin`,
+        moved: false
+      }))
+    }
+
+    let manifestPersisted = false
+    try {
+      for (const entry of manifest.tracked) {
+        if (!entry.before.existed || !entry.backupName) continue
+        const captured = await this.captureWorkspacePath(
+          entry.relativePath,
+          false
+        )
+        if (
+          !sameWorkingSnapshot(captured.snapshot, entry.before) ||
+          !captured.contents
+        ) {
+          throw new GitServiceError(
+            'INVALID_ARGUMENT',
+            `Tracked file changed while its recovery copy was created: ${toDisplayPath(entry.relativePath)}`
+          )
+        }
+        await this.writeRecoveryPayload(
+          operationDirectory,
+          entry.backupName,
+          captured.contents,
+          entry.before.identity?.mode ?? 0o600
+        )
+      }
+
+      // This fsynced manifest is the durable boundary before any workspace
+      // path is moved or restored.
+      await this.writeRecoveryManifest(operationDirectory, manifest)
+      manifestPersisted = true
+      await this.assertPreparedPathRevertCurrent(prepared, options)
+
+      manifest.status = 'mutating'
+      manifest.updatedAt = new Date().toISOString()
+      await this.writeRecoveryManifest(operationDirectory, manifest)
+
+      for (const entry of manifest.untracked) {
+        const captured = await this.captureWorkspacePath(
+          entry.relativePath,
+          false
+        )
+        if (!sameWorkingFileState(captured.snapshot, entry.before)) {
+          throw new GitServiceError(
+            'INVALID_ARGUMENT',
+            `Untracked file changed before quarantine: ${toDisplayPath(entry.relativePath)}`
+          )
+        }
+        const source = this.resolveWorkspacePath(entry.relativePath).absolute
+        const destination = this.recoveryPayloadPath(
+          operationDirectory,
+          entry.quarantineName
+        )
+        await lstat(destination)
+          .then(() => {
+            throw new GitServiceError(
+              'UNSAFE_PATH',
+              'Git recovery quarantine destination already exists'
+            )
+          })
+          .catch((error: unknown) => {
+            if (
+              error instanceof GitServiceError ||
+              (error as NodeJS.ErrnoException).code !== 'ENOENT'
+            ) {
+              throw error
+            }
+          })
+        await rename(source, destination)
+        await this.readRecoveryPayload(
+          operationDirectory,
+          entry.quarantineName,
+          entry.before,
+          true
+        )
+        entry.moved = true
+        manifest.updatedAt = new Date().toISOString()
+        await this.writeRecoveryManifest(operationDirectory, manifest)
+      }
+
+      if (prepared.trackedPaths.length > 0) {
+        await this.assertTrackedRevertCurrent(prepared, options)
+        await this.runGit(
+          ['restore', '--worktree', '--', ...prepared.trackedPaths],
+          {
+            signal: options.signal,
+            timeoutMs: this.operationTimeout(
+              options,
+              MUTATION_TIMEOUT_MS
+            ),
+            maxOutputBytes: this.maxOutputBytes,
+            neutralizeFilters: true
+          }
+        )
+        const restoredIndex = await this.captureIndexEntries(
+          prepared.trackedPaths,
+          options
+        )
+        if (
+          restoredIndex.length !== prepared.indexEntries.length ||
+          restoredIndex.some(
+            (entry, index) =>
+              !sameIndexEntry(
+                entry,
+                prepared.indexEntries[index] as GitIndexEntry
+              )
+          )
+        ) {
+          throw new GitServiceError(
+            'INVALID_ARGUMENT',
+            'The selected Git index entries changed while files were restored'
+          )
+        }
+      }
+
+      const afterSnapshots: GitWorkingPathSnapshot[] = []
+      for (const selectedPath of [
+        ...prepared.trackedPaths,
+        ...prepared.untrackedPaths
+      ]) {
+        afterSnapshots.push(
+          (await this.captureWorkspacePath(selectedPath, true)).snapshot
+        )
+      }
+      const remainingDiff = await this.selectedWorkingDiff(
+        prepared.trackedPaths,
+        options
+      )
+      if (remainingDiff) {
+        throw new GitServiceError(
+          'COMMAND_FAILED',
+          'Selected tracked paths still differ from the Git index after restore'
+        )
+      }
+      for (let index = 0; index < manifest.tracked.length; index += 1) {
+        const after = afterSnapshots[index] as GitWorkingPathSnapshot
+        if (!after.existed) {
+          throw new GitServiceError(
+            'COMMAND_FAILED',
+            'Git did not restore every selected tracked file'
+          )
+        }
+        ;(manifest.tracked[index] as RecoveryTrackedEntry).after = after
+      }
+      for (let index = 0; index < manifest.untracked.length; index += 1) {
+        const after = afterSnapshots[
+          manifest.tracked.length + index
+        ] as GitWorkingPathSnapshot
+        if (after.existed) {
+          throw new GitServiceError(
+            'COMMAND_FAILED',
+            'An untracked path reappeared during quarantine'
+          )
+        }
+        ;(manifest.untracked[index] as RecoveryUntrackedEntry).after = after
+      }
+      manifest.status = 'applied'
+      manifest.updatedAt = new Date().toISOString()
+      delete manifest.error
+      await this.writeRecoveryManifest(operationDirectory, manifest)
+      return {
+        recovery: this.recoverySummary(manifest)
+      }
+    } catch (error) {
+      if (manifestPersisted) {
+        manifest.status = 'recovery-required'
+        manifest.updatedAt = new Date().toISOString()
+        manifest.error =
+          error instanceof Error
+            ? safeDiagnostic(error.message)
+            : 'Unknown Git restore failure'
+        await this.writeRecoveryManifest(operationDirectory, manifest).catch(
+          () => undefined
+        )
+        throw new GitServiceError(
+          'COMMAND_FAILED',
+          `Git restore did not finish cleanly. Recovery ${recoveryId} was preserved.`,
+          { cause: error }
+        )
+      }
+      throw error
+    }
+  }
+
+  async listRecoveries(): Promise<GitRecoverySummary[]> {
+    const root = await this.recoveryRoot(false)
+    if (!root) return []
+    const entries = await readdir(root, { withFileTypes: true })
+    const recoveries: GitRecoverySummary[] = []
+    for (const entry of entries) {
+      if (
+        !entry.isDirectory() ||
+        entry.isSymbolicLink() ||
+        !RECOVERY_ID_PATTERN.test(entry.name)
+      ) {
+        continue
+      }
+      try {
+        const { manifest } = await this.loadRecoveryManifest(entry.name)
+        recoveries.push(this.recoverySummary(manifest))
+      } catch {
+        // Corrupt or tampered recovery data grants no workspace authority.
+      }
+    }
+    return recoveries.sort((left, right) =>
+      right.createdAt.localeCompare(left.createdAt)
+    )
+  }
+
+  private async assertManifestAfterState(
+    manifest: GitRecoveryManifest
+  ): Promise<readonly GitWorkingPathSnapshot[]> {
+    const currentSnapshots: GitWorkingPathSnapshot[] = []
+    for (const entry of [...manifest.tracked, ...manifest.untracked]) {
+      if (!entry.after) {
+        throw new GitServiceError(
+          'UNSAFE_CONFIGURATION',
+          'Git recovery has no completed after-state'
+        )
+      }
+      const current = (
+        await this.captureWorkspacePath(entry.relativePath, true)
+      ).snapshot
+      if (!sameWorkingSnapshot(current, entry.after)) {
+        throw new GitServiceError(
+          'INVALID_ARGUMENT',
+          `Workspace path changed after Git restore; undo will not overwrite it: ${toDisplayPath(entry.relativePath)}`
+        )
+      }
+      currentSnapshots.push(current)
+    }
+    return Object.freeze(currentSnapshots.map(freezeWorkingSnapshot))
+  }
+
+  private async validateRecoveryPayloads(
+    manifest: GitRecoveryManifest,
+    operationDirectory: string
+  ): Promise<void> {
+    for (const entry of manifest.tracked) {
+      if (entry.before.existed && entry.backupName) {
+        await this.readRecoveryPayload(
+          operationDirectory,
+          entry.backupName,
+          entry.before
+        )
+      }
+    }
+    for (const entry of manifest.untracked) {
+      if (!entry.moved) {
+        throw new GitServiceError(
+          'UNSAFE_CONFIGURATION',
+          'Git recovery did not quarantine every untracked file'
+        )
+      }
+      await this.readRecoveryPayload(
+        operationDirectory,
+        entry.quarantineName,
+        entry.before,
+        true
+      )
+    }
+  }
+
+  private preparedUndoIntegrity(
+    prepared: PreparedGitRecoveryUndo
+  ): boolean {
+    if (
+      !Object.isFrozen(prepared) ||
+      prepared.version !== 1 ||
+      !Object.isFrozen(prepared.currentSnapshots) ||
+      sha256(prepared.preview) !== prepared.previewSha256
+    ) {
+      return false
+    }
+    const {
+      actionSha256: _actionSha256,
+      ...withoutFingerprint
+    } = prepared
+    return (
+      SHA256_PATTERN.test(prepared.manifestSha256) &&
+      SHA256_PATTERN.test(prepared.actionSha256) &&
+      preparedUndoFingerprint(withoutFingerprint) ===
+        prepared.actionSha256
+    )
+  }
+
+  async prepareRecoveryUndo(
+    recoveryId: string
+  ): Promise<PreparedGitRecoveryUndo> {
+    await this.assertRootStillPinned()
+    const { manifest, operationDirectory, serialized } =
+      await this.loadRecoveryManifest(recoveryId)
+    if (manifest.status !== 'applied') {
+      throw new GitServiceError(
+        'INVALID_ARGUMENT',
+        'Only a completed Git restore can be undone automatically'
+      )
+    }
+    const currentSnapshots = await this.assertManifestAfterState(manifest)
+    await this.validateRecoveryPayloads(manifest, operationDirectory)
+    const preview = [
+      'Undo this completed Git restore without overwriting later workspace changes:',
+      '',
+      ...manifest.tracked.map(
+        (entry, index) =>
+          `${index + 1}. Restore tracked pre-action state: ${toDisplayPath(entry.relativePath)}`
+      ),
+      ...manifest.untracked.map(
+        (entry, index) =>
+          `${manifest.tracked.length + index + 1}. Return quarantined untracked file: ${toDisplayPath(entry.relativePath)}`
+      ),
+      '',
+      `Recovery manifest SHA-256: ${sha256(serialized)}`
+    ].join('\n')
+    if (Buffer.byteLength(preview, 'utf8') > MAX_REVERT_PREVIEW_BYTES) {
+      throw new GitServiceError(
+        'OUTPUT_LIMIT',
+        'The complete recovery undo preview exceeds Ground’s safety limit'
+      )
+    }
+    const base = {
+      version: 1 as const,
+      recoveryId,
+      manifestSha256: sha256(serialized),
+      currentSnapshots: Object.freeze(
+        currentSnapshots.map(freezeWorkingSnapshot)
+      ),
+      preview,
+      previewSha256: sha256(preview)
+    }
+    const prepared = Object.freeze({
+      ...base,
+      actionSha256: preparedUndoFingerprint(base)
+    }) satisfies PreparedGitRecoveryUndo
+    this.preparedRecoveryUndos.add(prepared)
+    return prepared
+  }
+
+  private async installFileWithoutOverwrite(
+    target: string,
+    contents: Buffer,
+    mode: number
+  ): Promise<void> {
+    const parent = path.dirname(target)
+    const temporary = path.join(
+      parent,
+      `.ground-recovery-${randomUUID()}.tmp`
+    )
+    const handle = await open(
+      temporary,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+      0o600
+    )
+    let temporaryExists = true
+    try {
+      await handle.writeFile(contents)
+      await handle.chmod(mode)
+      await handle.sync()
+      await handle.close()
+      // link(2) fails with EEXIST instead of overwriting a path that appeared
+      // after the final validation.
+      await link(temporary, target)
+      await unlink(temporary)
+      temporaryExists = false
+      await syncDirectory(parent)
+    } finally {
+      await handle.close().catch(() => undefined)
+      if (temporaryExists) await unlink(temporary).catch(() => undefined)
+    }
+  }
+
+  private async returnQuarantinedFileWithoutOverwrite(
+    operationDirectory: string,
+    entry: RecoveryUntrackedEntry
+  ): Promise<void> {
+    const source = this.recoveryPayloadPath(
+      operationDirectory,
+      entry.quarantineName
+    )
+    const target = this.resolveWorkspacePath(entry.relativePath).absolute
+    // Hard-link creation is an atomic no-overwrite operation for the regular
+    // files accepted by preparation. Initial quarantine used rename, so source
+    // and target are necessarily on the same filesystem.
+    await link(source, target)
+    await unlink(source)
+    await syncDirectory(path.dirname(target))
+    await syncDirectory(operationDirectory)
+  }
+
+  async executePreparedRecoveryUndo(
+    prepared: PreparedGitRecoveryUndo
+  ): Promise<GitRecoverySummary> {
+    if (
+      !prepared ||
+      !this.preparedRecoveryUndos.has(prepared) ||
+      !this.preparedUndoIntegrity(prepared)
+    ) {
+      throw new GitServiceError(
+        'INVALID_ARGUMENT',
+        'Git recovery undo was not prepared by this workspace'
+      )
+    }
+    this.preparedRecoveryUndos.delete(prepared)
+    await this.assertRootStillPinned()
+    const { manifest, operationDirectory, serialized } =
+      await this.loadRecoveryManifest(prepared.recoveryId)
+    if (
+      manifest.status !== 'applied' ||
+      sha256(serialized) !== prepared.manifestSha256
+    ) {
+      throw new GitServiceError(
+        'INVALID_ARGUMENT',
+        'Git recovery changed since undo review'
+      )
+    }
+    const currentSnapshots = await this.assertManifestAfterState(manifest)
+    if (
+      currentSnapshots.length !== prepared.currentSnapshots.length ||
+      currentSnapshots.some(
+        (snapshot, index) =>
+          !sameWorkingSnapshot(
+            snapshot,
+            prepared.currentSnapshots[index] as GitWorkingPathSnapshot
+          )
+      )
+    ) {
+      throw new GitServiceError(
+        'INVALID_ARGUMENT',
+        'Workspace paths changed since undo review'
+      )
+    }
+    await this.validateRecoveryPayloads(manifest, operationDirectory)
+
+    manifest.status = 'undoing'
+    manifest.updatedAt = new Date().toISOString()
+    await this.writeRecoveryManifest(operationDirectory, manifest)
+    try {
+      for (let index = 0; index < manifest.tracked.length; index += 1) {
+        const entry = manifest.tracked[index] as RecoveryTrackedEntry
+        const current = await this.captureWorkspacePath(
+          entry.relativePath,
+          false
+        )
+        if (
+          !entry.after ||
+          !sameWorkingFileState(current.snapshot, entry.after)
+        ) {
+          throw new GitServiceError(
+            'INVALID_ARGUMENT',
+            `Tracked path changed before undo: ${toDisplayPath(entry.relativePath)}`
+          )
+        }
+        const target = this.resolveWorkspacePath(entry.relativePath).absolute
+        const displacedName = `undo-current-${index
+          .toString()
+          .padStart(6, '0')}.bin`
+        const displaced = this.recoveryPayloadPath(
+          operationDirectory,
+          displacedName
+        )
+        await lstat(displaced)
+          .then(() => {
+            throw new GitServiceError(
+              'UNSAFE_PATH',
+              'Git recovery undo destination already exists'
+            )
+          })
+          .catch((error: unknown) => {
+            if (
+              error instanceof GitServiceError ||
+              (error as NodeJS.ErrnoException).code !== 'ENOENT'
+            ) {
+              throw error
+            }
+          })
+        await rename(target, displaced)
+        await syncDirectory(operationDirectory)
+        await syncDirectory(path.dirname(target))
+        if (entry.before.existed && entry.backupName) {
+          const contents = await this.readRecoveryPayload(
+            operationDirectory,
+            entry.backupName,
+            entry.before
+          )
+          await this.installFileWithoutOverwrite(
+            target,
+            contents,
+            entry.before.identity?.mode ?? 0o600
+          )
+        }
+      }
+
+      for (const entry of manifest.untracked) {
+        const current = (
+          await this.captureWorkspacePath(entry.relativePath, true)
+        ).snapshot
+        if (current.existed) {
+          throw new GitServiceError(
+            'INVALID_ARGUMENT',
+            `Undo will not overwrite a recreated untracked path: ${toDisplayPath(entry.relativePath)}`
+          )
+        }
+        await this.readRecoveryPayload(
+          operationDirectory,
+          entry.quarantineName,
+          entry.before,
+          true
+        )
+        await this.returnQuarantinedFileWithoutOverwrite(
+          operationDirectory,
+          entry
+        )
+      }
+
+      for (const entry of [...manifest.tracked, ...manifest.untracked]) {
+        const current = (
+          await this.captureWorkspacePath(entry.relativePath, true)
+        ).snapshot
+        if (
+          current.existed !== entry.before.existed ||
+          current.sha256 !== entry.before.sha256 ||
+          current.identity?.size !== entry.before.identity?.size ||
+          current.identity?.mode !== entry.before.identity?.mode
+        ) {
+          throw new GitServiceError(
+            'COMMAND_FAILED',
+            `Git recovery undo could not verify restored content: ${toDisplayPath(entry.relativePath)}`
+          )
+        }
+      }
+      manifest.status = 'restored'
+      manifest.updatedAt = new Date().toISOString()
+      delete manifest.error
+      await this.writeRecoveryManifest(operationDirectory, manifest)
+      return this.recoverySummary(manifest)
+    } catch (error) {
+      manifest.status = 'recovery-required'
+      manifest.updatedAt = new Date().toISOString()
+      manifest.error =
+        error instanceof Error
+          ? safeDiagnostic(error.message)
+          : 'Unknown Git recovery undo failure'
+      await this.writeRecoveryManifest(operationDirectory, manifest).catch(
+        () => undefined
+      )
+      throw new GitServiceError(
+        'COMMAND_FAILED',
+        `Git recovery undo did not finish cleanly. Recovery ${manifest.id} was preserved.`,
+        { cause: error }
+      )
+    }
+  }
+
   private async optionalGitOutput(
     args: string[],
     options: GitOperationOptions = {}
@@ -1176,6 +3559,207 @@ export class GitWorkspaceService {
     }
   }
 
+  private async captureStableDirectory(
+    candidate: string,
+    label: string
+  ): Promise<StableDirectoryBinding> {
+    const canonicalPath = await canonicalDirectory(candidate, label)
+    let details: Awaited<ReturnType<typeof lstat>>
+    try {
+      details = await lstat(canonicalPath, { bigint: true })
+    } catch (error) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        `${label} became unavailable`,
+        { cause: error }
+      )
+    }
+    if (details.isSymbolicLink() || !details.isDirectory()) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        `${label} is not a stable directory`
+      )
+    }
+    return freezeStableDirectoryBinding({
+      canonicalPath,
+      identity: filesystemIdentity(details)
+    })
+  }
+
+  private async captureCommitDirectories(
+    options: GitOperationOptions
+  ): Promise<{
+    workspace: StableDirectoryBinding
+    gitDirectory: StableDirectoryBinding
+    commonDirectory: StableDirectoryBinding
+  }> {
+    const readDirectory = async (
+      argument: '--git-dir' | '--git-common-dir',
+      label: string
+    ): Promise<StableDirectoryBinding> => {
+      const result = await this.runGit(['rev-parse', argument], {
+        signal: options.signal,
+        timeoutMs: this.operationTimeout(options),
+        maxOutputBytes: 64_000
+      })
+      const raw = result.stdout.replace(/\r?\n$/u, '')
+      if (
+        !raw ||
+        raw !== raw.trim() ||
+        raw.includes('\0') ||
+        /[\r\n\u0001-\u001f\u007f]/u.test(raw)
+      ) {
+        throw new GitServiceError(
+          'UNSAFE_CONFIGURATION',
+          `Git returned an unsafe ${label.toLowerCase()} path`
+        )
+      }
+      return this.captureStableDirectory(
+        path.resolve(this.workspacePath, raw),
+        label
+      )
+    }
+
+    return {
+      workspace: await this.captureStableDirectory(
+        this.workspacePath,
+        'Git worktree'
+      ),
+      gitDirectory: await readDirectory('--git-dir', 'Git worktree metadata'),
+      commonDirectory: await readDirectory(
+        '--git-common-dir',
+        'Git repository metadata'
+      )
+    }
+  }
+
+  private async captureCommitRefState(
+    options: GitOperationOptions
+  ): Promise<{
+    expectedHeadOid: string | null
+    symbolicRef: string
+  }> {
+    const symbolicRef =
+      (await this.optionalGitOutput(
+        ['symbolic-ref', '--quiet', 'HEAD'],
+        options
+      )) ?? null
+    const expectedHeadOid =
+      (await this.optionalGitOutput(
+        ['rev-parse', '--verify', 'HEAD'],
+        options
+      )) ?? null
+
+    if (
+      expectedHeadOid !== null &&
+      !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(expectedHeadOid)
+    ) {
+      throw new GitServiceError(
+        'COMMAND_FAILED',
+        'Git returned an invalid HEAD identity'
+      )
+    }
+    if (symbolicRef === null) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        'Ground commits require a checked-out local branch; detached HEAD commits are refused'
+      )
+    }
+    if (!symbolicRef.startsWith('refs/heads/')) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        'HEAD points outside the local branch namespace'
+      )
+    }
+    const branch = symbolicRef.slice('refs/heads/'.length)
+    validateBranchName(branch)
+    if (`refs/heads/${branch}` !== symbolicRef) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        'HEAD points to an unsafe local branch ref'
+      )
+    }
+
+    return Object.freeze({ expectedHeadOid, symbolicRef })
+  }
+
+  private async captureCommitAuthority(
+    details: {
+      message: string
+      authorName: string
+      authorEmail: string
+    },
+    options: GitOperationOptions
+  ): Promise<GitCommitAuthority> {
+    const firstDirectories = await this.captureCommitDirectories(options)
+    const firstRef = await this.captureCommitRefState(options)
+    const secondDirectories = await this.captureCommitDirectories(options)
+    const secondRef = await this.captureCommitRefState(options)
+    if (
+      !sameStableDirectoryBinding(
+        firstDirectories.workspace,
+        secondDirectories.workspace
+      ) ||
+      !sameStableDirectoryBinding(
+        firstDirectories.gitDirectory,
+        secondDirectories.gitDirectory
+      ) ||
+      !sameStableDirectoryBinding(
+        firstDirectories.commonDirectory,
+        secondDirectories.commonDirectory
+      ) ||
+      firstRef.expectedHeadOid !== secondRef.expectedHeadOid ||
+      firstRef.symbolicRef !== secondRef.symbolicRef
+    ) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        'The Git repository or checked-out ref changed while Ground was binding the commit'
+      )
+    }
+    return Object.freeze({
+      workspace: secondDirectories.workspace,
+      gitDirectory: secondDirectories.gitDirectory,
+      commonDirectory: secondDirectories.commonDirectory,
+      expectedHeadOid: secondRef.expectedHeadOid,
+      symbolicRef: secondRef.symbolicRef,
+      message: details.message,
+      authorName: details.authorName,
+      authorEmail: details.authorEmail
+    })
+  }
+
+  private async assertCommitAuthorityStillCurrent(
+    expected: Readonly<GitCommitAuthority>,
+    options: GitOperationOptions
+  ): Promise<void> {
+    const current = await this.captureCommitAuthority(
+      {
+        message: expected.message,
+        authorName: expected.authorName,
+        authorEmail: expected.authorEmail
+      },
+      options
+    )
+    if (
+      !sameStableDirectoryBinding(expected.workspace, current.workspace) ||
+      !sameStableDirectoryBinding(
+        expected.gitDirectory,
+        current.gitDirectory
+      ) ||
+      !sameStableDirectoryBinding(
+        expected.commonDirectory,
+        current.commonDirectory
+      ) ||
+      expected.expectedHeadOid !== current.expectedHeadOid ||
+      expected.symbolicRef !== current.symbolicRef
+    ) {
+      throw new GitServiceError(
+        'UNSAFE_CONFIGURATION',
+        'The Git repository or checked-out ref changed after commit approval'
+      )
+    }
+  }
+
   async preparePathMutation(
     kind: GitPathMutationKind,
     inputPaths: readonly string[],
@@ -1263,10 +3847,11 @@ export class GitWorkspaceService {
     return this.status(options)
   }
 
-  async prepareCommit(
-    options: GitOperationOptions = {}
-  ): Promise<PreparedGitCommit> {
+  async prepareCommit(options: GitCommitOptions): Promise<PreparedGitCommit> {
     await this.assertRootStillPinned()
+    const message = validateCommitMessage(options.message)
+    const authorName = validateAuthorName(options.authorName)
+    const authorEmail = validateAuthorEmail(options.authorEmail)
     const status = await this.status(options)
     if (status.staged.length === 0) {
       throw new GitServiceError('INVALID_ARGUMENT', 'There are no staged changes to commit')
@@ -1298,33 +3883,68 @@ export class GitWorkspaceService {
     if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(treeOid)) {
       throw new GitServiceError('COMMAND_FAILED', 'Git returned an invalid staged tree identity')
     }
-    const [expectedHeadOid, symbolicHead] = await Promise.all([
-      this.optionalGitOutput(['rev-parse', '--verify', 'HEAD'], options),
-      this.optionalGitOutput(['symbolic-ref', '--quiet', 'HEAD'], options)
+    const authority = await this.captureCommitAuthority(
+      { message, authorName, authorEmail },
+      options
+    )
+    const branch = escapeUnsafeDisplayCharacters(
+      authority.symbolicRef.slice('refs/heads/'.length)
+    )
+    const repositoryIdentitySha256 = stableDirectoryFingerprint(
+      'repository',
+      [authority.commonDirectory]
+    )
+    const worktreeIdentitySha256 = stableDirectoryFingerprint('worktree', [
+      authority.workspace,
+      authority.gitDirectory
     ])
-    if (
-      expectedHeadOid !== undefined &&
-      !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(expectedHeadOid)
-    ) {
-      throw new GitServiceError('COMMAND_FAILED', 'Git returned an invalid HEAD identity')
-    }
-    if (symbolicHead && !symbolicHead.startsWith('refs/heads/')) {
-      throw new GitServiceError(
-        'UNSAFE_CONFIGURATION',
-        'HEAD points outside the local branch namespace'
+    const stagedPaths = Object.freeze([...status.staged])
+    const preview = [
+      'Bound checkout and repository:',
+      `Ref state: ${
+        authority.expectedHeadOid
+          ? 'symbolic local branch'
+          : 'unborn symbolic local branch'
+      }`,
+      `Exact approved ref: ${reviewedCommitValue(authority.symbolicRef)}`,
+      `Expected parent: ${authority.expectedHeadOid ?? '(initial commit)'}`,
+      `Repository identity SHA-256: ${repositoryIdentitySha256}`,
+      `Worktree identity SHA-256: ${worktreeIdentitySha256}`,
+      `Exact staged tree: ${treeOid}`,
+      '',
+      `Author name: ${reviewedCommitValue(authorName)}`,
+      `Author email: ${reviewedCommitValue(authorEmail)}`,
+      '',
+      'Commit message:',
+      reviewedCommitValue(message),
+      '',
+      'Staged paths:',
+      ...stagedPaths.map(
+        (filePath, index) =>
+          `${index + 1}. ${reviewedCommitValue(filePath)}`
       )
-    }
-    const branch = symbolicHead?.startsWith('refs/heads/')
-      ? escapeUnsafeDisplayCharacters(symbolicHead.slice('refs/heads/'.length))
-      : null
-    const prepared = Object.freeze({
+    ].join('\n')
+    const preparedWithoutAction = Object.freeze({
+      version: 1 as const,
       treeOid,
-      expectedHeadOid: expectedHeadOid ?? null,
+      expectedHeadOid: authority.expectedHeadOid,
+      symbolicRef: authority.symbolicRef,
       branch,
-      detached: !symbolicHead,
-      stagedPaths: Object.freeze([...status.staged])
+      detached: false as const,
+      repositoryIdentitySha256,
+      worktreeIdentitySha256,
+      stagedPaths,
+      message,
+      authorName,
+      authorEmail,
+      preview,
+      previewSha256: sha256(preview)
+    }) satisfies Omit<PreparedGitCommit, 'actionSha256'>
+    const prepared = Object.freeze({
+      ...preparedWithoutAction,
+      actionSha256: preparedCommitFingerprint(preparedWithoutAction)
     }) satisfies PreparedGitCommit
-    this.preparedCommits.add(prepared)
+    this.preparedCommits.set(prepared, authority)
     return prepared
   }
 
@@ -1332,7 +3952,10 @@ export class GitWorkspaceService {
     prepared: PreparedGitCommit,
     options: GitCommitOptions
   ): Promise<GitLogEntry> {
-    if (!prepared || !this.preparedCommits.has(prepared)) {
+    const authority = prepared
+      ? this.preparedCommits.get(prepared)
+      : undefined
+    if (!prepared || !authority) {
       throw new GitServiceError(
         'INVALID_ARGUMENT',
         'Git commit was not prepared by this workspace'
@@ -1343,6 +3966,52 @@ export class GitWorkspaceService {
     const authorEmail = validateAuthorEmail(options.authorEmail)
     this.preparedCommits.delete(prepared)
     await this.assertRootStillPinned()
+
+    const {
+      actionSha256: _actionSha256,
+      ...preparedWithoutAction
+    } = prepared
+    const expectedRepositoryIdentitySha256 = stableDirectoryFingerprint(
+      'repository',
+      [authority.commonDirectory]
+    )
+    const expectedWorktreeIdentitySha256 = stableDirectoryFingerprint(
+      'worktree',
+      [authority.workspace, authority.gitDirectory]
+    )
+    if (
+      !Object.isFrozen(prepared) ||
+      !Object.isFrozen(prepared.stagedPaths) ||
+      prepared.version !== 1 ||
+      sha256(prepared.preview) !== prepared.previewSha256 ||
+      preparedCommitFingerprint(preparedWithoutAction) !==
+        prepared.actionSha256 ||
+      prepared.expectedHeadOid !== authority.expectedHeadOid ||
+      prepared.symbolicRef !== authority.symbolicRef ||
+      prepared.detached !== false ||
+      prepared.branch !==
+        escapeUnsafeDisplayCharacters(
+          authority.symbolicRef.slice('refs/heads/'.length)
+        ) ||
+      prepared.repositoryIdentitySha256 !==
+        expectedRepositoryIdentitySha256 ||
+      prepared.worktreeIdentitySha256 !== expectedWorktreeIdentitySha256 ||
+      prepared.message !== authority.message ||
+      prepared.authorName !== authority.authorName ||
+      prepared.authorEmail !== authority.authorEmail ||
+      message !== authority.message ||
+      authorName !== authority.authorName ||
+      authorEmail !== authority.authorEmail
+    ) {
+      throw new GitServiceError(
+        'INVALID_ARGUMENT',
+        'Prepared Git commit integrity validation failed'
+      )
+    }
+
+    // Rebind the repository, worktree, exact checked-out local branch, and
+    // expected parent immediately before creating the approved object.
+    await this.assertCommitAuthorityStillCurrent(authority, options)
 
     const commitArguments = [
       '-c',
@@ -1368,20 +4037,25 @@ export class GitWorkspaceService {
       throw new GitServiceError('COMMAND_FAILED', 'Git returned an invalid commit identity')
     }
 
-    // Atomically move HEAD only if it still names the parent that was shown in
-    // the confirmation. commit-tree binds the exact prepared index tree, so
-    // concurrent working-tree and index edits are preserved.
+    // Revalidate again after object creation and immediately before the only
+    // ref mutation. For a symbolic checkout, update the exact approved local
+    // branch ref rather than the moving HEAD alias. A checkout race therefore
+    // cannot put the approved commit on a different same-OID branch.
+    await this.assertCommitAuthorityStillCurrent(authority, options)
     const expected =
       prepared.expectedHeadOid ?? '0'.repeat(commitOid.length)
+    const approvedRef = prepared.symbolicRef
     const reflogSubject = escapeUnsafeDisplayCharacters(
       message.split(/\r?\n/u, 1)[0] ?? ''
     ).slice(0, 200)
     await this.runGit(
       [
         'update-ref',
+        // Never dereference the exact local branch target.
+        '--no-deref',
         '-m',
         `commit: ${reflogSubject}`,
-        'HEAD',
+        approvedRef,
         commitOid,
         expected
       ],

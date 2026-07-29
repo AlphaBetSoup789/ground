@@ -27,7 +27,10 @@ const safeStorageMock = vi.hoisted(() => ({
 
 vi.mock('electron', () => ({ safeStorage: safeStorageMock }))
 
-import { SecretVault } from './secrets'
+import {
+  SecretVault,
+  SecretVaultPersistenceError
+} from './secrets'
 
 describe('SecretVault', () => {
   beforeEach(() => {
@@ -84,6 +87,101 @@ describe('SecretVault', () => {
     expect(reloaded.get('provider-b')).toBe('beta')
   })
 
+  it('reserves a complete versioned staging generation at the maximum provider count', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-vault-'))
+    const filePath = path.join(directory, 'secrets.json')
+    const encrypted = Buffer.from('encrypted:secret', 'utf8').toString(
+      'base64'
+    )
+    const providerEntries = Object.fromEntries(
+      Array.from({ length: 1_000 }, (_, index) => [
+        `provider-${index}`,
+        encrypted
+      ])
+    )
+    await writeFile(filePath, JSON.stringify(providerEntries), {
+      encoding: 'utf8',
+      mode: 0o600
+    })
+    const vault = new SecretVault(filePath)
+    await vault.load()
+
+    await expect(
+      vault.setStaged('provider-credential:v2:staged-a', 'replacement')
+    ).resolves.toBeUndefined()
+    await expect(
+      vault.setStaged('provider-credential:v2:staged-b', 'replacement')
+    ).resolves.toBeUndefined()
+    expect(vault.get('provider-credential:v2:staged-a')).toBe('replacement')
+    expect(vault.get('provider-credential:v2:staged-b')).toBe('replacement')
+
+    const fullEntries = Object.fromEntries(
+      Array.from({ length: 2_000 }, (_, index) => [
+        `full-${index}`,
+        encrypted
+      ])
+    )
+    await writeFile(filePath, JSON.stringify(fullEntries), {
+      encoding: 'utf8',
+      mode: 0o600
+    })
+    const fullVault = new SecretVault(filePath)
+    await fullVault.load()
+    await expect(
+      fullVault.setStaged('provider-credential:v2:overflow', 'replacement')
+    ).rejects.toThrow(/entry limit/i)
+  })
+
+  it('bounds plaintext before encryption while accepting the maximum CLI envelope budget', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-vault-'))
+    const vault = new SecretVault(path.join(directory, 'secrets.json'))
+    await vault.load()
+
+    await expect(
+      vault.set('maximum-plaintext', 'x'.repeat(768 * 1024))
+    ).resolves.toBeUndefined()
+    const encryptionCalls = safeStorageMock.encryptString.mock.calls.length
+    await expect(
+      vault.set('oversized-plaintext', 'x'.repeat(768 * 1024 + 1))
+    ).rejects.toThrow(/plaintext exceeds/i)
+    expect(safeStorageMock.encryptString).toHaveBeenCalledTimes(
+      encryptionCalls
+    )
+  })
+
+  it('checks decoded ciphertext bytes even when base64 lengths are identical', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-vault-'))
+    const filePath = path.join(directory, 'secrets.json')
+    const vault = new SecretVault(filePath)
+    await vault.load()
+    const maximum = Buffer.alloc(1024 * 1024, 0x5a)
+    const oversized = Buffer.alloc(1024 * 1024 + 1, 0x5a)
+    expect(maximum.toString('base64')).toHaveLength(1_398_104)
+    expect(oversized.toString('base64')).toHaveLength(1_398_104)
+
+    safeStorageMock.encryptString.mockReturnValueOnce(maximum)
+    await expect(
+      vault.set('maximum-ciphertext', 'small-secret')
+    ).resolves.toBeUndefined()
+    safeStorageMock.encryptString.mockReturnValueOnce(oversized)
+    await expect(
+      vault.set('oversized-ciphertext', 'small-secret')
+    ).rejects.toThrow(/encrypted credential exceeds/i)
+
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        crafted: oversized.toString('base64')
+      }),
+      { encoding: 'utf8', mode: 0o600 }
+    )
+    const crafted = new SecretVault(filePath)
+    await expect(crafted.load()).resolves.toMatchObject({
+      kind: 'credential-warning'
+    })
+    expect(crafted.has('crafted')).toBe(false)
+  })
+
   it('publishes a credential mutation only after its durable write succeeds', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-vault-'))
     const filePath = path.join(directory, 'secrets.json')
@@ -97,6 +195,68 @@ describe('SecretVault', () => {
 
     expect(vault.get('provider-a')).toBe('alpha')
     expect(vault.has('provider-b')).toBe(false)
+  })
+
+  it('deletes an exact reference set as one atomic vault mutation', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-vault-'))
+    const filePath = path.join(directory, 'secrets.json')
+    const vault = new SecretVault(filePath)
+    await vault.load()
+    await vault.set('provider-a', 'alpha')
+    await vault.set('provider-b', 'beta')
+    await vault.set('provider-c', 'gamma')
+
+    await vault.deleteMany(['provider-a', 'provider-b', 'provider-a'])
+
+    expect(vault.has('provider-a')).toBe(false)
+    expect(vault.has('provider-b')).toBe(false)
+    expect(vault.get('provider-c')).toBe('gamma')
+    const reloaded = new SecretVault(filePath)
+    await reloaded.load()
+    expect(reloaded.has('provider-a')).toBe(false)
+    expect(reloaded.has('provider-b')).toBe(false)
+    expect(reloaded.get('provider-c')).toBe('gamma')
+  })
+
+  it('keeps every reference in memory when an atomic delete cannot publish', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-vault-'))
+    const filePath = path.join(directory, 'secrets.json')
+    const vault = new SecretVault(filePath)
+    await vault.load()
+    await vault.set('provider-a', 'alpha')
+    await vault.set('provider-b', 'beta')
+    await unlink(filePath)
+    await mkdir(filePath)
+
+    await expect(
+      vault.deleteMany(['provider-a', 'provider-b'])
+    ).rejects.toThrow()
+
+    expect(vault.get('provider-a')).toBe('alpha')
+    expect(vault.get('provider-b')).toBe('beta')
+  })
+
+  it('reports a late directory-sync failure as an ambiguous vault publication', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-vault-'))
+    const filePath = path.join(directory, 'secrets.json')
+    const syncFailure = Object.assign(new Error('directory sync failed'), {
+      code: 'EIO'
+    })
+    const vault = new SecretVault(filePath, async () => {
+      throw syncFailure
+    })
+    await vault.load()
+
+    await expect(vault.set('provider-a', 'alpha')).rejects.toBeInstanceOf(
+      SecretVaultPersistenceError
+    )
+
+    // The rename happened before the late error, but this process did not
+    // advance its in-memory generation.
+    expect(vault.has('provider-a')).toBe(false)
+    const selectedDiskGeneration = new SecretVault(filePath)
+    await selectedDiskGeneration.load()
+    expect(selectedDiskGeneration.get('provider-a')).toBe('alpha')
   })
 
   it.runIf(process.platform !== 'win32')(
@@ -151,12 +311,49 @@ describe('SecretVault', () => {
     await writeFile(filePath, '{"provider-1":"plain text"}', 'utf8')
 
     const vault = new SecretVault(filePath)
-    await vault.load()
+    const notice = await vault.load()
 
     expect(vault.has('provider-1')).toBe(false)
+    expect(notice).toMatchObject({
+      kind: 'credential-warning',
+      title: 'Saved credentials need attention'
+    })
+    expect(notice?.detail).not.toContain(filePath)
     const entries = await readdir(directory)
     expect(entries.some((name) => name.startsWith('secrets.json.unreadable-'))).toBe(
       true
+    )
+  })
+
+  it('does not warn for a missing or valid encrypted vault', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-vault-'))
+    const filePath = path.join(directory, 'secrets.json')
+    const vault = new SecretVault(filePath)
+    expect(await vault.load()).toBeUndefined()
+    await vault.set('provider-1', 'secret')
+
+    const reloaded = new SecretVault(filePath)
+    expect(await reloaded.load()).toBeUndefined()
+    expect(reloaded.get('provider-1')).toBe('secret')
+  })
+
+  it.runIf(
+    process.platform !== 'win32' &&
+      typeof process.getuid === 'function' &&
+      process.getuid() !== 0
+  )('does not open empty when an unreadable vault cannot be quarantined', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-vault-'))
+    const filePath = path.join(directory, 'secrets.json')
+    await writeFile(filePath, '{"provider-1":"plain text"}', 'utf8')
+    await chmod(directory, 0o500)
+
+    try {
+      await expect(new SecretVault(filePath).load()).rejects.toThrow()
+    } finally {
+      await chmod(directory, 0o700)
+    }
+    expect(await readFile(filePath, 'utf8')).toBe(
+      '{"provider-1":"plain text"}'
     )
   })
 
@@ -195,6 +392,13 @@ describe('SecretVault', () => {
     await vault.set('provider-1', 'secret')
 
     safeStorageMock.isEncryptionAvailable.mockReturnValue(false)
+    const reloaded = new SecretVault(filePath)
+    expect(await reloaded.load()).toBeUndefined()
+    expect(
+      (await readdir(directory)).some((name) =>
+        name.startsWith('secrets.json.unreadable-')
+      )
+    ).toBe(false)
     expect(vault.get('provider-1')).toBeUndefined()
     await expect(vault.set('provider-2', 'secret')).rejects.toThrow(
       /credential vault is unavailable/i

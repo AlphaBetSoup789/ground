@@ -62,6 +62,17 @@ jobs:
       - name: Verify source
         run: npm run verify
 
+      - name: Install renderer-test display dependencies
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install --no-install-recommends --yes xauth xvfb
+
+      - name: Exercise renderer interactions in Electron under Xvfb
+        run: >-
+          xvfb-run --auto-servernum
+          --server-args="-screen 0 1440x960x24"
+          npm run test:e2e:renderer
+
       - name: Audit application, Electron, and build dependencies
         run: npm audit --audit-level=high
 
@@ -72,17 +83,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macOS
-            os: macos-latest
-            command: npm run dist:mac
-          - platform: Windows
-            os: windows-latest
-            command: npm run dist:win
-          - platform: Linux
-            os: ubuntu-latest
-            command: npm run dist:linux
+          - platform: macOS-arm64
+            slug: macos-arm64
+            os: macos-15
+            architecture: arm64
+          - platform: macOS-x64
+            slug: macos-x64
+            os: macos-15-intel
+            architecture: x64
+          - platform: Windows-x64
+            slug: windows-x64
+            os: windows-2025
+            architecture: x64
+          - platform: Linux-x64
+            slug: linux-x64
+            os: ubuntu-24.04
+            architecture: x64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 55
     environment:
       name: release
     permissions:
@@ -107,6 +125,14 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: npm install --global npm@11.16.0 --ignore-scripts
 
+      - name: Verify native runner architecture
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+        run: >-
+          node -e "if (process.arch !== process.env.EXPECTED_ARCHITECTURE)
+          throw new Error('Expected ' + process.env.EXPECTED_ARCHITECTURE +
+          ' runner, received ' + process.arch)"
+
       - name: Verify toolchain and install-script policy
         run: npm run toolchain:check && npm run install-scripts:check
 
@@ -117,14 +143,19 @@ jobs:
         if: runner.os == 'Linux'
         run: >-
           sudo apt-get update &&
-          sudo apt-get install --no-install-recommends --yes xauth xvfb
+          sudo apt-get install --no-install-recommends --yes
+          dbus-x11 gnome-keyring libsecret-1-0 xauth xvfb
 
-      - name: Build signed and notarized macOS artifacts
+      - name: Build release source without signing credentials
+        run: npm run build
+
+      - name: Package signed and notarized macOS artifacts
         if: runner.os == 'macOS'
         shell: bash
         env:
           CSC_LINK: ${{ secrets.MACOS_CERTIFICATE }}
           CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          CSC_IDENTITY_AUTO_DISCOVERY: true
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -134,11 +165,82 @@ jobs:
           test -n "$APPLE_ID"
           test -n "$APPLE_APP_SPECIFIC_PASSWORD"
           test -n "$APPLE_TEAM_ID"
-          npm run dist:mac
+          ./node_modules/.bin/electron-builder \
+            --mac zip dmg --publish never --${{ matrix.architecture }}
 
-      - name: Build release artifacts
-        if: runner.os != 'macOS'
-        run: ${{ matrix.command }}
+      - name: Package explicitly unsigned Windows artifacts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Remove-Item Env:WIN_CSC_LINK -ErrorAction SilentlyContinue
+          Remove-Item Env:WIN_CSC_KEY_PASSWORD -ErrorAction SilentlyContinue
+          Remove-Item Env:CSC_LINK -ErrorAction SilentlyContinue
+          Remove-Item Env:CSC_KEY_PASSWORD -ErrorAction SilentlyContinue
+          Remove-Item Env:CSC_NAME -ErrorAction SilentlyContinue
+          $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
+          & ./node_modules/.bin/electron-builder.cmd --win nsis --publish never --x64
+
+      - name: Package Linux artifacts
+        if: runner.os == 'Linux'
+        run: >-
+          ./node_modules/.bin/electron-builder
+          --linux AppImage deb --publish never --x64
+
+      - name: Verify macOS signing, Gatekeeper, and notarization
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_TEAM_ID"
+          verify_app() {
+            local candidate="$1"
+            local expected_bundle_id
+            expected_bundle_id="$(node -p "require('./package.json').build.appId")"
+            local actual_bundle_id
+            actual_bundle_id="$(plutil -extract CFBundleIdentifier raw -o - "$candidate/Contents/Info.plist")"
+            test "$actual_bundle_id" = "$expected_bundle_id"
+            codesign --verify --deep --strict --verbose=2 "$candidate"
+            local actual_team
+            actual_team="$(codesign -dv --verbose=4 "$candidate" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+            test "$actual_team" = "$APPLE_TEAM_ID"
+            spctl --assess --type execute --verbose=2 "$candidate"
+            xcrun stapler validate "$candidate"
+          }
+          apps=(release/mac*/Ground.app)
+          test "${#apps[@]}" -eq 1
+          app_path="${apps[0]}"
+          verify_app "$app_path"
+          package_version="$(node -p "require('./package.json').version")"
+          zip_path="release/Ground-${package_version}-mac-${{ matrix.architecture }}.zip"
+          dmg_path="release/Ground-${package_version}-mac-${{ matrix.architecture }}.dmg"
+          test -f "$zip_path"
+          test -f "$dmg_path"
+          extracted="$(mktemp -d "$RUNNER_TEMP/ground-mac-signature.XXXXXX")"
+          trap 'rm -rf "$extracted"' EXIT
+          ditto -x -k "$zip_path" "$extracted"
+          verify_app "$extracted/Ground.app"
+          hdiutil verify "$dmg_path"
+
+      - name: Verify Windows release executables are unsigned
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = @(Get-ChildItem release/Ground-*-windows-x64.exe)
+          if ($installer.Count -ne 1) {
+            throw "Expected exactly one Windows installer"
+          }
+          $targets = @($installer[0], (Get-Item release/win-unpacked/Ground.exe))
+          foreach ($target in $targets) {
+            $signature = Get-AuthenticodeSignature $target.FullName
+            if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned) {
+              throw "$($target.Name) must be explicitly unsigned until Ground defines a Windows signing policy: $($signature.Status)"
+            }
+          }
+
+      - name: Verify exact target artifact inventory
+        run: npm run package-artifacts:verify
 
       - name: Prepare Linux Chromium sandbox for packaged smoke
         if: runner.os == 'Linux'
@@ -150,13 +252,33 @@ jobs:
       - name: Smoke-test packaged main and preload startup
         run: npm run smoke:package:launch
 
-      - name: Smoke-test packaged PTY, Git, local MCP, and cancellation
+      - name: Smoke-test packaged identity, credentials, approvals, and native runtime
+        if: runner.os != 'Linux'
         run: npm run smoke:package:native
+
+      - name: Smoke-test installed or extracted distributable
+        if: runner.os != 'Linux'
+        run: npm run smoke:package:distributable
+
+      - name: Smoke-test packaged native runtime with ephemeral Secret Service
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          GROUND_PACKAGE_SMOKE_PREPARE_SANDBOX: sudo
+        run: |
+          dbus-run-session -- bash -euo pipefail -c '
+            export XDG_RUNTIME_DIR="$RUNNER_TEMP/ground-keyring-runtime"
+            mkdir -p -m 700 "$XDG_RUNTIME_DIR"
+            eval "$(printf "%s\n" ground-packaged-smoke | gnome-keyring-daemon --unlock --components=secrets)"
+            export GNOME_KEYRING_CONTROL
+            npm run smoke:package:native
+            npm run smoke:package:distributable
+          '
 
       - name: Inventory packages shipped in app.asar
         run: >-
           node scripts/generate-packaged-components.mjs
-          "release/ground-packaged-components-${{ runner.os }}.json"
+          "release/ground-packaged-components-${{ matrix.slug }}.json"
           release
 
       - name: Attest build provenance
@@ -168,6 +290,7 @@ jobs:
             release/Ground-*.exe
             release/Ground-*.AppImage
             release/Ground-*.deb
+            release/ground-package-runtime-evidence-*.json
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -180,6 +303,7 @@ jobs:
             release/Ground-*.AppImage
             release/Ground-*.deb
             release/ground-packaged-components-*.json
+            release/ground-package-runtime-evidence-*.json
           if-no-files-found: error
           retention-days: 30
 
@@ -224,6 +348,12 @@ jobs:
           pattern: Ground-*
           path: artifacts
           merge-multiple: true
+
+      - name: Verify exact release artifact inventory
+        run: npm run package-artifacts:verify -- --all artifacts
+
+      - name: Verify distributable runtime evidence
+        run: npm run package-evidence:verify -- artifacts
 
       - name: Generate runtime-inclusive CycloneDX SBOM
         shell: bash

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import type {
   AppSnapshot,
@@ -9,6 +10,8 @@ import {
   type McpManagerStore,
   type McpServiceCoordinator
 } from './mcp-manager'
+import { prepareMcpExecutionCall } from './execution-binding'
+import { StatePersistenceError } from './store'
 import type {
   McpConnectOptions,
   McpExecuteOptions,
@@ -20,6 +23,21 @@ import type {
 
 const FINGERPRINT_A = 'a'.repeat(64)
 const FINGERPRINT_B = 'b'.repeat(64)
+const CONNECTION_FINGERPRINT_A = 'c'.repeat(64)
+
+function fakeConnectionFingerprint(config: McpServerConfig): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        transport: config.transport,
+        namespace: config.namespace ?? config.id,
+        ...(config.transport === 'streamable-http'
+          ? { url: new URL(config.url).toString() }
+          : { command: config.command, args: config.args ?? [] })
+      })
+    )
+    .digest('hex')
+}
 
 function profile(
   overrides: Partial<McpServerProfile> = {}
@@ -41,7 +59,8 @@ function profile(
 function tool(
   serverId = 'server-one',
   fingerprint = FINGERPRINT_A,
-  trustStatus: 'approved' | 'pending' | 'changed' = 'pending'
+  trustStatus: 'approved' | 'pending' | 'changed' = 'pending',
+  connectionFingerprint = CONNECTION_FINGERPRINT_A
 ): McpExposedTool {
   return {
     definition: {
@@ -61,6 +80,7 @@ function tool(
       approvalRequired: true,
       serverId,
       serverName: serverId,
+      connectionFingerprint,
       originalName: 'read_file',
       fingerprint,
       trustStatus
@@ -75,7 +95,8 @@ function serverSnapshot(
   const exposed = tool(
     config.id,
     Object.values(fingerprints)[0] ?? FINGERPRINT_A,
-    Object.keys(fingerprints).length ? 'approved' : 'pending'
+    Object.keys(fingerprints).length ? 'approved' : 'pending',
+    fakeConnectionFingerprint(config)
   )
   const keyedFingerprints = Object.keys(fingerprints).length
     ? { ...fingerprints }
@@ -118,6 +139,8 @@ class FakeStore implements McpManagerStore {
   readonly profiles = new Map<string, McpServerProfile>()
   saveCount = 0
   failNextSave = false
+  failNextDelete = false
+  nextSaveError?: Error
 
   constructor(profiles: McpServerProfile[] = []) {
     for (const item of profiles) this.profiles.set(item.id, structuredClone(item))
@@ -137,6 +160,11 @@ class FakeStore implements McpManagerStore {
 
   async saveMcpServer(server: McpServerProfile): Promise<McpServerProfile> {
     this.saveCount += 1
+    if (this.nextSaveError) {
+      const error = this.nextSaveError
+      this.nextSaveError = undefined
+      throw error
+    }
     if (this.failNextSave) {
       this.failNextSave = false
       throw new Error('disk is full')
@@ -146,6 +174,10 @@ class FakeStore implements McpManagerStore {
   }
 
   async deleteMcpServer(serverId: string): Promise<void> {
+    if (this.failNextDelete) {
+      this.failNextDelete = false
+      throw new Error('disk is full')
+    }
     if (!this.profiles.delete(serverId)) throw new Error('MCP server not found')
   }
 }
@@ -170,8 +202,12 @@ class FakeService implements McpServiceCoordinator {
   failConnect = new Set<string>()
   failTrust = false
   connectDelayMs = 0
+  readonly connectGates = new Map<string, Promise<void>>()
+  beforeToolDispatch?: () => void
   activeConnects = 0
   maxActiveConnects = 0
+  activeStdioConnects = 0
+  maxActiveStdioConnects = 0
   closeCount = 0
   closeNeverSettles = false
 
@@ -195,7 +231,15 @@ class FakeService implements McpServiceCoordinator {
       this.maxActiveConnects,
       this.activeConnects
     )
+    if (config.transport === 'stdio') {
+      this.activeStdioConnects += 1
+      this.maxActiveStdioConnects = Math.max(
+        this.maxActiveStdioConnects,
+        this.activeStdioConnects
+      )
+    }
     try {
+      await this.connectGates.get(config.id)
       if (this.connectDelayMs) {
         await new Promise((resolve) => setTimeout(resolve, this.connectDelayMs))
       }
@@ -212,6 +256,9 @@ class FakeService implements McpServiceCoordinator {
       return structuredClone(snapshot)
     } finally {
       this.activeConnects -= 1
+      if (config.transport === 'stdio') {
+        this.activeStdioConnects -= 1
+      }
     }
   }
 
@@ -280,9 +327,26 @@ class FakeService implements McpServiceCoordinator {
   async executeTool(
     namespacedName: string,
     input: unknown,
-    options?: McpExecuteOptions
+    options?: McpExecuteOptions,
+    assertDispatchAuthorized?: () => void
   ): Promise<McpToolExecutionResult> {
+    this.beforeToolDispatch?.()
+    assertDispatchAuthorized?.()
     this.executeCalls.push({ name: namespacedName, input, options })
+    if (options?.approvalGranted === true) {
+      const current = this.snapshots
+        .get(options.expectedServerId)
+        ?.tools.find((item) => item.definition.name === namespacedName)
+      if (
+        current?.metadata.connectionFingerprint !==
+        options.expectedConnectionFingerprint
+      ) {
+        throw Object.assign(
+          new Error('The approved MCP server configuration changed before dispatch'),
+          { code: 'tool-drift' as const }
+        )
+      }
+    }
     return {
       serverId: 'server-one',
       toolName: namespacedName,
@@ -539,6 +603,233 @@ describe('MCP manager lifecycle', () => {
     ).toHaveLength(7)
   })
 
+  it('serializes local startup confirmations while remote servers connect concurrently', async () => {
+    const remoteProfiles = Array.from({ length: 4 }, (_, index) =>
+      profile({
+        id: `remote-${index}`,
+        name: `Remote ${index}`,
+        namespace: `remote_${index}`
+      })
+    )
+    const localProfiles = Array.from({ length: 3 }, (_, index) =>
+      profile({
+        id: `local-${index}`,
+        name: `Local ${index}`,
+        namespace: `local_${index}`,
+        transport: 'stdio',
+        command: process.execPath,
+        args: ['--version']
+      })
+    )
+    const store = new FakeStore([...remoteProfiles, ...localProfiles])
+    const service = new FakeService()
+    service.connectDelayMs = 10
+    const manager = new McpManager(store, service, {
+      startupConcurrency: 4
+    })
+
+    await manager.ready()
+
+    expect(service.maxActiveStdioConnects).toBe(1)
+    expect(service.maxActiveConnects).toBeGreaterThan(1)
+  })
+
+  it.each(['missing', 'disabled', 'changed'] as const)(
+    're-reads startup profiles and skips a %s queued profile',
+    async (mutation) => {
+      const first = profile({
+        id: 'first',
+        name: 'First',
+        namespace: 'first'
+      })
+      const queued = profile({
+        id: 'queued',
+        name: 'Queued',
+        namespace: 'queued'
+      })
+      const store = new FakeStore([first, queued])
+      const service = new FakeService()
+      let releaseFirst = (): void => undefined
+      service.connectGates.set(
+        first.id,
+        new Promise<void>((resolve) => {
+          releaseFirst = resolve
+        })
+      )
+      const manager = new McpManager(store, service, {
+        startupConcurrency: 1
+      })
+      const initializing = manager.initialize()
+      await vi.waitFor(() => {
+        expect(service.connectCalls.map(({ config }) => config.id)).toEqual([
+          first.id
+        ])
+      })
+
+      if (mutation === 'missing') {
+        store.profiles.delete(queued.id)
+      } else {
+        store.profiles.set(
+          queued.id,
+          profile({
+            ...queued,
+            ...(mutation === 'disabled'
+              ? { enabled: false }
+              : { url: 'https://changed.example.com/rpc' }),
+            updatedAt: '2026-01-02T00:00:00.000Z'
+          })
+        )
+      }
+      releaseFirst()
+      await initializing
+
+      expect(service.connectCalls.map(({ config }) => config.id)).toEqual([
+        first.id
+      ])
+      expect(service.snapshots.has(queued.id)).toBe(false)
+    }
+  )
+
+  it.each(['disabled', 'deleted'] as const)(
+    'does not revive a profile %s through the manager before its startup turn',
+    async (mutation) => {
+      const first = profile({
+        id: 'first',
+        name: 'First',
+        namespace: 'first'
+      })
+      const queued = profile({
+        id: 'queued',
+        name: 'Queued',
+        namespace: 'queued'
+      })
+      const store = new FakeStore([first, queued])
+      const service = new FakeService()
+      let releaseFirst = (): void => undefined
+      service.connectGates.set(
+        first.id,
+        new Promise<void>((resolve) => {
+          releaseFirst = resolve
+        })
+      )
+      const manager = new McpManager(store, service, {
+        startupConcurrency: 1
+      })
+      const initializing = manager.initialize()
+      await vi.waitFor(() => {
+        expect(service.connectCalls.map(({ config }) => config.id)).toEqual([
+          first.id
+        ])
+      })
+
+      if (mutation === 'deleted') {
+        await manager.delete(queued.id)
+      } else {
+        await manager.save({
+          id: queued.id,
+          name: queued.name,
+          namespace: queued.namespace,
+          enabled: false,
+          transport: 'streamable-http',
+          url:
+            queued.transport === 'streamable-http'
+              ? queued.url
+              : 'https://mcp.example.com/rpc'
+        })
+      }
+      releaseFirst()
+      await initializing
+
+      expect(service.connectCalls.map(({ config }) => config.id)).toEqual([
+        first.id
+      ])
+      expect(service.snapshots.has(queued.id)).toBe(false)
+    }
+  )
+
+  it('preserves a current replacement connection when stale startup work reaches its turn', async () => {
+    const first = profile({
+      id: 'first',
+      name: 'First',
+      namespace: 'first'
+    })
+    const queued = profile({
+      id: 'queued',
+      name: 'Queued',
+      namespace: 'queued'
+    })
+    const store = new FakeStore([first, queued])
+    const service = new FakeService()
+    let releaseFirst = (): void => undefined
+    service.connectGates.set(
+      first.id,
+      new Promise<void>((resolve) => {
+        releaseFirst = resolve
+      })
+    )
+    const manager = new McpManager(store, service, {
+      startupConcurrency: 1
+    })
+    const initializing = manager.initialize()
+    await vi.waitFor(() => {
+      expect(service.connectCalls.map(({ config }) => config.id)).toEqual([
+        first.id
+      ])
+    })
+
+    await manager.save({
+      id: queued.id,
+      name: queued.name,
+      namespace: queued.namespace,
+      enabled: true,
+      transport: 'streamable-http',
+      url: 'https://replacement.example.com/rpc'
+    })
+    releaseFirst()
+    await initializing
+
+    const queuedConnections = service.connectCalls.filter(
+      ({ config }) => config.id === queued.id
+    )
+    expect(queuedConnections).toHaveLength(1)
+    expect(queuedConnections[0]?.config).toMatchObject({
+      transport: 'streamable-http',
+      url: 'https://replacement.example.com/rpc'
+    })
+    expect(
+      manager.getStatuses().find(({ id }) => id === queued.id)?.connection
+    ).toBe('connected')
+  })
+
+  it('disconnects a startup connection when its profile changes while connect is pending', async () => {
+    const stored = profile()
+    const store = new FakeStore([stored])
+    const service = new FakeService()
+    let releaseConnect = (): void => undefined
+    service.connectGates.set(
+      stored.id,
+      new Promise<void>((resolve) => {
+        releaseConnect = resolve
+      })
+    )
+    const manager = new McpManager(store, service)
+    const initializing = manager.initialize()
+    await vi.waitFor(() => {
+      expect(service.connectCalls).toHaveLength(1)
+    })
+    store.profiles.set(stored.id, {
+      ...stored,
+      enabled: false,
+      updatedAt: '2026-01-02T00:00:00.000Z'
+    })
+    releaseConnect()
+
+    await initializing
+    expect(service.disconnectCalls).toEqual([stored.id])
+    expect(service.snapshots.has(stored.id)).toBe(false)
+    expect(manager.getStatuses()[0]?.connection).toBe('disconnected')
+  })
+
   it('passes persisted trust into connections and maps snapshots to public status', async () => {
     const exposedName = 'mcp__server_one__read_file'
     const stored = profile({
@@ -599,6 +890,31 @@ describe('MCP manager lifecycle', () => {
     expect(store.profiles.has(stored.id)).toBe(false)
   })
 
+  it('preserves a live profile and connection when durable deletion fails', async () => {
+    const stored = profile()
+    const store = new FakeStore([stored])
+    const service = new FakeService()
+    const manager = new McpManager(store, service)
+    await manager.connect(stored.id)
+    store.failNextDelete = true
+
+    await expect(manager.delete(stored.id)).rejects.toThrow('disk is full')
+
+    expect(store.getMcpServer(stored.id)).toEqual(stored)
+    expect(service.disconnectCalls).toEqual([])
+    expect(service.forgotten).toEqual([])
+    expect(manager.getStatuses()).toEqual([
+      expect.objectContaining({
+        id: stored.id,
+        connection: 'connected'
+      })
+    ])
+    await expect(manager.connect(stored.id)).resolves.toMatchObject({
+      connection: 'connected'
+    })
+    expect(service.connectCalls).toHaveLength(1)
+  })
+
   it('automatically connects enabled saves and disconnects disabled updates', async () => {
     const store = new FakeStore()
     const service = new FakeService()
@@ -643,6 +959,7 @@ describe('MCP manager trust and execution', () => {
     expect(service.trusted).toEqual([
       { id: stored.id, fingerprints: connected.fingerprints }
     ])
+    expect(manager.listApprovedTools()).toHaveLength(1)
   })
 
   it('does not persist fingerprints when exact approval fails', async () => {
@@ -684,6 +1001,25 @@ describe('MCP manager trust and execution', () => {
     expect(store.getMcpServer(stored.id).trustedFingerprints).toEqual({})
   })
 
+  it('propagates ambiguous state publication without continuing MCP recovery', async () => {
+    const stored = profile()
+    const store = new FakeStore([stored])
+    const service = new FakeService()
+    const manager = new McpManager(store, service)
+    const connected = await manager.connect(stored.id)
+    const uncertainty = new StatePersistenceError(
+      Object.assign(new Error('directory sync failed'), { code: 'EIO' })
+    )
+    store.nextSaveError = uncertainty
+
+    await expect(
+      manager.trustTools(stored.id, connected.fingerprints)
+    ).rejects.toBe(uncertainty)
+
+    expect(service.forgotten).toEqual([])
+    expect(store.getMcpServer(stored.id).trustedFingerprints).toEqual({})
+  })
+
   it('proxies approved tools and executions without weakening approval options', async () => {
     const exposedName = 'mcp__server_one__read_file'
     const stored = profile({
@@ -693,20 +1029,169 @@ describe('MCP manager trust and execution', () => {
     const service = new FakeService()
     const manager = new McpManager(store, service)
     await manager.connect(stored.id)
-    expect(manager.listApprovedTools()).toHaveLength(1)
+    const approvedTool = manager.listApprovedTools()[0]
+    expect(approvedTool).toBeDefined()
+    if (!approvedTool) throw new Error('Expected approved MCP tool fixture')
+    const input = { path: 'README.md' }
+    const prepared = prepareMcpExecutionCall(approvedTool, input)
+    const options: McpExecuteOptions = {
+      approvalGranted: true,
+      expectedServerId: prepared.serverId,
+      expectedConnectionFingerprint: prepared.connectionFingerprint,
+      expectedOriginalName: prepared.originalName,
+      expectedToolFingerprint: prepared.toolFingerprint,
+      expectedArgumentsSha256: prepared.argumentsSha256,
+      timeoutMs: 500
+    }
     const result = await manager.executeTool(
       exposedName,
-      { path: 'README.md' },
-      { approvalGranted: true, timeoutMs: 500 }
+      input,
+      options
     )
     expect(result.result).toEqual({ ok: true })
     expect(service.executeCalls).toEqual([
       {
         name: exposedName,
-        input: { path: 'README.md' },
-        options: { approvalGranted: true, timeoutMs: 500 }
+        input,
+        options
       }
     ])
+  })
+
+  it.each(['missing', 'disabled', 'changed', 'untrusted'] as const)(
+    'does not list or execute trusted tools after their profile is %s',
+    async (mutation) => {
+      const exposedName = 'mcp__server_one__read_file'
+      const stored = profile({
+        trustedFingerprints: { [exposedName]: FINGERPRINT_A }
+      })
+      const store = new FakeStore([stored])
+      const service = new FakeService()
+      const manager = new McpManager(store, service)
+      await manager.connect(stored.id)
+      const approvedTool = manager.listApprovedTools()[0]
+      if (!approvedTool) throw new Error('Expected approved MCP tool fixture')
+      const prepared = prepareMcpExecutionCall(approvedTool, {
+        path: 'README.md'
+      })
+
+      if (mutation === 'missing') {
+        store.profiles.delete(stored.id)
+      } else {
+        store.profiles.set(stored.id, {
+          ...stored,
+          ...(mutation === 'disabled'
+            ? { enabled: false }
+            : mutation === 'changed'
+              ? { url: 'https://changed.example.com/rpc' }
+              : { trustedFingerprints: {} }),
+          updatedAt: '2026-01-02T00:00:00.000Z'
+        })
+      }
+
+      expect(manager.listApprovedTools()).toEqual([])
+      await expect(
+        manager.executeTool(
+          prepared.namespacedName,
+          prepared.arguments,
+          {
+            approvalGranted: true,
+            expectedServerId: prepared.serverId,
+            expectedConnectionFingerprint:
+              prepared.connectionFingerprint,
+            expectedOriginalName: prepared.originalName,
+            expectedToolFingerprint: prepared.toolFingerprint,
+            expectedArgumentsSha256: prepared.argumentsSha256
+          }
+        )
+      ).rejects.toMatchObject({ code: 'tool-drift' })
+      expect(service.executeCalls).toEqual([])
+    }
+  )
+
+  it('re-checks the current profile at the final service dispatch boundary', async () => {
+    const exposedName = 'mcp__server_one__read_file'
+    const stored = profile({
+      trustedFingerprints: { [exposedName]: FINGERPRINT_A }
+    })
+    const store = new FakeStore([stored])
+    const service = new FakeService()
+    const manager = new McpManager(store, service)
+    await manager.connect(stored.id)
+    const approvedTool = manager.listApprovedTools()[0]
+    if (!approvedTool) throw new Error('Expected approved MCP tool fixture')
+    const prepared = prepareMcpExecutionCall(approvedTool, {
+      path: 'README.md'
+    })
+    service.beforeToolDispatch = () => {
+      store.profiles.set(stored.id, {
+        ...stored,
+        enabled: false,
+        updatedAt: '2026-01-02T00:00:00.000Z'
+      })
+    }
+
+    await expect(
+      manager.executeTool(
+        prepared.namespacedName,
+        prepared.arguments,
+        {
+          approvalGranted: true,
+          expectedServerId: prepared.serverId,
+          expectedConnectionFingerprint: prepared.connectionFingerprint,
+          expectedOriginalName: prepared.originalName,
+          expectedToolFingerprint: prepared.toolFingerprint,
+          expectedArgumentsSha256: prepared.argumentsSha256
+        }
+      )
+    ).rejects.toMatchObject({ code: 'tool-drift' })
+    expect(service.executeCalls).toEqual([])
+  })
+
+  it('cannot dispatch an approved call after the same server is reconfigured to another URL', async () => {
+    const exposedName = 'mcp__server_one__read_file'
+    const stored = profile({
+      url: 'https://mcp-a.example.com/rpc',
+      trustedFingerprints: { [exposedName]: FINGERPRINT_A }
+    })
+    const store = new FakeStore([stored])
+    const service = new FakeService()
+    const manager = new McpManager(store, service)
+    await manager.connect(stored.id)
+    const approvedTool = manager.listApprovedTools()[0]
+    if (!approvedTool) throw new Error('Expected approved MCP tool fixture')
+    const input = { path: 'README.md' }
+    const prepared = prepareMcpExecutionCall(approvedTool, input)
+    const approvedOptions: McpExecuteOptions = {
+      approvalGranted: true,
+      expectedServerId: prepared.serverId,
+      expectedConnectionFingerprint: prepared.connectionFingerprint,
+      expectedOriginalName: prepared.originalName,
+      expectedToolFingerprint: prepared.toolFingerprint,
+      expectedArgumentsSha256: prepared.argumentsSha256
+    }
+
+    service.connectDelayMs = 25
+    const reconfiguring = manager.save({
+      id: stored.id,
+      name: stored.name,
+      namespace: stored.namespace,
+      enabled: true,
+      transport: 'streamable-http',
+      url: 'https://mcp-b.example.com/rpc'
+    })
+    const blockedExecution = expect(
+      manager.executeTool(
+        prepared.namespacedName,
+        prepared.arguments,
+        approvedOptions
+      )
+    ).rejects.toMatchObject({ code: 'tool-drift' })
+    await reconfiguring
+    expect(
+      service.inspectServer(stored.id).tools[0]?.metadata.connectionFingerprint
+    ).not.toBe(prepared.connectionFingerprint)
+    await blockedExecution
   })
 
   it('closes the underlying service once and marks runtime state disconnected', async () => {

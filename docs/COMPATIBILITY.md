@@ -1,44 +1,101 @@
 # Compatibility
 
-Ground is a developer preview. This matrix describes the current source tree, not a
-promise that every provider model or CLI version works. Automated, version-pinned
-compatibility reports are required before the public alpha.
+Ground is a public alpha. This matrix describes the current source tree and
+unsigned preview evidence, not a promise that every provider model, CLI version, or
+packaged environment works. Ground publishes version-pinned, credential-free
+contract fixtures; authenticated compatibility reports are still required before a
+connection can be called live-certified.
 
 The first credential-free
 [CLI invocation-surface observation](compatibility/cli-help-2026-07-28.md)
 records locally installed versions and help-visible flags. It is deliberately
 narrower than the required authenticated compatibility report.
 
+## Published pinned contract fixtures
+
+The executable [compatibility fixture set](../fixtures/compatibility/README.md)
+uses a strict version 1 manifest schema and explicit provenance. Current
+manifests are `synthetic-contract` or `documented-example`, all with
+`liveCapture: false`:
+
+| Boundary | Exact fixture pin | What the test proves |
+| --- | --- | --- |
+| OpenAI Responses | `ai` 7.0.41 + `@ai-sdk/openai` 4.0.23 | Synthetic AI SDK `LanguageModelV4` events normalize through Ground's production adapter boundary |
+| Anthropic Messages | `ai` 7.0.41 + `@ai-sdk/anthropic` 4.0.23 | Same adapter-boundary normalization contract |
+| Google Gemini | `ai` 7.0.41 + `@ai-sdk/google` 4.0.27 | Same adapter-boundary normalization contract |
+| OpenAI-compatible | `ai` 7.0.41 + `@ai-sdk/openai-compatible` 3.0.16 | Same adapter-boundary normalization contract |
+| Codex CLI | 0.144.1 | Synthetic JSON events normalize through the real Codex CLI parser |
+| Claude Code | 2.1.218 | Synthetic JSON events normalize through the real Claude CLI parser |
+| Gemini CLI | 0.47.0 | Synthetic JSON events normalize through the real Gemini CLI parser |
+| Antigravity CLI | 1.1.8 | Documented headless NDJSON envelopes normalize through the real Antigravity parser |
+
+`scripts/check-compatibility-fixtures.mjs` rejects unknown manifest fields,
+misstated provenance, missing suites, and pin drift from the package declaration,
+package lock, or recorded CLI observation. The focused fixture test executes every
+case through `parseCliRuntimeEvent` or `AiSdkModelAdapter.stream`; it does not make
+network requests or launch an agent CLI.
+
+A **pinned contract fixture** proves that Ground's normalization behavior remains
+stable for reviewed synthetic or documented inputs at a named
+dependency/runtime version. It does not prove that an upstream service or
+executable still emits those inputs. A
+**live certification** additionally requires the compatibility report below,
+including authenticated wire/runtime behavior, permissions, resume, cancellation,
+errors, and the stated OS/architecture. The API fixtures are AI SDK boundary
+events—not OpenAI, Anthropic, Google, Ollama, or LM Studio wire captures. The CLI
+versions were observed from local binaries or reviewed release artifacts for
+their help surface, but their JSON fixtures were not captured from those
+executables.
+
+Separate from those manifest fixtures, a credential-free loopback wire integration
+test starts a local HTTP server and drives an actual streaming
+`POST /v1/chat/completions` through Ground’s production OpenAI-compatible AI SDK
+adapter. It asserts the system/user message body, tool schema, SSE text deltas, and
+normalized terminal response. This proves the local transport and production
+adapter path for that deterministic fixture; it does not contact or certify
+OpenAI, Ollama, LM Studio, or another real deployment.
+
 ## Connection matrix
 
 | Connection | Transport | Permission owner | Resume model | Status |
 | --- | --- | --- | --- | --- |
-| OpenAI-compatible endpoint | Chat Completions SSE | Ground | Ground history | Integrated |
-| Ollama | OpenAI-compatible loopback HTTP | Ground | Ground history | Integrated; model-dependent tools |
-| LM Studio | OpenAI-compatible loopback HTTP | Ground | Ground history | Integrated; model-dependent tools |
-| OpenAI | Responses API | Ground | Ground history (stateless replay) | Integrated; not live-certified |
-| Anthropic | Messages API | Ground | Ground history + owning-adapter part state | Integrated; not live-certified |
-| Google Gemini | Gemini API | Ground | Ground history + owning-adapter part state | Integrated; not live-certified |
-| Codex CLI | JSON Lines process stream | Runtime | Native session ID | Integrated, unpinned CLI version |
-| Claude Code | Streamed JSON process output | Runtime | Native session ID | Integrated, unpinned CLI version |
-| Gemini CLI | Streamed JSON process output | Runtime | Native session ID | Integrated, unpinned CLI version |
+| OpenAI-compatible endpoint | Chat Completions SSE | Ground | Ground history | Integrated; pinned synthetic adapter fixture; not server-certified |
+| Ollama | OpenAI-compatible loopback HTTP | Ground | Ground history | Integrated; model-dependent tools; not server-certified |
+| LM Studio | OpenAI-compatible loopback HTTP | Ground | Ground history | Integrated; model-dependent tools; not server-certified |
+| OpenAI | Responses API | Ground | Ground history (stateless replay) | Integrated; pinned synthetic adapter fixture; not live-certified |
+| Anthropic | Messages API | Ground | Ground history + owning-adapter part state | Integrated; pinned synthetic adapter fixture; not live-certified |
+| Google Gemini | Gemini API | Ground | Ground history + owning-adapter part state | Integrated; pinned synthetic adapter fixture; not live-certified |
+| Codex CLI | JSON Lines process stream | Runtime | Native session ID | Integrated; 0.144.1 help observed + synthetic parser fixture; not live-certified |
+| Claude Code | Streamed JSON process output | Runtime | Native session ID | Integrated; 2.1.218 help observed + synthetic parser fixture; not live-certified |
+| Gemini CLI | Streamed JSON process output | Runtime | Native session ID | Integrated; 0.47.0 help observed + synthetic parser fixture; not live-certified |
+| Antigravity CLI | Streamed JSON process output | Runtime; headless approvals unsupported | Explicit conversation ID | Integrated for 1.1.8+; version is probed after native save confirmation; official documented fixture; not live-certified |
 | Generic CLI | Plain text or JSON Lines | Runtime/unknown | New process per turn | Integrated, limited semantics |
 
 Status terms:
 
 - **Integrated** means the desktop UI can save the connection and the live
   `RunManager` can execute it.
-- **Not live-certified** means mocked protocol and application tests pass, but CI
-  has not made credentialed requests to a pinned live cloud-provider version.
-- **Unpinned CLI version** means event fixtures exist but a published minimum/maximum
-  version range has not been certified.
+- **Pinned adapter/parser fixture** means an exact synthetic or documented
+  manifest is exercised against Ground's real normalization boundary, without
+  contacting the upstream.
+- **Not live-certified** means contract and application tests pass, but CI has not
+  made credentialed requests to a pinned provider or launched the pinned CLI for
+  an end-to-end run.
 
-Reviewed downstream builds can statically register another `ModelAdapter` and map
-an existing model profile envelope to it without changing the canonical run loop.
-This is source integration, not an end-user plugin format or stable package ABI.
-New first-class profile fields and structured CLI dialects still require source
-changes; the experimental `AgentRuntimeAdapter` registry is not yet the desktop CLI
-composition path.
+Every saved connection begins unverified and must pass **Test** for the exact saved
+revision before main will start a run. First-class API tests validate model
+discovery. OpenAI-compatible testing prefers `/models` and falls back, only when
+listing cannot prove success, to one bounded non-streaming four-token generation
+against the exact configured model. CLI Test validates executable resolution and
+argv construction but does not authenticate or launch an agent turn. A readiness
+pass is therefore an installation-specific preflight, not a published compatibility
+certification.
+
+Reviewed downstream builds can statically register another `ModelAdapter` or
+`AgentRuntimeAdapter` and map an existing profile envelope to it without replacing
+the canonical reducers. This is source integration, not dynamic end-user plugin
+loading or a stable binary ABI. New first-class profile fields and built-in
+structured CLI dialects still require reviewed source changes and a rebuild.
 
 An OpenAI-shaped endpoint is not assumed to support tools, strict schemas,
 reasoning, images, usage, or every streaming event. Configure tools only when the
@@ -69,16 +126,18 @@ built-in adapter currently emits one.
 | Git status | Porcelain v2 branch/ahead/behind and file states | Integrated | Canonical repository root required |
 | Git diff | Bounded staged and unstaged unified diff | Integrated | No semantic/binary diff |
 | Git stage/unstage | Selected literal paths + native confirmation | Integrated | No repository-wide selection or metadata paths |
-| Git commit | Exact prepared tree + conditional `HEAD` update | Integrated | Hooks/signing disabled; no amend/merge workflow |
+| Git commit | Exact prepared tree/ref/repository binding + conditional non-dereferencing update | Integrated | Hooks/signing disabled; no amend/merge workflow |
+| Git restore/undo | Selected unstaged tracked or untracked regular files + private recovery | Integrated | Git 2.23+; no conflicts/submodules/directories/links; no active Ground run/terminal; untracked atomic move requires same-volume rename |
 | Git history | Bounded local log parsing | Integrated | No signature verification or remote operations |
 | Managed worktrees | Dedicated Ground root, branch creation/new task, clean registered removal | Integrated | No dirty force-removal or arbitrary worktree deletion |
-| Agent `run_command` | Immutable content-hashed launch envelope + exact argv | Integrated | Inline approval; current-user permissions; Windows supports direct executables and recognized Node package shims |
+| Agent `run_command` | Immutable content-hashed launch envelope + exact argv | Integrated | Native exact-envelope confirmation; current-user permissions; Windows supports direct executables and recognized Node package shims |
 | Remote MCP | Streamable HTTP | Integrated, unauthenticated | HTTPS except loopback; no headers or OAuth |
 | Local MCP | Resolved stdio executable and argv | Integrated | Native exact-invocation confirmation; current-user OS permissions; not sandboxed |
 | MCP tools | Namespaced canonical definitions | Integrated | Tools only; no resources, prompts, Apps/UI, or elicitation |
 | Task portability | Strict JSON bundle + Markdown transcript | Integrated | User must review exports; imported content is untrusted |
-| Task lifecycle | Safe fork, archive/restore, bounded active/archive search | Integrated | Imported-history context has no separate toggle |
-| State recovery | Bounded atomic primary + one rotating validated backup | Integrated | Automatic fallback only; no backup browser/manual restore |
+| Task lifecycle | Safe fork, archive/restore, bounded active/archive search | Integrated | Imported history is excluded by default and requires an explicit per-task opt-in |
+| State recovery | Bounded atomic primary + three rotating validated snapshots | Integrated | Opaque in-app browser, credential-free export, and native-confirmed retained restore with a process-wide drain/seal; no arbitrary snapshot import or transactional event log |
+| Managed-action crash recovery | Durable started/completed claims for writes, commands, and MCP calls | Integrated | Reports an interrupted outcome as unknown; no automatic action/run resume |
 
 State and credential-vault readers use `O_NOFOLLOW` where the host exposes it.
 Windows does not yet have equivalent race-free reparse-point handling in Ground;
@@ -89,6 +148,12 @@ schema. A refresh blocks added or changed definitions until exact reapproval, an
 connection identity changes clear stored trust. This is separate from per-call
 approval: every model-requested MCP invocation still shows the complete arguments
 and must be approved individually.
+
+Enabled remote profiles connect concurrently at startup; local stdio profiles are
+serialized so native launch dialogs do not overlap. A managed API run waits for
+that startup attempt before constructing its first MCP tool set. Queued connections,
+tool listing, and final dispatch revalidate the exact current enabled persisted
+profile and definition-trust identity.
 
 For local stdio, Ground also fingerprints the exact executable/argv/cwd/environment
 invocation, content-hashes regular executables through 256 MiB, confirms the first
@@ -105,19 +170,34 @@ detach/restart/close operations. Renderer operations require an opaque sender-bo
 attachment; detaching preserves the PTY. It is a genuine PTY, not a shell emulator
 or a sandbox.
 
-Ground’s Git path resolves a system Git executable, disables hooks, global/system
-configuration, pagers, prompts, external diff/text conversion, and LFS smudge, and
-bounds process time and output. For status, working-tree diff, staging, and
-worktree checkout/removal, it queries effective repository filter drivers and
-overrides clean/smudge/process to no-op on the exact invocation. This prevents
-filter-command execution but can expose LFS pointers, encrypted content,
-unexpected dirty state, or unusable checkouts in filter-dependent repositories.
+Ground passively fingerprints fixed conventional and absolute app-PATH Git
+candidates while excluding workspace-controlled paths. The user can choose another
+direct executable in a native picker; a default-cancel dialog shows its
+path/hash/size/fingerprint before Ground runs `git --version`. Git 2.23 or newer is
+required. The private saved path/fingerprint is a preference rather than authority:
+Ground recreates a process-local binding and revalidates exact file identity before
+every Git launch.
+
+The Git path disables hooks, global/system configuration, pagers, prompts, external
+diff/text conversion, and LFS smudge, and bounds process time and output. For
+status, working-tree diff, staging, restore, and worktree checkout/removal, it
+queries effective repository filter drivers and overrides clean/smudge/process to
+no-op on the exact invocation. This prevents filter-command execution but can
+expose LFS pointers, encrypted content, unexpected dirty state, or unusable
+checkouts in filter-dependent repositories.
 
 Worktree destinations are confined to a dedicated Ground root. Selected-path
 staging/unstaging receives a native confirmation. Commits bind the exact prepared
-index tree and expected parent, disable hooks/signing, and leave concurrent
-index/working-tree edits alone. Removal is available only for a clean registered
-worktree under Ground’s managed root. The desktop does not expose revert/reset,
+index tree, parent, repository/worktree identities, and checked-out symbolic local
+ref; detached-HEAD commits are refused. They use a non-dereferencing conditional
+update, disable hooks/signing, and leave concurrent index/working-tree edits alone. Recoverable
+restore privately captures selected tracked contents and atomically moves selected
+untracked files before restoring tracked files to the current index; staged changes
+remain staged. Ground refuses restore/undo while one of its runs or terminals is
+active in the workspace. Conservative undo succeeds only while every path and
+recovery payload matches, and an incomplete or cross-volume rename operation is
+reported as recovery-required. Removal is available only for a clean registered
+worktree under Ground’s managed root. The desktop does not expose arbitrary reset,
 remote operations, signed commits, dirty force-removal, or arbitrary worktree
 deletion.
 
@@ -135,22 +215,34 @@ on their internal tools.
 
 Recognized CLI runtimes receive adapter-specific arguments:
 
-| Mode | Codex CLI | Claude Code | Gemini CLI |
-| --- | --- | --- | --- |
-| Ask | Read-only sandbox | Plan permission mode | Plan approval mode |
-| Agent | Workspace-write sandbox | Accept-edits permission mode | Auto-edit approval mode |
+| Mode | Codex CLI | Claude Code | Gemini CLI | Antigravity CLI 1.1.8+ |
+| --- | --- | --- | --- | --- |
+| Ask | Read-only sandbox | Plan permission mode | Plan approval mode | Plan mode |
+| Agent | Workspace-write sandbox | Accept-edits permission mode | Auto-edit approval mode | Accept-edits mode |
 
 Ground strips known permission-bypass flags from recognized profiles. These modes
 are still implemented by the external runtime, not enforced by Ground. Runtime
-upgrades can change flag and event behavior; compatibility fixtures must be pinned
-before release.
+upgrades can change flag and event behavior. Antigravity headless mode cannot
+present interactive approvals: command actions are soft-denied unless a scoped
+permission rule pre-allows them. Ground strips
+`--dangerously-skip-permissions` and resumes it only by explicit conversation ID.
+The published fixtures pin the current parser contract, but captured end-to-end
+reports remain required before declaring any runtime version supported.
+
+Detection checks a bounded, non-recursive set of conventional system, app-PATH,
+Volta, pnpm, Bun, asdf, NVM, and related platform locations without launching a
+candidate. The main-owned native picker can validate another absolute direct
+executable or reviewed Windows Node package shim. Candidates controlled by a
+configured workspace are excluded. Selection itself is not authorization: profile
+save and the fully expanded invocation retain separate native confirmations.
 
 Every CLI run has a native final-invocation grant distinct from the saved profile
-template. The grant binds the expanded argv, canonical workspace, adapter/parser,
-and content-hashed launch identity. Exact grants are memory-only; launch files over
-512 MB are rejected. Stdin prompt content is intentionally data rather than process
-identity, while argument prompts remain bound through the raw argv digest and are
-redacted in the dialog.
+template. The grant binds the expanded argv, canonical workspace, actual
+source-registered runtime adapter ID, parser dialect, and content-hashed launch
+identity. Distinct reviewed adapters delegating to one dialect receive distinct
+grants. Exact grants are memory-only; launch files over 512 MB are rejected. Stdin
+prompt content is intentionally data rather than process identity, while argument
+prompts remain bound through the raw argv digest and are redacted in the dialog.
 
 On Windows, Ground resolves only reviewed `PATHEXT` types (`.exe`, `.com`, `.cmd`,
 and `.bat`). Executables are launched directly. Standard npm-generated Node
@@ -161,28 +253,68 @@ PowerShell launchers are unsupported. `npm test` is supported at this launch
 boundary, but npm itself intentionally invokes the platform shell for package
 scripts, whose contents and descendants remain npm’s responsibility.
 
-Native resume is used only when the stored session belongs to the same adapter,
-provider revision, canonical workspace, and task mode. Generic CLIs do not have a
-portable resume contract.
+Native resume is used only when the stored session belongs to the same registered
+adapter ID and session-compatibility ID, complete provider-configuration
+fingerprint, canonical workspace, and task mode. Generic CLIs do not have a
+portable resume contract and do not persist opaque sessions.
 
 ## Platform matrix
 
 | Platform | Development | Packaged artifact | Release status |
 | --- | --- | --- | --- |
-| macOS arm64 | Locally exercised | Unsigned local preview exercised | Not released |
-| macOS x64 | CI/source target | Native-runner zip/DMG + unpacked startup/native smoke configured, not certified | Not released |
-| Windows x64 | CI/source target | Native-runner NSIS + unpacked startup/native smoke configured, not certified | Not released |
-| Linux x64 | CI/source target | Native-runner AppImage/DEB + Xvfb unpacked startup/native smoke configured, not certified | Not released |
+| macOS arm64 | Local + hosted CI/source target | Local unpacked launch/native and extracted-ZIP native evidence passed; ZIP/DMG workflow target | No supported release |
+| macOS x64 | Hosted Intel CI/source target | ZIP/DMG target; native evidence reruns against extracted ZIP | No supported release |
+| Windows x64 | Hosted CI/source target | NSIS target; native evidence reruns after temporary silent install and invokes uninstall | No supported release |
+| Linux x64 | Hosted CI/source target | AppImage/DEB target; native evidence reruns against extracted AppImage under Xvfb + Secret Service | No supported release |
 
-The repository CI is configured to exercise type checking, tests, and renderer/main
-builds on hosted macOS, Windows, and Linux runners. A separate manual workflow
-builds unsigned native preview formats; the tag workflow is scaffolded to require
-macOS signing/notarization and emit checksums, an SBOM, and attestations. None of
-that is yet a certified packaged-app, keychain, accessibility, installer, signing,
-or provider compatibility matrix. The package workflows now include an
-unpacked-app main/preload/document handshake plus fixed PTY, Git, stdio MCP, and
-descendant-cleanup probes. They do not drive the UI, install distributables,
-validate credential stores, or call paid providers/agent CLIs.
+The repository CI exercises type checking, tests, and renderer/main builds on
+hosted macOS, Windows, and Linux runners. Manual preview and tag workflows define
+the exact four native targets above and assert each runner’s architecture. A
+successful target emits
+`ground-package-runtime-evidence-<platform>-<architecture>.json`; release
+aggregation accepts exactly all four expected records, checks fixed runtime and
+security evidence, and verifies the named distributable’s SHA-256. Workflow
+configuration alone is not a passing result.
+
+The native scope verifies packaged identity, a real OS-encrypted `SecretVault`
+set/reload/get/delete round trip, a production approval dialog automatically
+aborted to Cancel, PTY, Git, exact local stdio MCP launch/call, and process-tree
+cleanup. Distributable scope extracts a macOS ZIP or Linux AppImage, or temporarily
+installs NSIS and verifies its executable/install directory are removed, then runs
+native scope against the result. It does not
+install DMG or DEB artifacts, drive arbitrary installer options, exercise a real
+model/CLI/MCP server, or certify renderer accessibility. Linux requires D-Bus,
+libsecret, and an unlocked Secret Service implementation; hosted workflows create
+an ephemeral GNOME-keyring session because Ground rejects `basic_text`.
+
+For the Linux AppImage smoke, the extracted sandbox must be a regular file whose
+hash matches the same build’s separately root-owned/mode-4755 unpacked sandbox.
+Ground launches the extracted app with `CHROME_DEVEL_SANDBOX` pointing to that
+trusted external copy; the extracted payload is not chmodded into authority.
+
+The tag workflow is scaffolded to require macOS signing/notarization credentials
+and emit checksums, an SBOM, and attestations. The repository does not claim that
+those secrets exist or that an official artifact has completed the workflow.
+Public-alpha preview artifacts are unsigned, macOS previews are unnotarized, and
+Windows/Linux signing policy remains undefined.
+
+The current local macOS arm64 build has passed the packaged launch scope, the native
+identity/secure-storage/dialog/PTY/Git/MCP/cancellation scope, and that same native
+scope from its extracted ZIP. That is one host/architecture result, not evidence
+for macOS x64, Windows x64, or Linux x64.
+
+The six-scenario renderer interaction suite runs the built browser-preview React
+renderer in Electron through Playwright Core. Its current local result is 6/6:
+command-palette filtering/keyboard/focus restore, provider labels and Chromium
+constraint validation, task-local drafts, deterministic send/cancel, archive and
+archived search, and 680px responsive settings with reduced motion. CI is configured
+to run it directly on macOS/Windows and under Xvfb on Linux. Because it uses the
+explicit preview desktop mock, it is renderer evidence—not production-main/preload,
+native permission, provider, screen-reader, or packaged-app certification.
+
+The pinned compatibility suite performs no authenticated request and launches no
+coding CLI. Its separate loopback SSE integration drives only Ground’s production
+OpenAI-compatible HTTP adapter against a deterministic local server.
 Portable unit coverage exercises PATHEXT filtering, current npm shim shapes,
 metacharacter-preserving argv, required Windows child environment keys, and the
 shell-free `taskkill.exe /T /F` invocation shape. The fixed packaged probe does not

@@ -1,6 +1,9 @@
 import { z } from 'zod'
 import type { ProviderDraft, TaskPatch } from '../shared/types'
-import { normalizeCliEnvironmentVariableNames } from './cli-environment'
+import {
+  MAX_CLI_ENVIRONMENT_TOTAL_BYTES,
+  normalizeCliEnvironmentVariableNames
+} from './cli-environment'
 import { canonicalProviderEndpoint } from './trust-boundary'
 
 const providerDraftSchema = z
@@ -19,7 +22,9 @@ const providerDraftSchema = z
     args: z.array(z.string().max(8_192)).max(64).optional(),
     promptMode: z.enum(['stdin', 'argument']).optional(),
     outputMode: z.enum(['plain', 'ndjson']).optional(),
-    cliAdapter: z.enum(['generic', 'codex', 'claude', 'gemini']).optional(),
+    cliAdapter: z
+      .enum(['generic', 'codex', 'claude', 'gemini', 'antigravity'])
+      .optional(),
     cliEnvironment: z
       .array(
         z
@@ -89,6 +94,17 @@ const providerDraftSchema = z
           path: ['args']
         })
       }
+      if (
+        (value.promptMode ?? 'stdin') === 'stdin' &&
+        (value.args ?? []).some((argument) => argument.includes('{prompt}'))
+      ) {
+        context.addIssue({
+          code: 'custom',
+          message:
+            'Standard-input prompt transport cannot also place {prompt} in process arguments',
+          path: ['args']
+        })
+      }
       try {
         normalizeCliEnvironmentVariableNames(
           (value.cliEnvironment ?? []).map((entry) => entry.name)
@@ -103,12 +119,14 @@ const providerDraftSchema = z
           path: ['cliEnvironment']
         })
       }
-      const environmentCharacters = (value.cliEnvironment ?? []).reduce(
+      const environmentBytes = (value.cliEnvironment ?? []).reduce(
         (total, entry) =>
-          total + entry.name.length + (entry.value?.length ?? 0),
+          total +
+          Buffer.byteLength(entry.name, 'utf8') +
+          Buffer.byteLength(entry.value ?? '', 'utf8'),
         0
       )
-      if (environmentCharacters > 128_000) {
+      if (environmentBytes > MAX_CLI_ENVIRONMENT_TOTAL_BYTES) {
         context.addIssue({
           code: 'custom',
           message: 'CLI environment values are too large',
@@ -129,7 +147,14 @@ const taskPatchSchema = z
     title: z.string().trim().min(1).max(120).optional(),
     providerId: z.string().min(1).max(200).optional(),
     mode: z.enum(['ask', 'agent']).optional(),
-    workspacePath: z.string().min(1).max(8_192).optional()
+    workspaceGrantId: z
+      .string()
+      .regex(
+        /^workspace_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+        'Invalid workspace grant'
+      )
+      .optional(),
+    includeImportedHistory: z.boolean().optional()
   })
   .strict()
 
@@ -149,6 +174,22 @@ export function parsePrompt(value: unknown): string {
   return z.string().trim().min(1).max(1_000_000).parse(value)
 }
 
-export function parseWorkspacePath(value: unknown): string {
-  return z.string().min(1).max(8_192, 'Workspace path is too long').parse(value)
+export function parseWorkspaceGrantId(value: unknown): string {
+  return z
+    .string()
+    .regex(
+      /^workspace_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+      'Invalid workspace grant'
+    )
+    .parse(value)
+}
+
+export function parseLocalStateSnapshotId(value: unknown): string {
+  return z
+    .string()
+    .regex(
+      /^state_snapshot_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+      'Invalid local state snapshot'
+    )
+    .parse(value)
 }

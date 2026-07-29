@@ -3,14 +3,34 @@ export type RunStatus = 'idle' | 'running' | 'awaiting-approval' | 'failed'
 export type ActivityStatus = 'pending' | 'running' | 'success' | 'error' | 'denied'
 export type ModelProviderKind = 'openai' | 'anthropic' | 'google' | 'openai-compatible'
 export type ProviderKind = ModelProviderKind | 'cli'
-export type CliAdapter = 'generic' | 'codex' | 'claude' | 'gemini'
+export type CliAdapter =
+  | 'generic'
+  | 'codex'
+  | 'claude'
+  | 'gemini'
+  | 'antigravity'
 export type ReasoningEffort = 'low' | 'medium' | 'high'
+
+export type ProviderVerification =
+  | {
+      status: 'unverified'
+    }
+  | {
+      status: 'passed' | 'failed'
+      scope: 'connection' | 'configuration'
+      checkedAt: string
+    }
 
 export interface BaseProvider {
   id: string
   name: string
   kind: ProviderKind
   model: string
+  /**
+   * A bounded status record for the exact persisted provider revision.
+   * Missing records from older Ground versions are treated as unverified.
+   */
+  verification?: ProviderVerification
   createdAt: string
   updatedAt: string
 }
@@ -19,6 +39,12 @@ interface BaseModelApiProvider extends BaseProvider {
   kind: ModelProviderKind
   baseUrl: string
   hasApiKey: boolean
+  /**
+   * Main-generated opaque selector for a versioned encrypted credential.
+   * Older profiles omit it and continue to use their legacy boundary-scoped
+   * vault entry. Renderer drafts can never choose this value.
+   */
+  credentialRevision?: string
   supportsTools: boolean
   contextWindowTokens?: number
   maxOutputTokens?: number
@@ -56,6 +82,11 @@ export interface CliProvider extends BaseProvider {
   cliAdapter?: CliAdapter
   environmentVariables?: string[]
   environmentFingerprint?: string
+  /**
+   * Opaque selector for the exact versioned vault record. Profiles saved
+   * before versioned CLI environment records omit it and use the legacy slot.
+   */
+  environmentRevision?: string
   trustConfirmed: boolean
 }
 
@@ -91,9 +122,23 @@ export interface ProviderDraft {
 }
 
 export interface RuntimeSession {
-  adapter: Exclude<CliAdapter, 'generic'>
+  /**
+   * Stable source-registered AgentRuntimeAdapter identity.
+   */
+  adapterId: string
+  /**
+   * Adapter-defined opaque-session compatibility boundary. This can change
+   * independently from adapterId when a new adapter release cannot safely
+   * resume prior native sessions.
+   */
+  sessionCompatibilityId: string
   sessionId: string
   providerRevision: string
+  /**
+   * SHA-256 binding to the exact provider configuration. Older sessions omit
+   * it and are invalidated rather than trusted through timestamp collisions.
+   */
+  providerFingerprint?: string
   workspacePath: string
   mode: RunMode
   updatedAt: string
@@ -159,9 +204,24 @@ export type StoredModelConversationItem =
 export interface ModelRuntimeSession {
   adapterId: string
   providerRevision: string
+  /**
+   * SHA-256 binding to the exact provider configuration. Older sessions omit
+   * it and are invalidated rather than trusted through timestamp collisions.
+   */
+  providerFingerprint?: string
   model: string
   workspacePath?: string
   mode: RunMode
+  /**
+   * Binds provider continuation state to the user's imported-history context
+   * choice. Older sessions omit this field and are handled conservatively.
+   */
+  includesImportedHistory?: boolean
+  /**
+   * Marks portable provider-neutral conversation that has not yet been
+   * accepted into a fresh Ground-owned model session.
+   */
+  origin?: 'ground' | 'imported'
   conversation: StoredModelConversationItem[]
   checkpoint?: PortableJsonValue
   updatedAt: string
@@ -172,6 +232,84 @@ export interface ProviderAttribution {
   name: string
   kind: ProviderKind
   model: string
+}
+
+export type ManagedExecutionKind = 'workspace-write' | 'command' | 'mcp'
+
+interface ManagedExecutionMarkerBase {
+  version: 1
+  /**
+   * Durable operation identity. This must equal the owning ActivityItem.id.
+   */
+  operationId: string
+  kind: ManagedExecutionKind
+  startedAt: string
+}
+
+interface ApprovedManagedExecutionBase extends ManagedExecutionMarkerBase {
+  claim: 'approved'
+  /**
+   * SHA-256 of the exact prepared side-effect envelope.
+   */
+  actionSha256: string
+  /**
+   * SHA-256 of the exact native approval envelope consumed at begin.
+   */
+  approvalSha256: string
+}
+
+export interface StartedManagedExecution extends ApprovedManagedExecutionBase {
+  phase: 'started'
+}
+
+export interface CompletedManagedExecution extends ApprovedManagedExecutionBase {
+  phase: 'completed'
+  completedAt: string
+}
+
+export interface UncertainManagedExecution extends ApprovedManagedExecutionBase {
+  phase: 'uncertain'
+  interruptedAt: string
+}
+
+/**
+ * Recovery marker for state written before durable operation claims existed.
+ * It intentionally carries no synthetic approval or action hash.
+ */
+export interface LegacyUncertainManagedExecution
+  extends ManagedExecutionMarkerBase {
+  claim: 'legacy-untracked'
+  phase: 'uncertain'
+  interruptedAt: string
+}
+
+export type ManagedExecutionMarker =
+  | StartedManagedExecution
+  | CompletedManagedExecution
+  | UncertainManagedExecution
+  | LegacyUncertainManagedExecution
+
+export interface BeginManagedExecutionInput {
+  taskId: string
+  itemId: string
+  runId: string
+  callId: string
+  toolName: string
+  kind: ManagedExecutionKind
+  actionSha256: string
+  approvalSha256: string
+  startedAt: string
+}
+
+export interface CompleteManagedExecutionInput {
+  taskId: string
+  itemId: string
+  operationId: string
+  actionSha256: string
+  status: Extract<ActivityStatus, 'success' | 'error'>
+  result: string
+  durationMs: number
+  completedAt: string
 }
 
 export interface MessageItem {
@@ -201,10 +339,21 @@ export interface ActivityItem {
   durationMs?: number
   historyOnly?: boolean
   callId?: string
+  managedExecution?: ManagedExecutionMarker
   provider?: ProviderAttribution
 }
 
 export type TaskItem = MessageItem | ActivityItem
+
+/**
+ * Renderer-safe activity projection. Managed execution claims are owned by the
+ * main process and are never exposed over IPC.
+ */
+export type DesktopActivityItem = Omit<ActivityItem, 'managedExecution'> & {
+  managedExecution?: never
+}
+
+export type DesktopTaskItem = MessageItem | DesktopActivityItem
 
 export interface Task {
   id: string
@@ -212,6 +361,7 @@ export interface Task {
   workspacePath?: string
   providerId: string
   mode: RunMode
+  includeImportedHistory?: boolean
   runStatus: RunStatus
   archivedAt?: string
   createdAt: string
@@ -219,6 +369,32 @@ export interface Task {
   runtimeSessions?: Record<string, RuntimeSession>
   modelSessions?: Record<string, ModelRuntimeSession>
   items: TaskItem[]
+}
+
+export interface WorkspaceGrant {
+  id: string
+  /**
+   * Display-only, bounded folder basename. It is not filesystem authority.
+   */
+  name: string
+}
+
+/**
+ * Explicit renderer allowlist for a task. Main-only workspace paths, native
+ * runtime sessions, provider continuation state, and checkpoints are omitted.
+ */
+export interface DesktopTask {
+  id: string
+  title: string
+  workspace?: WorkspaceGrant
+  providerId: string
+  mode: RunMode
+  includeImportedHistory?: boolean
+  runStatus: RunStatus
+  archivedAt?: string
+  createdAt: string
+  updatedAt: string
+  items: DesktopTaskItem[]
 }
 
 export interface AppSettings {
@@ -229,9 +405,29 @@ export interface AppSettings {
 
 export interface RecoveryNotice {
   id: string
-  kind: 'backup-restored' | 'state-reset'
+  kind: 'backup-restored' | 'credential-warning' | 'state-reset'
   title: string
   detail: string
+}
+
+export type LocalStateSnapshotStatus =
+  | 'valid'
+  | 'invalid'
+  | 'unavailable'
+
+/**
+ * Renderer-safe metadata for a private local state generation. The opaque ID
+ * is short-lived and content-bound; no application-data path crosses IPC.
+ */
+export interface LocalStateSnapshot {
+  id: string
+  kind: 'current' | 'retained'
+  generation: number
+  status: LocalStateSnapshotStatus
+  capturedAt?: string
+  sizeBytes?: number
+  taskCount?: number
+  providerCount?: number
 }
 
 interface BaseMcpServerProfile {
@@ -298,7 +494,7 @@ export interface McpServerStatus {
 export interface AppSnapshot {
   providers: ProviderProfile[]
   mcpServers: McpServerProfile[]
-  tasks: Task[]
+  tasks: DesktopTask[]
   settings: AppSettings
   /**
    * Ephemeral startup information. This is intentionally not persisted into the
@@ -317,7 +513,7 @@ export interface AppSnapshot {
    * events are included because streamed assistant text is committed
    * transactionally at a response boundary rather than on every token.
    */
-  activeRunEvents?: RunEventEnvelope[]
+  activeRunEvents?: DesktopRunEventEnvelope[]
 }
 
 export interface StartRunInput {
@@ -383,11 +579,66 @@ export interface RunEventEnvelope {
   event: RunEvent
 }
 
+export type DesktopRunEvent =
+  | {
+      type: 'run-started'
+      taskId: string
+      runId: string
+    }
+  | {
+      type: 'item-added'
+      taskId: string
+      runId: string
+      item: DesktopTaskItem
+    }
+  | {
+      type: 'text-delta'
+      taskId: string
+      runId: string
+      itemId: string
+      delta: string
+      offset?: number
+    }
+  | {
+      type: 'item-updated'
+      taskId: string
+      runId: string
+      item: DesktopTaskItem
+    }
+  | {
+      type: 'approval-requested'
+      taskId: string
+      runId: string
+      item: DesktopActivityItem
+    }
+  | {
+      type: 'run-completed'
+      taskId: string
+      runId: string
+    }
+  | {
+      type: 'run-stopped'
+      taskId: string
+      runId: string
+    }
+  | {
+      type: 'run-error'
+      taskId: string
+      runId: string
+      message: string
+    }
+
+export interface DesktopRunEventEnvelope {
+  revision: number
+  event: DesktopRunEvent
+}
+
 export interface TaskPatch {
   title?: string
   providerId?: string
   mode?: RunMode
-  workspacePath?: string
+  workspaceGrantId?: string
+  includeImportedHistory?: boolean
 }
 
 export type TaskExportFormat = 'bundle' | 'markdown'
@@ -397,10 +648,15 @@ export interface ProviderTestResult {
   title: string
   detail: string
   models?: string[]
+  /**
+   * True only when this result was retained on an unchanged saved profile.
+   * Draft-only checks remain useful feedback but do not change saved status.
+   */
+  persisted?: boolean
 }
 
 export interface DetectedCli {
-  id: 'codex' | 'claude' | 'gemini'
+  id: 'codex' | 'claude' | 'gemini' | 'antigravity'
   name: string
   path: string
   description: string
@@ -480,9 +736,26 @@ export interface GitIdentity {
   email?: string
 }
 
+export type GitRecoveryStatus = 'applied' | 'recovery-required' | 'restored'
+
+/**
+ * Path-only, renderer-safe projection of a main-owned Git recovery manifest.
+ * Prepared snapshots, previews, host paths, and action fingerprints never
+ * cross the IPC boundary.
+ */
+export interface GitRecoverySummary {
+  id: string
+  createdAt: string
+  status: GitRecoveryStatus
+  trackedPaths: string[]
+  untrackedPaths: string[]
+  canUndo: boolean
+}
+
 export interface GitOverview {
   isRepository: boolean
   message?: string
+  requiresGitExecutable?: boolean
   status?: GitStatusSummary
   identity?: GitIdentity
   unstagedDiff?: GitDiffResult
@@ -490,6 +763,8 @@ export interface GitOverview {
   commits: GitLogEntry[]
   historyTruncated: boolean
   worktrees: GitWorktreeSummary[]
+  recoveries: GitRecoverySummary[]
+  recoveriesTruncated: boolean
 }
 
 export interface CreateGitWorktreeInput {
@@ -505,24 +780,30 @@ export interface GitCommitInput {
 
 export interface DesktopApi {
   getSnapshot: () => Promise<AppSnapshot>
-  createTask: (workspacePath?: string) => Promise<Task>
-  forkTask: (taskId: string) => Promise<Task>
-  setTaskArchived: (taskId: string, archived: boolean) => Promise<Task>
-  importTaskBundle: () => Promise<Task | undefined>
+  listStateSnapshots: () => Promise<LocalStateSnapshot[]>
+  exportStateSnapshot: (snapshotId: string) => Promise<boolean>
+  restoreStateSnapshot: (snapshotId: string) => Promise<boolean>
+  createTask: (workspaceGrantId?: string) => Promise<DesktopTask>
+  forkTask: (taskId: string) => Promise<DesktopTask>
+  setTaskArchived: (taskId: string, archived: boolean) => Promise<DesktopTask>
+  importTaskBundle: () => Promise<DesktopTask | undefined>
   exportTask: (taskId: string, format: TaskExportFormat) => Promise<boolean>
   deleteTask: (taskId: string) => Promise<boolean>
   selectTask: (taskId: string) => Promise<void>
-  updateTask: (taskId: string, patch: TaskPatch) => Promise<Task>
-  chooseWorkspace: () => Promise<string | undefined>
-  revealWorkspace: (workspacePath: string) => Promise<void>
+  updateTask: (taskId: string, patch: TaskPatch) => Promise<DesktopTask>
+  chooseWorkspace: () => Promise<WorkspaceGrant | undefined>
+  revealWorkspace: (workspaceGrantId: string) => Promise<void>
   saveProvider: (draft: ProviderDraft) => Promise<ProviderProfile>
   deleteProvider: (providerId: string) => Promise<void>
   testProvider: (draft: ProviderDraft) => Promise<ProviderTestResult>
   detectClis: () => Promise<DetectedCli[]>
+  chooseCliExecutable: () => Promise<string | undefined>
   startRun: (input: StartRunInput) => Promise<{ runId: string }>
   stopRun: (taskId: string) => Promise<void>
   resolveApproval: (runId: string, approvalId: string, approved: boolean) => Promise<void>
-  onRunEvent: (listener: (envelope: RunEventEnvelope) => void) => () => void
+  onRunEvent: (
+    listener: (envelope: DesktopRunEventEnvelope) => void
+  ) => () => void
   listTerminals: (taskId: string) => Promise<TerminalSessionInfo[]>
   createTerminal: (
     taskId: string,
@@ -552,12 +833,21 @@ export interface DesktopApi {
   ) => Promise<void>
   onTerminalEvent: (listener: (event: TerminalEvent) => void) => () => void
   getGitOverview: (taskId: string) => Promise<GitOverview>
+  chooseGitExecutable: () => Promise<boolean>
   createGitWorktree: (
     taskId: string,
     input: CreateGitWorktreeInput
-  ) => Promise<Task | undefined>
+  ) => Promise<DesktopTask | undefined>
   stageGitPaths: (taskId: string, paths: string[]) => Promise<boolean>
   unstageGitPaths: (taskId: string, paths: string[]) => Promise<boolean>
+  revertGitPaths: (
+    taskId: string,
+    paths: string[]
+  ) => Promise<GitRecoverySummary | undefined>
+  undoGitRecovery: (
+    taskId: string,
+    recoveryId: string
+  ) => Promise<GitRecoverySummary | undefined>
   commitGitChanges: (
     taskId: string,
     input: GitCommitInput

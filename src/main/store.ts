@@ -1,12 +1,16 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
-import { mkdir, open, rename, unlink } from 'node:fs/promises'
+import { lstat, mkdir, open, rename, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import { TextDecoder } from 'node:util'
 import type {
   ActivityItem,
-  AppSnapshot,
+  AppSettings,
+  BeginManagedExecutionInput,
+  CompleteManagedExecutionInput,
+  ManagedExecutionKind,
   McpServerProfile,
+  LocalStateSnapshot,
   ModelApiProvider,
   ProviderAttribution,
   ProviderProfile,
@@ -17,13 +21,26 @@ import type {
   TaskItem
 } from '../shared/types'
 import { createId, nowIso } from './lib/ids'
-import { parsePersistedState, type PersistedStateData } from './state-schema'
+import {
+  MAX_PERSISTED_TASK_ITEMS,
+  parsePersistedState,
+  type PersistedStateData
+} from './state-schema'
+import { providerConfigurationFingerprint } from './provider-revision'
 import type {
   GroundConversationItem,
   GroundProviderAttribution,
   GroundProviderDescriptor,
   GroundTaskImportTemplate
 } from './task-portability'
+
+export interface StateSnapshot {
+  providers: ProviderProfile[]
+  mcpServers: McpServerProfile[]
+  tasks: Task[]
+  settings: AppSettings
+  recoveryNotice?: RecoveryNotice
+}
 
 const MODEL_ADAPTER_IDS: Record<ModelApiProvider['kind'], string> = {
   openai: 'openai.responses',
@@ -42,12 +59,88 @@ const IMPORT_FIELD_LIMITS = Object.freeze({
 
 const MAX_STATE_FILE_BYTES = 128 * 1024 * 1024
 const STATE_READ_CHUNK_BYTES = 64 * 1024
+const STATE_BACKUP_RETENTION = 3
+const LOCAL_STATE_SNAPSHOT_ID_PATTERN =
+  /^state_snapshot_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u
+const SHA256_PATTERN = /^[a-f0-9]{64}$/u
+const MANAGED_EXECUTION_OUTCOME_UNKNOWN =
+  'Outcome unknown: Ground closed after this action started. Review the workspace or external system before deciding what to do next. Ground will not retry this action automatically.'
+const LEGACY_MANAGED_EXECUTION_OUTCOME_UNKNOWN =
+  'Outcome unknown: Ground closed while this mutating action was running before durable execution claims were available. Review the workspace or external system before deciding what to do next. Ground will not retry this action automatically.'
+const MAX_INTERRUPTED_RUN_SUMMARIES = 256
+
+interface LocalStateSnapshotSelection {
+  filePath: string
+  kind: LocalStateSnapshot['kind']
+  generation: number
+  status: LocalStateSnapshot['status']
+  sourceSha256?: string
+}
+
+interface BoundedStateDocument {
+  payload: string
+  sizeBytes: number
+  capturedAt: string
+}
+
+interface ValidStateMaterial extends BoundedStateDocument {
+  sourceSha256: string
+  state: PersistedStateData
+  normalizedPayload: string
+}
+
+/**
+ * Main-process review data re-derived from an opaque, content-bound snapshot
+ * selection immediately before a native approval.
+ */
+export interface LocalStateSnapshotReview {
+  id: string
+  kind: LocalStateSnapshot['kind']
+  generation: number
+  capturedAt: string
+  sizeBytes: number
+  taskCount: number
+  providerCount: number
+  contentSha256: string
+}
 
 class InvalidStateFileError extends Error {
   constructor(message: string, cause?: unknown) {
     super(message, { cause })
     this.name = 'InvalidStateFileError'
   }
+}
+
+/**
+ * A state write may have crossed its atomic rename before a later durability
+ * operation failed. Callers must treat disk publication as uncertain and
+ * relaunch before issuing another state mutation.
+ */
+export class StatePersistenceError extends Error {
+  readonly code?: string
+
+  constructor(cause: unknown) {
+    super('Ground could not conclusively publish local state', { cause })
+    this.name = 'StatePersistenceError'
+    this.code = (cause as NodeJS.ErrnoException | undefined)?.code
+  }
+}
+
+export interface StateStoreOptions {
+  /**
+   * Invoked after a state publication becomes ambiguous. The store seals
+   * itself before calling this hook, so even a delayed process exit cannot
+   * permit another mutation from stale in-memory state.
+   */
+  onPersistenceUncertain?: (error: StatePersistenceError) => void
+  /**
+   * Test seam for exercising post-publication failures without weakening the
+   * production persistence implementation.
+   */
+  persistStateDocument?: (
+    filePath: string,
+    payload: string
+  ) => Promise<void>
 }
 
 function boundedImportedText(value: string, maximum: number): string {
@@ -135,6 +228,41 @@ function isTaskActive(task: Task): boolean {
   return task.runStatus === 'running' || task.runStatus === 'awaiting-approval'
 }
 
+function managedExecutionKind(
+  item: Readonly<ActivityItem>
+): ManagedExecutionKind | undefined {
+  if (item.toolName === 'write_file' || item.toolName === 'edit_file') {
+    return 'workspace-write'
+  }
+  if (item.toolName === 'run_command') return 'command'
+  if (item.toolName?.startsWith('mcp__')) return 'mcp'
+  return undefined
+}
+
+function requireSha256(value: string, label: string): void {
+  if (!SHA256_PATTERN.test(value)) {
+    throw new Error(`${label} must be a lowercase SHA-256 digest`)
+  }
+}
+
+function managedStartedAt(
+  createdAt: string,
+  recoveryTimestamp: string
+): string {
+  const parsed = Date.parse(createdAt)
+  return Number.isFinite(parsed)
+    ? new Date(parsed).toISOString()
+    : recoveryTimestamp
+}
+
+function requireActivityItem(task: Task, itemId: string): ActivityItem {
+  const item = task.items.find((candidate) => candidate.id === itemId)
+  if (!item || item.kind !== 'activity') {
+    throw new Error('Managed execution activity was not found')
+  }
+  return item
+}
+
 interface ForkIds {
   itemIds: Map<string, string>
   runIds: Map<string, string>
@@ -169,6 +297,7 @@ function forkTimeline(items: TaskItem[], ids: ForkIds): TaskItem[] {
     const {
       approvalId: _approvalId,
       callId: _callId,
+      managedExecution: _managedExecution,
       ...history
     } = structuredClone(item)
     const status =
@@ -294,7 +423,7 @@ function importedProviderAttribution(
 function createInitialState(): PersistedStateData {
   const timestamp = nowIso()
   return {
-    version: 1,
+    version: 2,
     providers: [
       {
         id: 'ollama-local',
@@ -313,21 +442,41 @@ function createInitialState(): PersistedStateData {
     settings: {
       defaultProviderId: 'ollama-local',
       sidebarCollapsed: false
-    }
+    },
+    pendingSecretDeletes: []
   }
 }
 
 export class StateStore {
   private state: PersistedStateData = createInitialState()
   private recoveryNotice: RecoveryNotice | undefined
+  private stateRecoveryFallbackUsed = false
+  private recoveryNoticeIds = new Set<string>()
+  private localStateSnapshotSelections =
+    new Map<string, LocalStateSnapshotSelection>()
   private transactionQueue: Promise<void> = Promise.resolve()
+  private persistenceUncertainty?: StatePersistenceError
+  private readonly onPersistenceUncertain?: (
+    error: StatePersistenceError
+  ) => void
+  private readonly persistStateDocument: (
+    filePath: string,
+    payload: string
+  ) => Promise<void>
 
-  constructor(private readonly filePath: string) {}
+  constructor(
+    private readonly filePath: string,
+    options: StateStoreOptions = {}
+  ) {
+    this.onPersistenceUncertain = options.onPersistenceUncertain
+    this.persistStateDocument =
+      options.persistStateDocument ?? persistState
+  }
 
   async load(): Promise<void> {
     await this.enqueueTransaction(async () => {
-      const backupPath = `${this.filePath}.bak`
-      let candidate: PersistedStateData
+      const backupPaths = stateBackupPaths(this.filePath)
+      let candidate: PersistedStateData | undefined
       let rewritePrimary = false
       let nextRecoveryNotice: RecoveryNotice | undefined
 
@@ -335,60 +484,94 @@ export class StateStore {
         candidate = await readStateFile(this.filePath)
       } catch (primaryError) {
         if (!isStateRecoveryError(primaryError)) throw primaryError
-
-        try {
-          candidate = await readStateFile(backupPath)
-          if (isCorruptStateFileError(primaryError)) {
-            await quarantineCorruptFile(this.filePath)
+        const recoveryErrors: unknown[] = [primaryError]
+        if (isCorruptStateFileError(primaryError)) {
+          await quarantineCorruptFile(this.filePath)
+        }
+        for (const backupPath of backupPaths) {
+          try {
+            candidate = await readStateFile(backupPath)
+            break
+          } catch (backupError) {
+            if (!isStateRecoveryError(backupError)) throw backupError
+            recoveryErrors.push(backupError)
+            if (isCorruptStateFileError(backupError)) {
+              await quarantineCorruptFile(backupPath)
+            }
           }
-          rewritePrimary = true
+        }
+
+        rewritePrimary = true
+        if (candidate) {
           nextRecoveryNotice = {
             id: `backup-restored:${Date.now()}`,
             kind: 'backup-restored',
             title: 'Recovered local history',
             detail:
-              'Ground could not read the newest state file and restored the last known-good local backup. The unreadable file was preserved for diagnosis.'
+              'Ground could not read the newest state file and restored a retained last-known-good local backup. Unreadable files were preserved for diagnosis.'
           }
-        } catch (backupError) {
-          if (!isStateRecoveryError(backupError)) throw backupError
-
-          if (isCorruptStateFileError(primaryError)) {
-            await quarantineCorruptFile(this.filePath)
-          }
-          if (isCorruptStateFileError(backupError)) {
-            await quarantineCorruptFile(backupPath)
-          }
-
+        } else {
           candidate = createInitialState()
-          rewritePrimary = true
-          if (
-            !isMissingStateFileError(primaryError) ||
-            !isMissingStateFileError(backupError)
-          ) {
+          if (recoveryErrors.some((error) => !isMissingStateFileError(error))) {
             nextRecoveryNotice = {
               id: `state-reset:${Date.now()}`,
               kind: 'state-reset',
               title: 'Local state needs attention',
               detail:
-                'Ground could not validate the saved state or its backup, so it opened a clean local workspace. The unreadable files were preserved for diagnosis.'
+                'Ground could not validate the saved state or any retained backup, so it opened a clean local workspace. Unreadable files were preserved for diagnosis.'
             }
           }
         }
       }
 
+      if (!candidate) throw new Error('Ground state recovery produced no state')
       const recoveredCandidate = structuredClone(candidate)
       const recovered = recoverInterruptedRuns(recoveredCandidate)
       const normalized = normalizeState(recoveredCandidate)
       if (rewritePrimary || recovered) {
-        await persistState(this.filePath, normalized.payload)
+        await this.persistStateDocument(this.filePath, normalized.payload)
       }
 
       this.state = normalized.state
       this.recoveryNotice = nextRecoveryNotice
+      this.stateRecoveryFallbackUsed =
+        nextRecoveryNotice?.kind === 'backup-restored' ||
+        nextRecoveryNotice?.kind === 'state-reset'
+      this.recoveryNoticeIds = new Set(
+        nextRecoveryNotice ? [nextRecoveryNotice.id] : []
+      )
     })
   }
 
-  snapshot(): AppSnapshot {
+  addRecoveryNotice(notice: RecoveryNotice): void {
+    const incoming = structuredClone(notice)
+    if (this.recoveryNoticeIds.has(incoming.id)) return
+    this.recoveryNoticeIds.add(incoming.id)
+    const current = this.recoveryNotice
+    if (!current) {
+      this.recoveryNotice = incoming
+      return
+    }
+    const severity: Record<RecoveryNotice['kind'], number> = {
+      'backup-restored': 0,
+      'credential-warning': 1,
+      'state-reset': 2
+    }
+    const detail = [current.detail, incoming.detail]
+      .filter((value, index, values) => values.indexOf(value) === index)
+      .join('\n\n')
+    this.recoveryNotice = {
+      id: `combined:${[...this.recoveryNoticeIds].sort().join('|')}`,
+      kind:
+        severity[incoming.kind] > severity[current.kind]
+          ? incoming.kind
+          : current.kind,
+      title: 'Local data needs attention',
+      detail
+    }
+  }
+
+  snapshot(): StateSnapshot {
     return structuredClone({
       providers: this.state.providers,
       mcpServers: this.state.mcpServers,
@@ -410,6 +593,14 @@ export class StateStore {
     const provider = this.state.providers.find((candidate) => candidate.id === providerId)
     if (!provider) throw new Error('Provider not found')
     return structuredClone(provider)
+  }
+
+  pendingSecretDeletes(): string[] {
+    return structuredClone(this.state.pendingSecretDeletes)
+  }
+
+  shouldDeferPendingSecretDeletes(): boolean {
+    return this.stateRecoveryFallbackUsed
   }
 
   getMcpServer(serverId: string): McpServerProfile {
@@ -498,6 +689,7 @@ export class StateStore {
           workspacePath: source.workspacePath,
           providerId: source.providerId,
           mode: source.mode,
+          includeImportedHistory: source.includeImportedHistory,
           runStatus: 'idle',
           createdAt: timestamp,
           updatedAt: timestamp,
@@ -511,9 +703,12 @@ export class StateStore {
               {
                 adapterId: session.adapterId,
                 providerRevision: session.providerRevision,
+                providerFingerprint: session.providerFingerprint,
                 model: session.model,
                 workspacePath: session.workspacePath,
                 mode: session.mode,
+                includesImportedHistory: session.includesImportedHistory,
+                origin: session.origin,
                 conversation: forkConversation(session.conversation, ids),
                 updatedAt: timestamp
               }
@@ -581,6 +776,7 @@ export class StateStore {
           title: importedTaskTitle(templateSnapshot.title),
           providerId: provider.id,
           mode: templateSnapshot.mode,
+          includeImportedHistory: false,
           runStatus: 'idle',
           createdAt: timestamp,
           updatedAt: timestamp,
@@ -662,8 +858,12 @@ export class StateStore {
             [exactProvider.id]: {
               adapterId: MODEL_ADAPTER_IDS[exactProvider.kind],
               providerRevision: exactProvider.updatedAt,
+              providerFingerprint:
+                providerConfigurationFingerprint(exactProvider),
               model: exactProvider.model,
               mode: templateSnapshot.mode,
+              includesImportedHistory: true,
+              origin: 'imported',
               conversation: importedConversation(
                 templateSnapshot.conversation
               ),
@@ -737,6 +937,161 @@ export class StateStore {
     )
   }
 
+  /**
+   * Atomically consumes one exact pending approval and persists the durable
+   * execution claim before its caller may perform the side effect.
+   */
+  async beginManagedExecution(
+    input: Readonly<BeginManagedExecutionInput>
+  ): Promise<ActivityItem> {
+    const claim = structuredClone(input)
+    requireSha256(claim.actionSha256, 'Action hash')
+    requireSha256(claim.approvalSha256, 'Approval hash')
+    return this.changeState(
+      (state) => {
+        const task = requireTask(state, claim.taskId)
+        if (task.archivedAt) {
+          throw new Error('Archived tasks cannot begin managed execution')
+        }
+        if (task.runStatus !== 'awaiting-approval') {
+          throw new Error(
+            'Managed execution requires the task to be awaiting approval'
+          )
+        }
+        const item = requireActivityItem(task, claim.itemId)
+        if (
+          item.status !== 'pending' ||
+          item.activityType !== 'approval' ||
+          !item.approvalId ||
+          item.managedExecution
+        ) {
+          throw new Error(
+            'Managed execution requires an unconsumed pending approval'
+          )
+        }
+        if (
+          item.runId !== claim.runId ||
+          item.callId !== claim.callId ||
+          item.toolName !== claim.toolName
+        ) {
+          throw new Error(
+            'Managed execution identity does not match the pending approval'
+          )
+        }
+        if (item.historyOnly) {
+          throw new Error('Imported history cannot begin managed execution')
+        }
+        if (
+          managedExecutionKind(item) !== claim.kind
+        ) {
+          throw new Error(
+            'Managed execution kind does not match the pending activity'
+          )
+        }
+        for (const candidateTask of state.tasks) {
+          for (const candidate of candidateTask.items) {
+            if (
+              candidate.kind !== 'activity' ||
+              !candidate.managedExecution
+            ) {
+              continue
+            }
+            if (candidate.managedExecution.operationId === item.id) {
+              throw new Error('Managed execution operation already exists')
+            }
+            if (
+              candidate.managedExecution.claim === 'approved' &&
+              candidate.runId === claim.runId &&
+              candidate.callId === claim.callId
+            ) {
+              throw new Error(
+                'Managed execution call already has a durable claim'
+              )
+            }
+          }
+        }
+
+        item.status = 'running'
+        item.activityType =
+          claim.kind === 'command' ? 'command' : 'tool'
+        delete item.approvalId
+        delete item.result
+        delete item.durationMs
+        item.managedExecution = {
+          version: 1,
+          operationId: item.id,
+          claim: 'approved',
+          kind: claim.kind,
+          actionSha256: claim.actionSha256,
+          approvalSha256: claim.approvalSha256,
+          phase: 'started',
+          startedAt: claim.startedAt
+        }
+        task.runStatus = 'running'
+        task.updatedAt = nowIso()
+        return { taskId: task.id, itemId: item.id }
+      },
+      (state, started) =>
+        requireActivityItem(
+          requireTask(state, started.taskId),
+          started.itemId
+        )
+    )
+  }
+
+  /**
+   * Atomically records the known result of exactly one started claim. An
+   * uncertain or already completed operation can never pass this transition.
+   */
+  async completeManagedExecution(
+    input: Readonly<CompleteManagedExecutionInput>
+  ): Promise<ActivityItem> {
+    const completion = structuredClone(input)
+    requireSha256(completion.actionSha256, 'Action hash')
+    return this.changeState(
+      (state) => {
+        const task = requireTask(state, completion.taskId)
+        const item = requireActivityItem(task, completion.itemId)
+        const marker = item.managedExecution
+        if (
+          !marker ||
+          marker.operationId !== completion.operationId ||
+          marker.operationId !== item.id ||
+          marker.claim !== 'approved' ||
+          marker.phase !== 'started' ||
+          item.status !== 'running'
+        ) {
+          throw new Error(
+            marker?.phase === 'uncertain'
+              ? 'Managed execution outcome is unknown and cannot be completed or retried'
+              : 'Managed execution is not an exact started claim'
+          )
+        }
+        if (marker.actionSha256 !== completion.actionSha256) {
+          throw new Error(
+            'Managed execution action hash does not match the started claim'
+          )
+        }
+
+        item.status = completion.status
+        item.result = completion.result
+        item.durationMs = completion.durationMs
+        item.managedExecution = {
+          ...marker,
+          phase: 'completed',
+          completedAt: completion.completedAt
+        }
+        task.updatedAt = nowIso()
+        return { taskId: task.id, itemId: item.id }
+      },
+      (state, completed) =>
+        requireActivityItem(
+          requireTask(state, completed.taskId),
+          completed.itemId
+        )
+    )
+  }
+
   async addItem(taskId: string, item: TaskItem, persist = true): Promise<void> {
     // Capture the event at invocation time. Streaming callers intentionally
     // keep mutating their renderer-facing item after queueing the insertion.
@@ -790,6 +1145,55 @@ export class StateStore {
     )
   }
 
+  async queueProvisionalSecretDelete(reference: string): Promise<void> {
+    await this.changeState(
+      (state) => {
+        if (!state.pendingSecretDeletes.includes(reference)) {
+          state.pendingSecretDeletes.push(reference)
+        }
+      },
+      () => undefined
+    )
+  }
+
+  async publishProviderSecretTransition(
+    provider: ProviderProfile,
+    stagedReference: string | undefined,
+    obsoleteReferences: readonly string[]
+  ): Promise<void> {
+    const providerSnapshot = structuredClone(provider)
+    await this.changeState(
+      (state) => {
+        const index = state.providers.findIndex(
+          (candidate) => candidate.id === providerSnapshot.id
+        )
+        if (index === -1) state.providers.push(providerSnapshot)
+        else state.providers[index] = providerSnapshot
+        const pending = new Set(state.pendingSecretDeletes)
+        if (stagedReference) pending.delete(stagedReference)
+        for (const reference of obsoleteReferences) {
+          if (reference !== stagedReference) pending.add(reference)
+        }
+        state.pendingSecretDeletes = [...pending]
+      },
+      () => undefined
+    )
+  }
+
+  async acknowledgeSecretDeletes(
+    references: readonly string[]
+  ): Promise<void> {
+    const acknowledged = new Set(references)
+    await this.changeState(
+      (state) => {
+        state.pendingSecretDeletes = state.pendingSecretDeletes.filter(
+          (reference) => !acknowledged.has(reference)
+        )
+      },
+      () => undefined
+    )
+  }
+
   async deleteProvider(providerId: string): Promise<void> {
     await this.changeState(
       (state) => {
@@ -814,6 +1218,39 @@ export class StateStore {
     )
   }
 
+  async deleteProviderWithSecretTransition(
+    providerId: string,
+    obsoleteReferences: readonly string[]
+  ): Promise<void> {
+    await this.changeState(
+      (state) => {
+        if (state.providers.length <= 1) {
+          throw new Error('Keep at least one provider connected')
+        }
+        const index = state.providers.findIndex(
+          (candidate) => candidate.id === providerId
+        )
+        if (index === -1) return
+        state.providers.splice(index, 1)
+        const fallback = state.providers[0]
+        if (fallback) {
+          if (state.settings.defaultProviderId === providerId) {
+            state.settings.defaultProviderId = fallback.id
+          }
+          for (const task of state.tasks) {
+            if (task.providerId === providerId) {
+              task.providerId = fallback.id
+            }
+          }
+        }
+        const pending = new Set(state.pendingSecretDeletes)
+        for (const reference of obsoleteReferences) pending.add(reference)
+        state.pendingSecretDeletes = [...pending]
+      },
+      () => undefined
+    )
+  }
+
   async addActivity(taskId: string, activity: ActivityItem): Promise<void> {
     await this.addItem(taskId, activity)
   }
@@ -825,8 +1262,171 @@ export class StateStore {
     )
   }
 
-  async settledSnapshot(): Promise<AppSnapshot> {
+  async settledSnapshot(): Promise<StateSnapshot> {
     return this.enqueueTransaction(async () => this.snapshot())
+  }
+
+  async listLocalStateSnapshots(): Promise<LocalStateSnapshot[]> {
+    return this.enqueueTransaction(async () => {
+      const slots = [
+        {
+          filePath: this.filePath,
+          kind: 'current' as const,
+          generation: 0
+        },
+        ...stateBackupPaths(this.filePath).map((filePath, index) => ({
+          filePath,
+          kind: 'retained' as const,
+          generation: index + 1
+        }))
+      ]
+      const selections = new Map<string, LocalStateSnapshotSelection>()
+      const snapshots: LocalStateSnapshot[] = []
+      for (const slot of slots) {
+        const id = `state_snapshot_${randomUUID()}`
+        let document: BoundedStateDocument
+        try {
+          document = await readBoundedStateDocument(slot.filePath)
+        } catch (error) {
+          const status =
+            error instanceof InvalidStateFileError ||
+            errorCode(error) === 'ELOOP'
+              ? 'invalid'
+              : 'unavailable'
+          selections.set(id, { ...slot, status })
+          snapshots.push({
+            id,
+            kind: slot.kind,
+            generation: slot.generation,
+            status
+          })
+          continue
+        }
+        try {
+          const material = validStateMaterialFromDocument(document)
+          selections.set(id, {
+            ...slot,
+            status: 'valid',
+            sourceSha256: material.sourceSha256
+          })
+          snapshots.push({
+            id,
+            kind: slot.kind,
+            generation: slot.generation,
+            status: 'valid',
+            capturedAt: material.capturedAt,
+            sizeBytes: material.sizeBytes,
+            taskCount: material.state.tasks.length,
+            providerCount: material.state.providers.length
+          })
+        } catch {
+          selections.set(id, { ...slot, status: 'invalid' })
+          snapshots.push({
+            id,
+            kind: slot.kind,
+            generation: slot.generation,
+            status: 'invalid',
+            capturedAt: document.capturedAt,
+            sizeBytes: document.sizeBytes
+          })
+        }
+      }
+      this.localStateSnapshotSelections = selections
+      return structuredClone(snapshots)
+    })
+  }
+
+  async exportLocalStateSnapshot(
+    snapshotId: string,
+    targetPath: string
+  ): Promise<void> {
+    await this.enqueueTransaction(async () => {
+      if (!path.isAbsolute(targetPath)) {
+        throw new Error('Snapshot export destination must be absolute')
+      }
+      const material = await this.readSelectedLocalStateSnapshot(
+        snapshotId,
+        false
+      )
+      await writePrivateSnapshotFile(targetPath, material.normalizedPayload)
+    })
+  }
+
+  async assertLocalStateSnapshotSelection(
+    snapshotId: string,
+    retainedOnly: boolean
+  ): Promise<LocalStateSnapshotReview> {
+    return this.enqueueTransaction(async () => {
+      const material = await this.readSelectedLocalStateSnapshot(
+        snapshotId,
+        retainedOnly
+      )
+      const selection = this.localStateSnapshotSelections.get(snapshotId)
+      if (!selection) {
+        throw new Error('Snapshot selection expired; refresh local snapshots')
+      }
+      return structuredClone({
+        id: snapshotId,
+        kind: selection.kind,
+        generation: selection.generation,
+        capturedAt: material.capturedAt,
+        sizeBytes: material.sizeBytes,
+        taskCount: material.state.tasks.length,
+        providerCount: material.state.providers.length,
+        contentSha256: material.sourceSha256
+      } satisfies LocalStateSnapshotReview)
+    })
+  }
+
+  async restoreLocalStateSnapshot(snapshotId: string): Promise<void> {
+    await this.enqueueTransaction(async () => {
+      const material = await this.readSelectedLocalStateSnapshot(
+        snapshotId,
+        true
+      )
+      const candidate = structuredClone(material.state)
+      recoverInterruptedRuns(candidate)
+      const normalized = normalizeState(candidate)
+      await this.publishRuntimeState(normalized.payload)
+      this.state = normalized.state
+      this.localStateSnapshotSelections.clear()
+    })
+  }
+
+  private async readSelectedLocalStateSnapshot(
+    snapshotId: string,
+    retainedOnly: boolean
+  ): Promise<ValidStateMaterial> {
+    if (
+      typeof snapshotId !== 'string' ||
+      !LOCAL_STATE_SNAPSHOT_ID_PATTERN.test(snapshotId)
+    ) {
+      throw new Error('Snapshot identifier is invalid')
+    }
+    const selection = this.localStateSnapshotSelections.get(snapshotId)
+    if (!selection) {
+      throw new Error('Snapshot selection expired; refresh local snapshots')
+    }
+    if (retainedOnly && selection.kind !== 'retained') {
+      throw new Error('Only a retained snapshot can be restored')
+    }
+    if (selection.status !== 'valid' || !selection.sourceSha256) {
+      throw new Error('Selected snapshot is not available for this action')
+    }
+    let material: ValidStateMaterial
+    try {
+      material = await readValidStateMaterial(selection.filePath)
+    } catch {
+      throw new Error(
+        'Selected snapshot changed or became unavailable; refresh local snapshots'
+      )
+    }
+    if (material.sourceSha256 !== selection.sourceSha256) {
+      throw new Error(
+        'Selected snapshot changed or became unavailable; refresh local snapshots'
+      )
+    }
+    return material
   }
 
   private changeState<Token, Result>(
@@ -835,16 +1435,41 @@ export class StateStore {
     persist = true
   ): Promise<Result> {
     return this.enqueueTransaction(async () => {
+      this.assertPersistenceCertain()
       const candidate = structuredClone(this.state)
       const token = mutate(candidate)
       const normalized = normalizeState(candidate)
       const result = structuredClone(project(normalized.state, token))
       if (persist) {
-        await persistState(this.filePath, normalized.payload)
+        await this.publishRuntimeState(normalized.payload)
       }
       this.state = normalized.state
       return result
     })
+  }
+
+  private assertPersistenceCertain(): void {
+    if (this.persistenceUncertainty) {
+      throw this.persistenceUncertainty
+    }
+  }
+
+  private async publishRuntimeState(payload: string): Promise<void> {
+    this.assertPersistenceCertain()
+    try {
+      await this.persistStateDocument(this.filePath, payload)
+    } catch (error) {
+      if (!(error instanceof StatePersistenceError)) throw error
+      this.persistenceUncertainty = error
+      try {
+        this.onPersistenceUncertain?.(error)
+      } catch {
+        // The store is already sealed. Preserve the publication error that
+        // explains why the process must exit rather than trusting callback
+        // behavior.
+      }
+      throw error
+    }
   }
 
   private enqueueTransaction<Result>(
@@ -900,9 +1525,39 @@ async function readValidStatePayload(filePath: string): Promise<string> {
   )
 }
 
+async function readValidStateMaterial(
+  filePath: string
+): Promise<ValidStateMaterial> {
+  const document = await readBoundedStateDocument(filePath)
+  return validStateMaterialFromDocument(document)
+}
+
+function validStateMaterialFromDocument(
+  document: BoundedStateDocument
+): ValidStateMaterial {
+  const parsed = parseStatePayload(document.payload)
+  let normalized: ReturnType<typeof normalizeState>
+  try {
+    normalized = normalizeState(parsed)
+  } catch (error) {
+    throw new InvalidStateFileError(
+      'Ground state cannot be normalized safely',
+      error
+    )
+  }
+  return {
+    ...document,
+    sourceSha256: createHash('sha256')
+      .update(document.payload, 'utf8')
+      .digest('hex'),
+    state: normalized.state,
+    normalizedPayload: normalized.payload
+  }
+}
+
 async function persistState(filePath: string, payload: string): Promise<void> {
   const directory = path.dirname(filePath)
-  const backupPath = `${filePath}.bak`
+  const backupPaths = stateBackupPaths(filePath)
   await mkdir(directory, { recursive: true, mode: 0o700 })
   const temporary = await writePrivateTemporaryFile(
     directory,
@@ -910,6 +1565,7 @@ async function persistState(filePath: string, payload: string): Promise<void> {
     payload
   )
   let temporaryCreated = true
+  let primaryPublicationAttempted = false
   try {
     let previousPayload: string | undefined
     try {
@@ -926,22 +1582,91 @@ async function persistState(filePath: string, payload: string): Promise<void> {
     }
 
     if (previousPayload !== undefined) {
-      const backupTemporary = await writePrivateTemporaryFile(
-        directory,
-        path.basename(backupPath),
-        previousPayload
-      )
-      let backupTemporaryCreated = true
-      try {
-        await rename(backupTemporary, backupPath)
-        backupTemporaryCreated = false
-      } finally {
-        if (backupTemporaryCreated) {
-          await unlink(backupTemporary).catch(() => undefined)
+      const retainedPayloads: Array<string | undefined> = []
+      for (const backupPath of backupPaths.slice(0, -1)) {
+        try {
+          retainedPayloads.push(await readValidStatePayload(backupPath))
+        } catch (error) {
+          if (
+            !(error instanceof InvalidStateFileError) &&
+            !isMissingStateFileError(error)
+          ) {
+            throw error
+          }
+          retainedPayloads.push(undefined)
         }
       }
+      for (let index = retainedPayloads.length - 1; index >= 0; index -= 1) {
+        const retainedPayload = retainedPayloads[index]
+        const target = backupPaths[index + 1]
+        if (retainedPayload && target) {
+          await replacePrivateStateFile(target, retainedPayload)
+        }
+      }
+      const newestBackup = backupPaths[0]
+      if (!newestBackup) throw new Error('Ground backup retention is invalid')
+      await replacePrivateStateFile(newestBackup, previousPayload)
     }
 
+    primaryPublicationAttempted = true
+    await rename(temporary, filePath)
+    temporaryCreated = false
+    await syncDirectory(directory)
+  } catch (error) {
+    if (
+      primaryPublicationAttempted &&
+      !(error instanceof StatePersistenceError)
+    ) {
+      throw new StatePersistenceError(error)
+    }
+    throw error
+  } finally {
+    if (temporaryCreated) {
+      await unlink(temporary).catch(() => undefined)
+    }
+  }
+}
+
+function stateBackupPaths(filePath: string): string[] {
+  return Array.from({ length: STATE_BACKUP_RETENTION }, (_, index) =>
+    index === 0 ? `${filePath}.bak` : `${filePath}.bak.${index + 1}`
+  )
+}
+
+async function replacePrivateStateFile(
+  filePath: string,
+  payload: string
+): Promise<void> {
+  const directory = path.dirname(filePath)
+  const temporary = await writePrivateTemporaryFile(
+    directory,
+    path.basename(filePath),
+    payload
+  )
+  let temporaryCreated = true
+  try {
+    await rename(temporary, filePath)
+    temporaryCreated = false
+  } finally {
+    if (temporaryCreated) {
+      await unlink(temporary).catch(() => undefined)
+    }
+  }
+}
+
+async function writePrivateSnapshotFile(
+  filePath: string,
+  payload: string
+): Promise<void> {
+  const directory = path.dirname(filePath)
+  await mkdir(directory, { recursive: true, mode: 0o700 })
+  const temporary = await writePrivateTemporaryFile(
+    directory,
+    path.basename(filePath),
+    payload
+  )
+  let temporaryCreated = true
+  try {
     await rename(temporary, filePath)
     temporaryCreated = false
     await syncDirectory(directory)
@@ -964,10 +1689,22 @@ function parseStatePayload(payload: string): PersistedStateData {
 }
 
 async function readBoundedStateFile(filePath: string): Promise<string> {
+  return (await readBoundedStateDocument(filePath)).payload
+}
+
+async function readBoundedStateDocument(
+  filePath: string
+): Promise<BoundedStateDocument> {
   const noFollow =
     typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0
   const nonBlocking =
     typeof constants.O_NONBLOCK === 'number' ? constants.O_NONBLOCK : 0
+  const pathDetails = await lstat(filePath)
+  if (!pathDetails.isFile()) {
+    throw new InvalidStateFileError(
+      'Ground state path is not a regular file'
+    )
+  }
   const handle = await open(
     filePath,
     constants.O_RDONLY | noFollow | nonBlocking
@@ -977,6 +1714,14 @@ async function readBoundedStateFile(filePath: string): Promise<string> {
     if (!details.isFile()) {
       throw new InvalidStateFileError(
         'Ground state path is not a regular file'
+      )
+    }
+    if (
+      pathDetails.dev !== details.dev ||
+      pathDetails.ino !== details.ino
+    ) {
+      throw new InvalidStateFileError(
+        'Ground state changed while it was being opened'
       )
     }
     if (details.size > MAX_STATE_FILE_BYTES) {
@@ -1006,9 +1751,13 @@ async function readBoundedStateFile(filePath: string): Promise<string> {
       )
     }
     try {
-      return new TextDecoder('utf-8', { fatal: true }).decode(
-        Buffer.concat(chunks, totalBytes)
-      )
+      return {
+        payload: new TextDecoder('utf-8', { fatal: true }).decode(
+          Buffer.concat(chunks, totalBytes)
+        ),
+        sizeBytes: totalBytes,
+        capturedAt: details.mtime.toISOString()
+      }
     } catch (error) {
       throw new InvalidStateFileError(
         'Ground state is not valid UTF-8',
@@ -1104,6 +1853,7 @@ async function quarantineCorruptFile(filePath: string): Promise<void> {
 
 function recoverInterruptedRuns(state: PersistedStateData): boolean {
   let recovered = false
+  const interruptedAt = nowIso()
   for (const task of state.tasks) {
     const taskWasActive = isTaskActive(task)
     const activeActivity = [...task.items]
@@ -1121,38 +1871,128 @@ function recoverInterruptedRuns(state: PersistedStateData): boolean {
             .find((item) => item.kind === 'message' && item.runId)?.runId ??
           createId('run')
     let activityRecovered = false
+    const recoveredRunIds = new Set<string>()
+    const outcomeUnknownRunIds = new Set<string>()
     for (const item of task.items) {
+      if (item.kind !== 'activity') continue
+      const marker = item.managedExecution
       if (
-        item.kind === 'activity' &&
-        (item.status === 'pending' || item.status === 'running')
+        marker?.claim === 'approved' &&
+        marker.phase === 'started'
       ) {
+        item.managedExecution = {
+          ...marker,
+          phase: 'uncertain',
+          interruptedAt
+        }
+        item.status = 'error'
+        item.result = MANAGED_EXECUTION_OUTCOME_UNKNOWN
+        delete item.approvalId
+        delete item.durationMs
+        activityRecovered = true
+        recoveredRunIds.add(item.runId)
+        outcomeUnknownRunIds.add(item.runId)
+        continue
+      }
+      if (item.status === 'running' && !marker) {
+        const legacyKind = managedExecutionKind(item)
+        if (legacyKind) {
+          item.activityType =
+            legacyKind === 'command' ? 'command' : 'tool'
+          item.managedExecution = {
+            version: 1,
+            operationId: item.id,
+            claim: 'legacy-untracked',
+            kind: legacyKind,
+            phase: 'uncertain',
+            startedAt: managedStartedAt(item.createdAt, interruptedAt),
+            interruptedAt
+          }
+          item.result = LEGACY_MANAGED_EXECUTION_OUTCOME_UNKNOWN
+          delete item.durationMs
+          outcomeUnknownRunIds.add(item.runId)
+        }
+      }
+      if (item.status === 'pending' || item.status === 'running') {
         item.status = 'error'
         delete item.approvalId
         activityRecovered = true
+        recoveredRunIds.add(item.runId)
       }
-    }
-    if (!taskWasActive) {
-      if (activityRecovered) {
-        task.updatedAt = nowIso()
-        recovered = true
-      }
-      continue
     }
 
-    recovered = true
-    task.items.push({
-      id: createId('activity'),
-      kind: 'activity',
-      runId: interruptedRunId,
-      activityType: 'error',
-      title: 'Run interrupted',
-      detail:
-        'Ground closed before this run reached a terminal state. Review the workspace before retrying.',
-      status: 'error',
-      createdAt: nowIso()
-    })
-    task.runStatus = 'failed'
-    task.updatedAt = nowIso()
+    const invalidatesContinuation =
+      taskWasActive || outcomeUnknownRunIds.size > 0
+    let continuationCleared = false
+    if (invalidatesContinuation && task.runtimeSessions) {
+      delete task.runtimeSessions
+      continuationCleared = true
+    }
+    if (invalidatesContinuation && task.modelSessions) {
+      for (const session of Object.values(task.modelSessions)) {
+        if (Object.hasOwn(session, 'checkpoint')) {
+          delete session.checkpoint
+          continuationCleared = true
+        }
+      }
+    }
+
+    const summaryRunIds = new Set<string>()
+    if (taskWasActive) {
+      for (const runId of recoveredRunIds) summaryRunIds.add(runId)
+      if (!summaryRunIds.size) summaryRunIds.add(interruptedRunId)
+    } else {
+      for (const runId of outcomeUnknownRunIds) summaryRunIds.add(runId)
+    }
+    let summariesAdded = 0
+    const summaryLimit = Math.min(
+      MAX_INTERRUPTED_RUN_SUMMARIES,
+      Math.max(0, MAX_PERSISTED_TASK_ITEMS - task.items.length)
+    )
+    for (const runId of summaryRunIds) {
+      if (summariesAdded >= summaryLimit) break
+      if (
+        task.items.some(
+          (item) =>
+            item.kind === 'activity' &&
+            item.runId === runId &&
+            item.activityType === 'error' &&
+            item.title === 'Run interrupted'
+        )
+      ) {
+        continue
+      }
+      const outcomeUnknown = outcomeUnknownRunIds.has(runId)
+      task.items.push({
+        id: createId('activity'),
+        kind: 'activity',
+        runId,
+        activityType: 'error',
+        title: 'Run interrupted',
+        detail: outcomeUnknown
+          ? 'Ground closed after a mutating action started. Its outcome is unknown, Ground did not retry it, and any native runtime continuation or model checkpoint was cleared. Review the workspace or external system before continuing.'
+          : 'Ground closed before this run reached a terminal state. Review the workspace before retrying.',
+        status: 'error',
+        createdAt: interruptedAt
+      })
+      summariesAdded += 1
+    }
+
+    if (
+      taskWasActive ||
+      outcomeUnknownRunIds.size > 0
+    ) {
+      task.runStatus = 'failed'
+    }
+    if (
+      activityRecovered ||
+      taskWasActive ||
+      continuationCleared ||
+      summariesAdded > 0
+    ) {
+      task.updatedAt = interruptedAt
+      recovered = true
+    }
   }
   return recovered
 }

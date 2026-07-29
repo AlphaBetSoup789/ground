@@ -6,13 +6,16 @@ safety, and portability—not target dates.
 This roadmap is directional. Checked items exist in the current source tree; they
 are not necessarily release-certified.
 
-## Developer preview
+## Public alpha baseline
 
 - [x] Local Electron workspace with durable tasks and provider profiles
 - [x] Direct OpenAI-compatible/local endpoint
-- [x] Generic CLI transport and recognized Codex, Claude, and Gemini event parsers
-- [x] Provider-neutral model/runtime contracts and canonical event reducer
-- [x] Source-trusted static model-adapter registry and injectable runtime factory
+- [x] Generic CLI transport and recognized Codex, Claude, Gemini, and Antigravity
+  event parsers, plus a documented dependency-free Generic CLI bridge
+- [x] Passive CLI discovery and a native executable picker that validate without
+  launching candidates while preserving separate save/run confirmations
+- [x] Provider-neutral model/runtime contracts and canonical event reducers
+- [x] Source-trusted static model/runtime registry and injectable factories
 - [x] Main-process renderer, workspace, endpoint, secret, and executable checks
 - [x] Bounded built-in file/search/full-write/localized-edit/command tools with
   side-effect approvals
@@ -22,7 +25,11 @@ are not necessarily release-certified.
 - [x] Interactive multi-session workspace PTY with native launch confirmation,
   opaque renderer attachments, detach/reattach, and bounded in-memory scrollback
 - [x] Git status, staged/unstaged diff, path staging/unstaging, exact-tree commits,
-  bounded history, and clean managed-worktree create/remove
+  exact-ref conditional updates, bounded history, recoverable selected-file
+  restore/undo, and clean managed-worktree create/remove
+- [x] Passive workspace-excluding Git discovery, native executable selection,
+  private fingerprint preference, Git 2.23+ verification after confirmation, and
+  exact identity revalidation before every launch
 - [x] Neutralize effective repository clean/smudge/process filters on Ground’s
   status, working-diff, and worktree-checkout invocations
 - [x] MCP Streamable HTTP and stdio tools with namespacing, exact definition trust,
@@ -34,12 +41,23 @@ are not necessarily release-certified.
 - [x] Versioned task bundle import/export, Markdown export, and confirmed task
   deletion
 - [x] Safe task fork, reversible archive/restore, and bounded active/archive search
-- [x] Strict persisted-state validation, one rotating backup, automatic fallback,
-  bounded no-follow reads, private atomic replacement, unreadable-file quarantine,
-  and an in-app recovery notice
+- [x] Strict persisted-state validation, three rotating validated snapshots,
+  automatic fallback, bounded no-follow reads, private atomic replacement,
+  unreadable-file quarantine, and in-app recovery controls
+- [x] Explicit persisted-state v1-to-v2 migration with fail-closed future/skip
+  handling
+- [x] Saved-provider readiness checks that gate every exact provider revision before
+  run startup, with versioned credential publication and task/provider-bound start
+  reservations
+- [x] Keyboard command palette, task-local unsent drafts, bounded streaming
+  announcements, near-bottom timeline following, responsive layout, forced-color
+  support, and reduced-motion behavior
+- [x] Cross-platform CI renderer interaction suite in Electron for keyboard/focus,
+  provider-form validation, drafts, cancellation, archive/search, responsive
+  settings, and reduced-motion behavior
 - [x] Baseline CI, CodeQL, issue forms, and contributor/security documentation
 
-## Public alpha exit criteria
+## Public alpha hardening
 
 ### Provider freedom
 
@@ -47,44 +65,57 @@ are not necessarily release-certified.
   the desktop provider screen and managed run loop
 - [x] Persist canonical model/tool history, per-item provider attribution, and
   normalized cross-provider tool exchanges
-- [ ] Publish version-pinned API and CLI compatibility fixtures
+- [x] Publish version-pinned synthetic API-adapter and CLI-parser compatibility
+  fixtures with explicit provenance and package/declaration drift checks
 - [x] Document source-trusted static model-adapter registration without runtime
   provider-code loading
-- [ ] Wire the agent-runtime registry into desktop CLI composition and publish a
-  stable adapter package/conformance suite
+- [x] Wire the agent-runtime registry into desktop CLI composition and provide a
+  versioned, publishable adapter package plus deterministic conformance suite
+- [x] Keep published compatibility evidence explicit about deterministic
+  fixture/mock provenance and the absence of paid live-provider/CLI certification
 
 ### Safe coding loop
 
 - [x] Preserve one immutable approval envelope from preview through execution
 - [x] Bind approved commands to resolved executable identity and fingerprint
-- [ ] Replace path-bearing renderer DTOs with opaque workspace grants
+- [x] Replace path-bearing renderer DTOs with revocable opaque workspace grants
 - [x] Put new terminal creation behind a native exact-launch confirmation
-- [ ] Move write, command, and MCP-call approval behind a native user-presence
+- [x] Move write, command, and MCP-call approval behind a native user-presence
   surface
+- [x] Persist exact managed-action start/completion claims and recover interrupted
+  writes, commands, and MCP calls as outcome unknown without automatic replay
 - [x] Add Git status/diff/history, selected-path staging/unstaging, exact-tree
   commits, and clean managed-worktree create/remove
-- [ ] Add a recoverable revert workflow
-- [ ] Add packaged-app security and cancellation end-to-end tests
+- [x] Add a recoverable selected-file restore/undo workflow
+- [x] Add fixed packaged-app identity, encrypted-vault, native-dialog, PTY, Git,
+  MCP-launch, and process-tree cancellation runtime evidence
+- [ ] Add adversarial packaged renderer-interaction and accessibility end-to-end
+  certification
 
 ### Durable workspace
 
 - [ ] Replace JSON snapshots with a transactional, append-only event store
-- [x] Add legacy file migration, strict state-schema validation, one rotating
-  backup, automatic corruption fallback, unreadable-file quarantine, and a
-  recovery banner
-- [ ] Add a user-driven backup browser, restore workflow, and retention policy
+- [x] Add legacy file migration, strict state-schema validation, three rotating
+  retained snapshots, automatic corruption fallback, unreadable-file quarantine,
+  and a recovery banner
+- [x] Add an opaque user-driven snapshot browser, native export and restore
+  workflow, a process-wide restore drain/seal, and a three-generation retention
+  policy
 - [ ] Resume interrupted runs safely without duplicating side effects
 - [x] Add portable JSON import/export, Markdown export, and task deletion
 - [x] Add task archive/restore, active/archive search, and safe fork
-- [ ] Add explicit controls for including imported history in later model context
+- [x] Add explicit controls for including imported history in later model context
 
 ### Public release engineering
 
-- [ ] Name maintainers and private conduct/security contacts
+- [x] Name maintainers and private conduct/security contacts
 - [ ] Pin supported Node, Electron, provider API, CLI, and operating-system ranges
 - [x] Generate and CI-check `THIRD_PARTY_NOTICES.md` from the locked production
   graph
 - [x] Add native-runner unsigned preview packaging for macOS, Windows, and Linux
+- [x] Require distributable-bound runtime evidence for macOS arm64/x64, Windows
+  x64, and Linux x64, including temporary NSIS installation and ZIP/AppImage
+  extraction
 - [x] Scaffold a tag workflow for checksums, CycloneDX SBOM, build/SBOM
   attestations, and a draft prerelease
 - [ ] Produce signed, notarized macOS artifacts from protected CI

@@ -1,19 +1,19 @@
 import type {
   AppSnapshot,
-  RunEvent,
-  RunEventEnvelope,
-  Task
+  DesktopRunEvent,
+  DesktopRunEventEnvelope,
+  DesktopTask
 } from '../../../shared/types'
 
 export function applyRunEvent(
   snapshot: AppSnapshot,
-  event: RunEvent
+  event: DesktopRunEvent
 ): AppSnapshot {
   const taskIndex = snapshot.tasks.findIndex(
     (candidate) => candidate.id === event.taskId
   )
   if (taskIndex === -1) return snapshot
-  const currentTask = snapshot.tasks[taskIndex] as Task
+  const currentTask = snapshot.tasks[taskIndex] as DesktopTask
   let task = currentTask
 
   switch (event.type) {
@@ -80,7 +80,7 @@ export function applyRunEvent(
 
 export function applyRunEventEnvelope(
   snapshot: AppSnapshot,
-  envelope: RunEventEnvelope
+  envelope: DesktopRunEventEnvelope
 ): AppSnapshot {
   if (envelope.revision <= (snapshot.runEventRevision ?? 0)) return snapshot
   const updated = applyRunEvent(snapshot, envelope.event)
@@ -106,7 +106,7 @@ export function materializeActiveRunEvents(
 
 export function reconcileSnapshotWithEvents(
   snapshot: AppSnapshot,
-  envelopes: readonly RunEventEnvelope[]
+  envelopes: readonly DesktopRunEventEnvelope[]
 ): AppSnapshot {
   return envelopes.reduce(
     applyRunEventEnvelope,

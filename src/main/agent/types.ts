@@ -133,6 +133,7 @@ export interface TokenUsage {
   cachedInputTokens?: number
   cacheWriteInputTokens?: number
   reasoningTokens?: number
+  costUsd?: number
 }
 
 export interface ProviderNotice {

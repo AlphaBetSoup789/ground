@@ -157,7 +157,13 @@ const providerDescriptorSchema = z.discriminatedUnion('type', [
       kind: z.literal('cli'),
       name: displayString(MAX_PROVIDER_NAME_CHARACTERS),
       model: boundedString(MAX_MODEL_CHARACTERS),
-      adapter: z.enum(['generic', 'codex', 'claude', 'gemini'])
+      adapter: z.enum([
+        'generic',
+        'codex',
+        'claude',
+        'gemini',
+        'antigravity'
+      ])
     })
     .strict()
 ])

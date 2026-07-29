@@ -15,23 +15,10 @@ env:
   CSC_IDENTITY_AUTO_DISCOVERY: false
 
 jobs:
-  package:
-    name: Package ${{ matrix.platform }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: macOS
-            os: macos-latest
-            command: npm run dist:mac
-          - platform: Windows
-            os: windows-latest
-            command: npm run dist:win
-          - platform: Linux
-            os: ubuntu-latest
-            command: npm run dist:linux
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+  verify:
+    name: Verify preview source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
 
     steps:
       - name: Check out source
@@ -55,6 +42,83 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
+      - name: Verify source, compatibility, SDK packaging, and production build
+        run: npm run verify
+
+      - name: Install renderer-test display dependencies
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install --no-install-recommends --yes xauth xvfb
+
+      - name: Exercise renderer interactions in Electron under Xvfb
+        run: >-
+          xvfb-run --auto-servernum
+          --server-args="-screen 0 1440x960x24"
+          npm run test:e2e:renderer
+
+      - name: Audit application, Electron, and build dependencies
+        run: npm audit --audit-level=high
+
+  package:
+    name: Package ${{ matrix.platform }}
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS-arm64
+            slug: macos-arm64
+            os: macos-15
+            architecture: arm64
+            command: npm run dist:mac:unsigned -- --arm64
+          - platform: macOS-x64
+            slug: macos-x64
+            os: macos-15-intel
+            architecture: x64
+            command: npm run dist:mac:unsigned -- --x64
+          - platform: Windows-x64
+            slug: windows-x64
+            os: windows-2025
+            architecture: x64
+            command: npm run dist:win:unsigned -- --x64
+          - platform: Linux-x64
+            slug: linux-x64
+            os: ubuntu-24.04
+            architecture: x64
+            command: npm run dist:linux -- --x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 55
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install pinned npm
+        working-directory: ${{ runner.temp }}
+        run: npm install --global npm@11.16.0 --ignore-scripts
+
+      - name: Verify native runner architecture
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+        run: >-
+          node -e "if (process.arch !== process.env.EXPECTED_ARCHITECTURE)
+          throw new Error('Expected ' + process.env.EXPECTED_ARCHITECTURE +
+          ' runner, received ' + process.arch)"
+
+      - name: Verify toolchain and install-script policy
+        run: npm run toolchain:check && npm run install-scripts:check
+
+      - name: Install locked dependencies
+        run: npm ci
+
       - name: Check build-dependency compatibility
         run: npm run build-deps:check
 
@@ -68,10 +132,34 @@ jobs:
         if: runner.os == 'Linux'
         run: >-
           sudo apt-get update &&
-          sudo apt-get install --no-install-recommends --yes xauth xvfb
+          sudo apt-get install --no-install-recommends --yes
+          dbus-x11 gnome-keyring libsecret-1-0 xauth xvfb
 
       - name: Build unsigned preview
         run: ${{ matrix.command }}
+
+      - name: Verify exact target artifact inventory
+        run: npm run package-artifacts:verify
+
+      - name: Verify macOS preview is explicitly unsigned and unnotarized
+        if: runner.os == 'macOS'
+        run: npm run verify:package:mac:unsigned
+
+      - name: Verify Windows preview executables are unsigned
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = @(Get-ChildItem release/Ground-*-windows-x64.exe)
+          if ($installer.Count -ne 1) {
+            throw "Expected exactly one Windows installer"
+          }
+          $targets = @($installer[0], (Get-Item release/win-unpacked/Ground.exe))
+          foreach ($target in $targets) {
+            $signature = Get-AuthenticodeSignature $target.FullName
+            if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned) {
+              throw "$($target.Name) is not an unsigned preview: $($signature.Status)"
+            }
+          }
 
       - name: Prepare Linux Chromium sandbox for packaged smoke
         if: runner.os == 'Linux'
@@ -83,13 +171,33 @@ jobs:
       - name: Smoke-test packaged main and preload startup
         run: npm run smoke:package:launch
 
-      - name: Smoke-test packaged PTY, Git, local MCP, and cancellation
+      - name: Smoke-test packaged identity, credentials, approvals, and native runtime
+        if: runner.os != 'Linux'
         run: npm run smoke:package:native
+
+      - name: Smoke-test installed or extracted distributable
+        if: runner.os != 'Linux'
+        run: npm run smoke:package:distributable
+
+      - name: Smoke-test packaged native runtime with ephemeral Secret Service
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          GROUND_PACKAGE_SMOKE_PREPARE_SANDBOX: sudo
+        run: |
+          dbus-run-session -- bash -euo pipefail -c '
+            export XDG_RUNTIME_DIR="$RUNNER_TEMP/ground-keyring-runtime"
+            mkdir -p -m 700 "$XDG_RUNTIME_DIR"
+            eval "$(printf "%s\n" ground-packaged-smoke | gnome-keyring-daemon --unlock --components=secrets)"
+            export GNOME_KEYRING_CONTROL
+            npm run smoke:package:native
+            npm run smoke:package:distributable
+          '
 
       - name: Inventory packages shipped in app.asar
         run: >-
           node scripts/generate-packaged-components.mjs
-          "release/ground-packaged-components-${{ runner.os }}.json"
+          "release/ground-packaged-components-${{ matrix.slug }}.json"
           release
 
       - name: Upload preview artifacts
@@ -103,5 +211,6 @@ jobs:
             release/Ground-*.AppImage
             release/Ground-*.deb
             release/ground-packaged-components-*.json
+            release/ground-package-runtime-evidence-*.json
           if-no-files-found: error
           retention-days: 14

@@ -18,14 +18,14 @@ import {
   Trash2
 } from 'lucide-react'
 import type {
-  ActivityItem,
+  DesktopActivityItem,
+  DesktopTask,
   ProviderProfile,
   RunMode,
-  Task,
   TaskExportFormat,
   TaskPatch
 } from '../../../shared/types'
-import { compactPath } from '../lib/format'
+import { providerReadiness } from '../lib/provider-readiness'
 import { Composer } from './Composer'
 import { GitPanel } from './GitPanel'
 import { TerminalPanel } from './TerminalPanel'
@@ -34,8 +34,10 @@ import { Timeline } from './Timeline'
 type WorkspacePanel = 'git' | 'terminal'
 
 interface TaskViewProps {
-  task: Task
+  task: DesktopTask
   providers: ProviderProfile[]
+  draft: string
+  onDraftChange: (value: string) => void
   sidebarOpen: boolean
   onCloseSidebar: () => void
   onUpdateTask: (patch: TaskPatch) => void
@@ -43,29 +45,31 @@ interface TaskViewProps {
   onRevealWorkspace: () => void
   onStartRun: (prompt: string) => Promise<void>
   onStopRun: () => Promise<void>
-  onResolveApproval: (item: ActivityItem, approved: boolean) => Promise<void>
+  onResolveApproval: (
+    item: DesktopActivityItem,
+    approved: boolean
+  ) => Promise<void>
   onOpenSettings: () => void
   onImportTask: () => void
   onForkTask: () => void
   onSetArchived: (archived: boolean) => void
   onExportTask: (format: TaskExportFormat) => void
   onDeleteTask: () => void
-  onTaskCreated: (task: Task) => void
+  onTaskCreated: (task: DesktopTask) => void
   onWorkspaceTasksChanged: () => void
   onError: (error: unknown) => void
 }
 
 export function TaskView(props: TaskViewProps): React.JSX.Element {
-  const [draft, setDraft] = useState('')
   const [title, setTitle] = useState(props.task.title)
   const [workspacePanel, setWorkspacePanel] = useState<WorkspacePanel>()
   const [taskMenuOpen, setTaskMenuOpen] = useState(false)
   const taskMenuRef = useRef<HTMLDivElement>(null)
   const taskMenuTriggerRef = useRef<HTMLButtonElement>(null)
   const provider = props.providers.find((candidate) => candidate.id === props.task.providerId)
+  const readiness = provider ? providerReadiness(provider) : undefined
 
   useEffect(() => {
-    setDraft('')
     setTaskMenuOpen(false)
   }, [props.task.id])
 
@@ -75,7 +79,7 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
 
   useEffect(() => {
     setTitle(props.task.title)
-  }, [props.task.title])
+  }, [props.task.id, props.task.title])
 
   useEffect(() => {
     if (!taskMenuOpen) return
@@ -153,7 +157,7 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
     <div
       className={`task-view${workspacePanel ? ' workspace-panel-open' : ''}${
         isArchived ? ' archived-task-view' : ''
-      }`}
+      }${provider?.verification?.status !== 'passed' ? ' provider-needs-test' : ''}`}
     >
       <header className="task-header">
         <div className="task-header-left">
@@ -168,6 +172,7 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
             </button>
           )}
           <div className="task-heading">
+            <h1 className="visually-hidden">{title}</h1>
             <input
               className="task-title-input"
               value={title}
@@ -186,12 +191,16 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
             <button
               className="workspace-path"
               type="button"
-              title={props.task.workspacePath ?? 'Choose a workspace'}
-              onClick={props.task.workspacePath ? props.onRevealWorkspace : props.onChooseWorkspace}
-              disabled={isArchived && !props.task.workspacePath}
+              title={props.task.workspace?.name ?? 'Choose a workspace'}
+              onClick={
+                props.task.workspace
+                  ? props.onRevealWorkspace
+                  : props.onChooseWorkspace
+              }
+              disabled={isArchived && !props.task.workspace}
             >
               <Folder size={11} />
-              {compactPath(props.task.workspacePath)}
+              {props.task.workspace?.name ?? 'Choose workspace'}
             </button>
           </div>
         </div>
@@ -231,6 +240,7 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
                 <option key={candidate.id} value={candidate.id}>
                   {candidate.name}
                   {candidate.model ? ` · ${candidate.model}` : ''}
+                  {` — ${providerReadiness(candidate).shortLabel}`}
                 </option>
               ))}
             </select>
@@ -422,6 +432,21 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
         </div>
       </header>
 
+      {provider && provider.verification?.status !== 'passed' && readiness && (
+        <div
+          className={`provider-readiness-banner ${readiness.tone}`}
+          role={readiness.tone === 'error' ? 'alert' : 'status'}
+        >
+          <div>
+            <strong>{readiness.title}</strong>
+            <span>{readiness.detail}</span>
+          </div>
+          <button type="button" onClick={props.onOpenSettings}>
+            {readiness.tone === 'error' ? 'Review and retest' : 'Test provider'}
+          </button>
+        </div>
+      )}
+
       {isArchived && (
         <div className="archived-task-banner" role="status">
           <Archive size={14} aria-hidden="true" />
@@ -442,7 +467,7 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
         provider={provider}
         suggestions={isArchived ? [] : suggestions}
         onSuggestion={(prompt) => {
-          setDraft(prompt)
+          props.onDraftChange(prompt)
           window.requestAnimationFrame(() => {
             document
               .querySelector<HTMLTextAreaElement>('#task-message-composer')
@@ -450,11 +475,14 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
           })
         }}
         onResolveApproval={props.onResolveApproval}
+        onSetImportedHistory={(include) =>
+          props.onUpdateTask({ includeImportedHistory: include })
+        }
       />
 
       <Composer
-        draft={draft}
-        onDraftChange={setDraft}
+        draft={props.draft}
+        onDraftChange={props.onDraftChange}
         task={props.task}
         provider={provider}
         disabled={isArchived}
@@ -473,13 +501,13 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
           {workspacePanel === 'terminal' ? (
             <TerminalPanel
               taskId={props.task.id}
-              workspaceReady={Boolean(props.task.workspacePath)}
+              workspaceReady={Boolean(props.task.workspace)}
               onError={props.onError}
             />
           ) : (
             <GitPanel
               taskId={props.task.id}
-              workspaceReady={Boolean(props.task.workspacePath)}
+              workspaceReady={Boolean(props.task.workspace)}
               onTaskCreated={props.onTaskCreated}
               onWorkspaceTasksChanged={props.onWorkspaceTasksChanged}
               onError={props.onError}

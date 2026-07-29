@@ -108,8 +108,9 @@ export type AuthorizedWorkspaceResolver = (
 export interface TerminalServiceOptions {
   /**
    * This must be a main-process trust-boundary function such as
-   * WorkspaceGrantRegistry.require. The renderer's path is never used as a cwd
-   * until this resolver returns an authorized path and the service canonicalizes it.
+   * WorkspaceGrantRegistry.requireStoredPath. The stored main-process path is
+   * never used as a cwd until this resolver returns an authorized path and the
+   * service canonicalizes it.
    */
   authorizeWorkspace: AuthorizedWorkspaceResolver
   ptyFactory?: TerminalPtyFactory | (() => Promise<TerminalPtyFactory>)

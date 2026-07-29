@@ -1,22 +1,38 @@
 import type {
   AppSnapshot,
   DesktopApi,
+  DesktopRunEvent,
+  DesktopRunEventEnvelope,
+  DesktopTask,
   ProviderDraft,
   ProviderProfile,
-  RunEvent,
-  RunEventEnvelope,
-  Task,
   TaskPatch,
   TerminalEvent,
   TerminalSessionInfo
 } from '../../../shared/types'
 import { resolveDesktopBridge } from './desktop-bridge'
 
-const listeners = new Set<(event: RunEventEnvelope) => void>()
+const listeners = new Set<(event: DesktopRunEventEnvelope) => void>()
 const terminalListeners = new Set<(event: TerminalEvent) => void>()
 const mockTerminals = new Map<string, TerminalSessionInfo>()
 const mockTerminalAttachments = new Map<string, string>()
+const mockRuns = new Map<
+  string,
+  {
+    taskId: string
+    runId: string
+    timers: Set<number>
+  }
+>()
 const timestamp = new Date().toISOString()
+const previewWorkspace = {
+  id: 'workspace_00000000-0000-4000-8000-000000000001',
+  name: 'acme-dashboard'
+}
+const selectableWorkspace = {
+  id: 'workspace_00000000-0000-4000-8000-000000000002',
+  name: 'new-workspace'
+}
 let mockSnapshot: AppSnapshot = {
   runEventRevision: 0,
   providers: [
@@ -50,7 +66,7 @@ let mockSnapshot: AppSnapshot = {
     {
       id: 'preview-task',
       title: 'Refine the project dashboard',
-      workspacePath: '/Users/you/Projects/acme-dashboard',
+      workspace: previewWorkspace,
       providerId: 'codex-preview',
       mode: 'agent',
       runStatus: 'idle',
@@ -89,7 +105,7 @@ let mockSnapshot: AppSnapshot = {
     {
       id: 'preview-task-two',
       title: 'Explain the auth flow',
-      workspacePath: '/Users/you/Projects/acme-dashboard',
+      workspace: previewWorkspace,
       providerId: 'ollama-local',
       mode: 'ask',
       runStatus: 'idle',
@@ -115,7 +131,7 @@ function mockEnvironmentFingerprint(): string {
     .join('')
 }
 
-function emit(event: RunEvent): void {
+function emit(event: DesktopRunEvent): void {
   const envelope = {
     revision: (mockSnapshot.runEventRevision ?? 0) + 1,
     event
@@ -128,9 +144,42 @@ function emitTerminal(event: TerminalEvent): void {
   for (const listener of terminalListeners) listener(event)
 }
 
+function scheduleMockRun(
+  run: { taskId: string; runId: string; timers: Set<number> },
+  callback: () => void,
+  delayMs: number
+): void {
+  const timer = window.setTimeout(() => {
+    run.timers.delete(timer)
+    if (mockRuns.get(run.taskId) !== run) return
+    callback()
+  }, delayMs)
+  run.timers.add(timer)
+}
+
 const mockApi: DesktopApi = {
   getSnapshot: async () => clone(mockSnapshot),
-  createTask: async (workspacePath) => {
+  listStateSnapshots: async () => [
+    {
+      id: 'state_snapshot_00000000-0000-4000-8000-000000000001',
+      kind: 'current',
+      generation: 0,
+      status: 'valid',
+      capturedAt: timestamp,
+      sizeBytes: 24_640,
+      taskCount: mockSnapshot.tasks.length,
+      providerCount: mockSnapshot.providers.length
+    },
+    ...[1, 2, 3].map((generation) => ({
+      id: `state_snapshot_00000000-0000-4000-8000-00000000000${generation + 1}`,
+      kind: 'retained' as const,
+      generation,
+      status: 'unavailable' as const
+    }))
+  ],
+  exportStateSnapshot: async () => false,
+  restoreStateSnapshot: async () => false,
+  createTask: async (workspaceGrantId) => {
     const provider =
       mockSnapshot.providers.find(
         (candidate) =>
@@ -138,10 +187,21 @@ const mockApi: DesktopApi = {
       ) ?? mockSnapshot.providers[0]
     if (!provider) throw new Error('No provider')
     mockSnapshot.settings.defaultProviderId = provider.id
-    const task: Task = {
+    const workspace =
+      workspaceGrantId === undefined
+        ? undefined
+        : workspaceGrantId === selectableWorkspace.id
+          ? selectableWorkspace
+          : mockSnapshot.tasks.find(
+              (candidate) => candidate.workspace?.id === workspaceGrantId
+            )?.workspace
+    if (workspaceGrantId !== undefined && !workspace) {
+      throw new Error('Workspace access expired')
+    }
+    const task: DesktopTask = {
       id: crypto.randomUUID(),
       title: 'New task',
-      workspacePath,
+      ...(workspace ? { workspace: clone(workspace) } : {}),
       providerId: provider.id,
       mode: 'agent',
       runStatus: 'idle',
@@ -169,12 +229,13 @@ const mockApi: DesktopApi = {
       ids.set(sourceId, created)
       return created
     }
-    const task: Task = {
+    const task: DesktopTask = {
       id: crypto.randomUUID(),
       title: `${source.title.slice(0, 113).trimEnd()} (fork)`,
-      workspacePath: source.workspacePath,
+      workspace: source.workspace,
       providerId: source.providerId,
       mode: source.mode,
+      includeImportedHistory: source.includeImportedHistory,
       runStatus: 'idle',
       createdAt: forkedAt,
       updatedAt: forkedAt,
@@ -233,11 +294,12 @@ const mockApi: DesktopApi = {
       ) ?? mockSnapshot.providers[0]
     if (!provider) throw new Error('No provider')
     const importedAt = new Date().toISOString()
-    const task: Task = {
+    const task: DesktopTask = {
       id: crypto.randomUUID(),
       title: 'Imported task',
       providerId: provider.id,
       mode: 'agent',
+      includeImportedHistory: false,
       runStatus: 'idle',
       createdAt: importedAt,
       updatedAt: importedAt,
@@ -293,13 +355,27 @@ const mockApi: DesktopApi = {
   updateTask: async (taskId, patch: TaskPatch) => {
     const task = mockSnapshot.tasks.find((candidate) => candidate.id === taskId)
     if (!task) throw new Error('Task not found')
-    Object.assign(task, patch)
+    const {
+      workspaceGrantId,
+      ...taskPatch
+    } = patch
+    Object.assign(task, taskPatch)
+    if (workspaceGrantId !== undefined) {
+      const workspace =
+        workspaceGrantId === selectableWorkspace.id
+          ? selectableWorkspace
+          : mockSnapshot.tasks.find(
+              (candidate) => candidate.workspace?.id === workspaceGrantId
+            )?.workspace
+      if (!workspace) throw new Error('Workspace access expired')
+      task.workspace = clone(workspace)
+    }
     if (patch.providerId) {
       mockSnapshot.settings.defaultProviderId = patch.providerId
     }
     return clone(task)
   },
-  chooseWorkspace: async () => '/Users/you/Projects/new-workspace',
+  chooseWorkspace: async () => clone(selectableWorkspace),
   revealWorkspace: async () => undefined,
   saveProvider: async (draft: ProviderDraft) => {
     const existing = draft.id
@@ -419,10 +495,14 @@ const mockApi: DesktopApi = {
       }
     }
   ],
+  chooseCliExecutable: async () => '/usr/local/bin/ground-agent',
   startRun: async ({ taskId, prompt }) => {
     const task = mockSnapshot.tasks.find((candidate) => candidate.id === taskId)
     if (!task) throw new Error('Task not found')
+    if (mockRuns.has(taskId)) throw new Error('Task already running')
     const runId = crypto.randomUUID()
+    const run = { taskId, runId, timers: new Set<number>() }
+    mockRuns.set(taskId, run)
     const userItem = {
       id: crypto.randomUUID(),
       kind: 'message' as const,
@@ -445,11 +525,16 @@ const mockApi: DesktopApi = {
       createdAt: new Date().toISOString()
     }
     task.items.push(assistant)
-    setTimeout(() => emit({ type: 'item-added', taskId, runId, item: assistant }), 250)
+    scheduleMockRun(
+      run,
+      () => emit({ type: 'item-added', taskId, runId, item: assistant }),
+      250
+    )
     const response =
       'I’m connected. This browser preview is using the deterministic mock runtime; the desktop build streams from your configured API or CLI.'
-    response.split(' ').forEach((word, index) => {
-      setTimeout(() => {
+    const words = response.split(' ')
+    words.forEach((word, index) => {
+      scheduleMockRun(run, () => {
         const delta = `${index ? ' ' : ''}${word}`
         const offset = assistant.content.length
         assistant.content += delta
@@ -461,15 +546,25 @@ const mockApi: DesktopApi = {
           delta,
           offset
         })
-        if (index === response.split(' ').length - 1) {
+        if (index === words.length - 1) {
+          mockRuns.delete(taskId)
           task.runStatus = 'idle'
           emit({ type: 'run-completed', taskId, runId })
         }
-      }, 420 + index * 45)
+      }, 1_000 + index * 500)
     })
     return { runId }
   },
-  stopRun: async () => undefined,
+  stopRun: async (taskId) => {
+    const run = mockRuns.get(taskId)
+    if (!run) return
+    mockRuns.delete(taskId)
+    for (const timer of run.timers) window.clearTimeout(timer)
+    run.timers.clear()
+    const task = mockSnapshot.tasks.find((candidate) => candidate.id === taskId)
+    if (task) task.runStatus = 'idle'
+    emit({ type: 'run-stopped', taskId, runId: run.runId })
+  },
   resolveApproval: async () => undefined,
   onRunEvent: (listener) => {
     listeners.add(listener)
@@ -601,6 +696,17 @@ const mockApi: DesktopApi = {
       }
     ],
     historyTruncated: false,
+    recoveries: [
+      {
+        id: '12345678-1234-4123-8123-123456789abc',
+        createdAt: timestamp,
+        status: 'applied',
+        trackedPaths: ['src/renderer/src/App.tsx'],
+        untrackedPaths: [],
+        canUndo: true
+      }
+    ],
+    recoveriesTruncated: false,
     worktrees: [
       {
         relativePath: '.',
@@ -613,14 +719,18 @@ const mockApi: DesktopApi = {
       }
     ]
   }),
+  chooseGitExecutable: async () => true,
   createGitWorktree: async (taskId, input) => {
     const source = mockSnapshot.tasks.find((candidate) => candidate.id === taskId)
     if (!source) throw new Error('Task not found')
-    const created: Task = {
+    const created: DesktopTask = {
       ...clone(source),
       id: crypto.randomUUID(),
       title: input.branch,
-      workspacePath: `/Users/you/.ground/worktrees/${input.branch}`,
+      workspace: {
+        id: `workspace_${crypto.randomUUID()}`,
+        name: input.branch
+      },
       runStatus: 'idle',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -632,6 +742,22 @@ const mockApi: DesktopApi = {
   },
   stageGitPaths: async () => true,
   unstageGitPaths: async () => true,
+  revertGitPaths: async (_taskId, paths) => ({
+    id: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+    status: 'applied',
+    trackedPaths: clone(paths),
+    untrackedPaths: [],
+    canUndo: true
+  }),
+  undoGitRecovery: async (_taskId, recoveryId) => ({
+    id: recoveryId,
+    createdAt: new Date().toISOString(),
+    status: 'restored',
+    trackedPaths: [],
+    untrackedPaths: [],
+    canUndo: false
+  }),
   commitGitChanges: async (_taskId, input) => ({
     hash: '9b83f89ea4c0bed1169830f1f3c2c9fc8339a2fd',
     shortHash: '9b83f89',

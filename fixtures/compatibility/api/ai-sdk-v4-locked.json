@@ -1,0 +1,253 @@
+{
+  "schemaVersion": 1,
+  "suite": {
+    "id": "ai-sdk-language-model-v4-locked",
+    "kind": "api",
+    "adapterBoundary": "ai-sdk-language-model-v4",
+    "protocols": [
+      "openai-responses",
+      "anthropic-messages",
+      "google-generative-ai",
+      "openai-compatible"
+    ],
+    "packages": {
+      "ai": "7.0.41",
+      "@ai-sdk/openai": "4.0.23",
+      "@ai-sdk/anthropic": "4.0.23",
+      "@ai-sdk/google": "4.0.27",
+      "@ai-sdk/openai-compatible": "3.0.16"
+    },
+    "fixtureDate": "2026-07-29",
+    "provenance": "synthetic-contract",
+    "provenanceNote": "Hand-authored AI SDK LanguageModelV4 stream contract events; not provider wire captures and not captured from any live or authenticated API request.",
+    "liveCapture": false
+  },
+  "cases": [
+    {
+      "id": "reasoning-text-tool-and-usage",
+      "description": "Normalize reasoning, text, fragmented tool input, finish reason, and cumulative usage through Ground's production AI SDK adapter boundary.",
+      "request": {
+        "requestId": "fixture-request-1",
+        "model": "fixture-model",
+        "instructions": "Work inside the logical workspace root.",
+        "conversation": [
+          {
+            "kind": "message",
+            "id": "fixture-user-1",
+            "role": "user",
+            "parts": [
+              {
+                "kind": "text",
+                "text": "Read the README."
+              }
+            ]
+          }
+        ],
+        "tools": [
+          {
+            "name": "read_file",
+            "description": "Read one workspace-relative file.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            }
+          }
+        ],
+        "toolChoice": "auto"
+      },
+      "inputEvents": [
+        {
+          "type": "stream-start",
+          "warnings": []
+        },
+        {
+          "type": "reasoning-start",
+          "id": "reasoning-1"
+        },
+        {
+          "type": "reasoning-delta",
+          "id": "reasoning-1",
+          "delta": "Checked workspace constraints."
+        },
+        {
+          "type": "reasoning-end",
+          "id": "reasoning-1"
+        },
+        {
+          "type": "text-start",
+          "id": "text-1"
+        },
+        {
+          "type": "text-delta",
+          "id": "text-1",
+          "delta": "I will read it."
+        },
+        {
+          "type": "text-end",
+          "id": "text-1"
+        },
+        {
+          "type": "tool-input-start",
+          "id": "call-1",
+          "toolName": "read_file"
+        },
+        {
+          "type": "tool-input-delta",
+          "id": "call-1",
+          "delta": "{\"path\":\""
+        },
+        {
+          "type": "tool-input-delta",
+          "id": "call-1",
+          "delta": "README.md\"}"
+        },
+        {
+          "type": "tool-input-end",
+          "id": "call-1"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "call-1",
+          "toolName": "read_file",
+          "input": "{\"path\":\"README.md\"}"
+        },
+        {
+          "type": "finish",
+          "finishReason": {
+            "unified": "tool-calls",
+            "raw": "tool_calls"
+          },
+          "usage": {
+            "inputTokens": {
+              "total": 12,
+              "noCache": 10,
+              "cacheRead": 2,
+              "cacheWrite": 0
+            },
+            "outputTokens": {
+              "total": 7,
+              "text": 5,
+              "reasoning": 2
+            }
+          }
+        }
+      ],
+      "expectedCanonicalEvents": [
+        {
+          "type": "response.started",
+          "servingModel": "fixture-model"
+        },
+        {
+          "type": "part.started",
+          "part": {
+            "kind": "reasoning-summary",
+            "partId": "reasoning-1"
+          }
+        },
+        {
+          "type": "part.delta",
+          "partId": "reasoning-1",
+          "delta": {
+            "kind": "reasoning-summary",
+            "text": "Checked workspace constraints."
+          }
+        },
+        {
+          "type": "part.started",
+          "part": {
+            "kind": "text",
+            "partId": "text-1"
+          }
+        },
+        {
+          "type": "part.delta",
+          "partId": "text-1",
+          "delta": {
+            "kind": "text",
+            "text": "I will read it."
+          }
+        },
+        {
+          "type": "part.started",
+          "part": {
+            "kind": "tool-call",
+            "partId": "call-1",
+            "callId": "call-1",
+            "name": "read_file"
+          }
+        },
+        {
+          "type": "part.delta",
+          "partId": "call-1",
+          "delta": {
+            "kind": "tool-arguments",
+            "text": "{\"path\":\""
+          }
+        },
+        {
+          "type": "part.delta",
+          "partId": "call-1",
+          "delta": {
+            "kind": "tool-arguments",
+            "text": "README.md\"}"
+          }
+        },
+        {
+          "type": "part.completed",
+          "partId": "reasoning-1",
+          "part": {
+            "kind": "reasoning-summary",
+            "text": "Checked workspace constraints."
+          }
+        },
+        {
+          "type": "part.completed",
+          "partId": "text-1",
+          "part": {
+            "kind": "text",
+            "text": "I will read it."
+          }
+        },
+        {
+          "type": "part.completed",
+          "partId": "call-1",
+          "part": {
+            "kind": "tool-call",
+            "callId": "call-1",
+            "name": "read_file",
+            "rawArguments": "{\"path\":\"README.md\"}",
+            "arguments": {
+              "path": "README.md"
+            }
+          }
+        },
+        {
+          "type": "usage.updated",
+          "usage": {
+            "inputTokens": 12,
+            "outputTokens": 7,
+            "totalTokens": 19,
+            "cachedInputTokens": 2,
+            "cacheWriteInputTokens": 0,
+            "reasoningTokens": 2
+          },
+          "semantics": "cumulative"
+        },
+        {
+          "type": "response.completed",
+          "messageId": "fixture-request-1:assistant",
+          "stopReason": "tool-calls",
+          "providerStopReason": "tool_calls"
+        }
+      ]
+    }
+  ]
+}

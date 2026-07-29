@@ -1,29 +1,54 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react'
 import { PanelLeft, Settings2 } from 'lucide-react'
 import type {
   AppSnapshot,
-  RunEventEnvelope,
-  Task,
+  DesktopActivityItem,
+  DesktopRunEventEnvelope,
+  DesktopTask,
   TaskExportFormat,
-  TaskItem,
   TaskPatch
 } from '../../shared/types'
 import { desktop } from './lib/desktop'
 import { readableError } from './lib/format'
 import {
+  NARROW_SIDEBAR_MEDIA_QUERY,
+  releaseFocusBeforeSidebarClose,
+  restoreFocusAfterSidebarClose,
+  shouldInertMainSurface,
+  type SidebarCloseFocusTarget
+} from './lib/sidebar-focus'
+import {
   applyRunEventEnvelope,
   reconcileSnapshotWithEvents
 } from './lib/run-events'
+import { updateTaskDraft, type TaskDrafts } from './lib/task-drafts'
 import { Sidebar } from './components/Sidebar'
 import { TaskView } from './components/TaskView'
 import { ProviderModal } from './components/ProviderModal'
+import {
+  CommandPalette,
+  type CommandPaletteAction
+} from './components/CommandPalette'
 
 export default function App(): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<AppSnapshot>()
   const [snapshotError, setSnapshotError] = useState<string>()
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
+  const [taskDrafts, setTaskDrafts] = useState<TaskDrafts>({})
   const [sidebarOpen, setSidebarOpen] = useState(true)
-  const pendingRunEventsRef = useRef<RunEventEnvelope[]>([])
+  const [narrowSidebarLayout, setNarrowSidebarLayout] = useState(() =>
+    window.matchMedia(NARROW_SIDEBAR_MEDIA_QUERY).matches
+  )
+  const mainSurfaceRef = useRef<HTMLElement>(null)
+  const pendingRunEventsRef = useRef<DesktopRunEventEnvelope[]>([])
   const refreshQueueRef = useRef<Promise<void>>(Promise.resolve())
   const pendingRefreshesRef = useRef(0)
   const [toast, setToast] = useState<{
@@ -61,12 +86,46 @@ export default function App(): React.JSX.Element {
     }
   }, [])
 
-  const closeSidebar = useCallback(() => {
-    setSidebarOpen(false)
-    window.requestAnimationFrame(() => {
-      document.querySelector<HTMLButtonElement>('.sidebar-reopen')?.focus()
-    })
+  const closeSidebar = useCallback(
+    (focusTarget: SidebarCloseFocusTarget = 'reopen') => {
+      releaseFocusBeforeSidebarClose(document)
+      setSidebarOpen(false)
+      window.requestAnimationFrame(() => {
+        restoreFocusAfterSidebarClose(document, focusTarget)
+      })
+    },
+    []
+  )
+
+  useEffect(() => {
+    const media = window.matchMedia(NARROW_SIDEBAR_MEDIA_QUERY)
+    const updateLayout = (): void => {
+      setNarrowSidebarLayout(media.matches)
+    }
+    updateLayout()
+    media.addEventListener('change', updateLayout)
+    return () => media.removeEventListener('change', updateLayout)
   }, [])
+
+  const mainSurfaceInert = shouldInertMainSurface(
+    sidebarOpen,
+    narrowSidebarLayout
+  )
+  const modalOpen = settingsOpen || commandPaletteOpen
+
+  useLayoutEffect(() => {
+    const activeElement = document.activeElement
+    if (
+      !mainSurfaceInert ||
+      !activeElement ||
+      !mainSurfaceRef.current?.contains(activeElement)
+    ) {
+      return
+    }
+    document
+      .querySelector<HTMLInputElement>('#task-search')
+      ?.focus({ preventScroll: true })
+  }, [mainSurfaceInert])
 
   const refresh = useCallback((): Promise<void> => {
     pendingRefreshesRef.current += 1
@@ -150,21 +209,21 @@ export default function App(): React.JSX.Element {
       })
       try {
         await desktop.selectTask(taskId)
-        if (window.matchMedia('(max-width: 900px)').matches) {
-          setSidebarOpen(false)
+        if (narrowSidebarLayout) {
+          closeSidebar('task')
         }
       } catch (error) {
         showError(error)
       }
     },
-    [snapshot, showError]
+    [closeSidebar, narrowSidebarLayout, snapshot, showError]
   )
 
   const createTask = useCallback(
     async (withWorkspace = true) => {
       try {
         const task = await desktop.createTask(
-          withWorkspace ? selectedTask?.workspacePath : undefined
+          withWorkspace ? selectedTask?.workspace?.id : undefined
         )
         setSnapshot((current) =>
           current
@@ -179,7 +238,7 @@ export default function App(): React.JSX.Element {
         showError(error)
       }
     },
-    [selectedTask?.workspacePath, showError]
+    [selectedTask?.workspace?.id, showError]
   )
 
   const updateTask = useCallback(
@@ -208,7 +267,7 @@ export default function App(): React.JSX.Element {
     [showError]
   )
 
-  const acceptCreatedTask = useCallback((task: Task) => {
+  const acceptCreatedTask = useCallback((task: DesktopTask) => {
     setSnapshot((current) =>
       current
         ? {
@@ -284,6 +343,9 @@ export default function App(): React.JSX.Element {
     try {
       const deleted = await desktop.deleteTask(selectedTask.id)
       if (!deleted) return
+      setTaskDrafts((current) =>
+        updateTaskDraft(current, selectedTask.id, '')
+      )
       await refresh()
     } catch (error) {
       showError(error)
@@ -292,12 +354,14 @@ export default function App(): React.JSX.Element {
 
   const chooseWorkspace = useCallback(async () => {
     try {
-      const workspacePath = await desktop.chooseWorkspace()
-      if (!workspacePath) return
+      const workspace = await desktop.chooseWorkspace()
+      if (!workspace) return
       if (selectedTask) {
-        await updateTask(selectedTask.id, { workspacePath })
+        await updateTask(selectedTask.id, {
+          workspaceGrantId: workspace.id
+        })
       } else {
-        const task = await desktop.createTask(workspacePath)
+        const task = await desktop.createTask(workspace.id)
         setSnapshot((current) =>
           current
             ? {
@@ -350,7 +414,7 @@ export default function App(): React.JSX.Element {
   }, [selectedTask, showError])
 
   const resolveApproval = useCallback(
-    async (item: Extract<TaskItem, { kind: 'activity' }>, approved: boolean) => {
+    async (item: DesktopActivityItem, approved: boolean) => {
       if (!item.approvalId) return
       try {
         await desktop.resolveApproval(item.runId, item.approvalId, approved)
@@ -361,8 +425,82 @@ export default function App(): React.JSX.Element {
     [showError]
   )
 
+  const commandPaletteActions = useMemo<CommandPaletteAction[]>(
+    () => [
+      {
+        id: 'new-task',
+        label: 'New task',
+        description: 'Start a task in the current workspace',
+        keywords: ['conversation', 'chat'],
+        shortcut: '⌘/Ctrl N',
+        perform: () => void createTask()
+      },
+      {
+        id: 'open-workspace',
+        label: 'Open a workspace',
+        description: 'Grant Ground access to a local folder',
+        keywords: ['folder', 'project', 'directory'],
+        perform: () => void chooseWorkspace()
+      },
+      {
+        id: 'search-tasks',
+        label: 'Search tasks',
+        description: 'Find a task by title, workspace, provider, or history',
+        keywords: ['sidebar', 'conversation'],
+        shortcut: '⌘/Ctrl K',
+        perform: () => openSidebar(true)
+      },
+      {
+        id: 'import-task',
+        label: 'Import a portable task',
+        description: 'Restore a Ground task bundle from disk',
+        keywords: ['json', 'history', 'migration'],
+        perform: () => void importTask()
+      },
+      {
+        id: 'provider-settings',
+        label: 'Provider settings',
+        description: 'Connect an API, local model, or agent CLI',
+        keywords: ['models', 'credentials', 'mcp', 'codex', 'claude', 'gemini'],
+        shortcut: '⌘/Ctrl ,',
+        perform: () => setSettingsOpen(true)
+      },
+      {
+        id: 'toggle-sidebar',
+        label: sidebarOpen ? 'Close sidebar' : 'Open sidebar',
+        description: sidebarOpen
+          ? 'Give the current task more room'
+          : 'Show workspaces and task history',
+        keywords: ['navigation', 'panel'],
+        perform: () => {
+          if (sidebarOpen) closeSidebar('task')
+          else openSidebar(true)
+        }
+      }
+    ],
+    [
+      chooseWorkspace,
+      closeSidebar,
+      createTask,
+      importTask,
+      openSidebar,
+      sidebarOpen
+    ]
+  )
+
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent): void => {
+      const opensCommandPalette =
+        event.key === 'F1' ||
+        ((event.metaKey || event.ctrlKey) &&
+          event.shiftKey &&
+          event.key.toLowerCase() === 'p')
+      if (opensCommandPalette) {
+        if (document.querySelector('[role="dialog"]')) return
+        event.preventDefault()
+        setCommandPaletteOpen(true)
+        return
+      }
       if (!(event.metaKey || event.ctrlKey)) return
       const dialogOpen = Boolean(document.querySelector('[role="dialog"]'))
       if (dialogOpen) return
@@ -420,12 +558,14 @@ export default function App(): React.JSX.Element {
     <main className="app-shell">
       <Sidebar
         open={sidebarOpen}
+        backgroundInert={modalOpen}
         snapshot={snapshot}
         selectedTaskId={selectedTask?.id}
         onSelectTask={selectTask}
         onCreateTask={() => void createTask()}
         onChooseWorkspace={() => void chooseWorkspace()}
         onImportTask={() => void importTask()}
+        onOpenCommands={() => setCommandPaletteOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
         onClose={closeSidebar}
       />
@@ -433,29 +573,31 @@ export default function App(): React.JSX.Element {
         <button
           className="sidebar-scrim"
           type="button"
-          onClick={() => setSidebarOpen(false)}
+          onClick={() => closeSidebar()}
           tabIndex={-1}
           aria-hidden="true"
         />
       )}
 
       <section
+        ref={mainSurfaceRef}
         className={`main-surface${sidebarOpen ? '' : ' sidebar-hidden'}`}
         aria-label="Current task"
+        inert={mainSurfaceInert || modalOpen}
       >
         {snapshot.recoveryNotice &&
           snapshot.recoveryNotice.id !== dismissedRecoveryId && (
             <div
               className={`recovery-banner recovery-banner-${snapshot.recoveryNotice.kind}`}
               role={
-                snapshot.recoveryNotice.kind === 'state-reset'
-                  ? 'alert'
-                  : 'status'
+                snapshot.recoveryNotice.kind === 'backup-restored'
+                  ? 'status'
+                  : 'alert'
               }
               aria-live={
-                snapshot.recoveryNotice.kind === 'state-reset'
-                  ? 'assertive'
-                  : 'polite'
+                snapshot.recoveryNotice.kind === 'backup-restored'
+                  ? 'polite'
+                  : 'assertive'
               }
             >
               <div>
@@ -487,13 +629,21 @@ export default function App(): React.JSX.Element {
           <TaskView
             task={selectedTask}
             providers={snapshot.providers}
+            draft={taskDrafts[selectedTask.id] ?? ''}
+            onDraftChange={(value) =>
+              setTaskDrafts((current) =>
+                updateTaskDraft(current, selectedTask.id, value)
+              )
+            }
             sidebarOpen={sidebarOpen}
             onCloseSidebar={closeSidebar}
             onUpdateTask={(patch) => void updateTask(selectedTask.id, patch)}
             onChooseWorkspace={() => void chooseWorkspace()}
             onRevealWorkspace={() => {
-              if (selectedTask.workspacePath) {
-                void desktop.revealWorkspace(selectedTask.workspacePath).catch(showError)
+              if (selectedTask.workspace) {
+                void desktop
+                  .revealWorkspace(selectedTask.workspace.id)
+                  .catch(showError)
               }
             }}
             onStartRun={startRun}
@@ -531,27 +681,37 @@ export default function App(): React.JSX.Element {
         />
       )}
 
+      {commandPaletteOpen && (
+        <CommandPalette
+          actions={commandPaletteActions}
+          onClose={() => setCommandPaletteOpen(false)}
+        />
+      )}
+
       {toast && (
         <div
           className={`toast toast-${toast.tone}`}
           role={toast.tone === 'error' ? 'alert' : 'status'}
           aria-live={toast.tone === 'error' ? 'assertive' : 'polite'}
+          aria-atomic="true"
         >
           <span className="toast-dot" />
           <span>{toast.message}</span>
-          <button
-            type="button"
-            onClick={() => {
-              if (toastTimerRef.current !== undefined) {
-                window.clearTimeout(toastTimerRef.current)
-                toastTimerRef.current = undefined
-              }
-              setToast(undefined)
-            }}
-            aria-label="Dismiss notification"
-          >
-            ×
-          </button>
+          {!modalOpen && (
+            <button
+              type="button"
+              onClick={() => {
+                if (toastTimerRef.current !== undefined) {
+                  window.clearTimeout(toastTimerRef.current)
+                  toastTimerRef.current = undefined
+                }
+                setToast(undefined)
+              }}
+              aria-label="Dismiss notification"
+            >
+              ×
+            </button>
+          )}
         </div>
       )}
     </main>
@@ -578,24 +738,34 @@ function EmptyApp(props: {
           One calm place to work.
         </h1>
         <p>
-          Connect an API or an agent CLI, choose a folder, and keep every task in one
-          persistent workspace.
+          Confirm the included local preset or connect an API or agent CLI, then
+          choose a folder and keep every task in one persistent workspace.
         </p>
         <div className="first-run-actions">
-          <button className="primary-button large-button" type="button" onClick={props.onChooseWorkspace}>
+          <button
+            className="primary-button large-button"
+            type="button"
+            onClick={props.onOpenSettings}
+          >
+            <Settings2 size={15} />
+            Configure a model
+          </button>
+          <button
+            className="secondary-button large-button"
+            type="button"
+            onClick={props.onChooseWorkspace}
+          >
             Open a workspace
           </button>
-          <button className="secondary-button large-button" type="button" onClick={props.onNewTask}>
+        </div>
+        <div className="first-run-secondary-actions">
+          <button className="text-button setup-link" type="button" onClick={props.onNewTask}>
             Start without a folder
           </button>
+          <button className="text-button setup-link" type="button" onClick={props.onImportTask}>
+            Import a portable task
+          </button>
         </div>
-        <button className="text-button setup-link" type="button" onClick={props.onImportTask}>
-          Import a portable task
-        </button>
-        <button className="text-button setup-link" type="button" onClick={props.onOpenSettings}>
-          <Settings2 size={14} />
-          Configure providers
-        </button>
       </div>
     </div>
   )
