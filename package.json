@@ -67,7 +67,7 @@
     "zod": "^4.1.12"
   },
   "devDependencies": {
-    "@electron/asar": "3.4.1",
+    "@electron/asar": "4.2.1",
     "@types/diff": "^7.0.2",
     "@types/node": "^24.10.0",
     "@types/react": "^19.2.2",
