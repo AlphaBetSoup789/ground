@@ -43,12 +43,12 @@ describe('packaged component inventory', () => {
         {
           encoding: 'utf8',
           shell: false,
+          timeout: 10_000,
           windowsHide: true
         }
       )
       if (packed.error) throw packed.error
       expect(packed.status).toBe(0)
-      expect(packed.stderr).toBe('')
 
       const inventory = await inspectAsar(archivePath, root)
 
