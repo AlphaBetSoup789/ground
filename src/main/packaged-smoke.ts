@@ -199,35 +199,55 @@ async function waitFor<T>(
   }
 }
 
-async function smokeTerminal(workspace: string): Promise<void> {
+async function smokeTerminal(
+  config: PackagedSmokeConfig,
+  workspace: string
+): Promise<void> {
   const canonicalWorkspace = await realpath(workspace)
   const packagedExecutable = await realpath(process.execPath)
+  const marker = `ground-packaged-pty-ok-${config.token}`
   const program = [
     "process.stdin.setEncoding('utf8');",
     "process.stdin.on('data', (chunk) => {",
     "  if (!chunk.includes('ground-packaged-pty-input')) return;",
-    "  process.stdout.write('ground-packaged-pty-ok\\n');",
+    `  process.stdout.write(${JSON.stringify(`${marker}\n`)});`,
     '  process.exit(0);',
     '});',
     "process.stdout.write('ground-packaged-pty-ready\\n');",
     'setInterval(() => {}, 1000);'
   ].join('\n')
-  const shell =
+  const resolvedWindowsShell =
     process.platform === 'win32'
       ? await resolveDefaultTerminalShell('win32', process.env)
+      : undefined
+  const windowsShellName = resolvedWindowsShell
+    ? path.win32.basename(resolvedWindowsShell.executable).toLowerCase()
+    : undefined
+  const shell =
+    resolvedWindowsShell
+      ? {
+          executable: resolvedWindowsShell.executable,
+          args:
+            windowsShellName === 'powershell.exe'
+              ? [...resolvedWindowsShell.args, '-NoProfile']
+              : ['/D']
+        }
       : {
           executable: packagedExecutable,
           args: ['-e', program]
         }
-  const windowsShellName = path.win32
-    .basename(shell.executable)
-    .toLowerCase()
   const input =
     process.platform !== 'win32'
       ? 'ground-packaged-pty-input\r'
       : windowsShellName === 'powershell.exe'
-        ? "Write-Output ('ground-packaged-pty-' + 'ok'); exit 0\r"
-        : 'echo ground-packaged-pty-o^k & exit /b 0\r'
+        ? `Write-Output ('ground-packaged-pty-' + 'ok-' + '${config.token.slice(
+            0,
+            16
+          )}' + '${config.token.slice(16)}'); exit 0\r`
+        : `echo ground-packaged-pty-o^k-${config.token.slice(
+            0,
+            16
+          )}^${config.token.slice(16)} & exit /b 0\r`
   const ptyFactory = async (): Promise<TerminalPtyFactory> => {
     const nodePty = await import('node-pty')
     return {
@@ -275,11 +295,14 @@ async function smokeTerminal(workspace: string): Promise<void> {
     let rejectMarker: ((error: Error) => void) | undefined
     let resolveExit: (() => void) | undefined
     let rejectExit: ((error: Error) => void) | undefined
-    const ready = new Promise<void>((resolve, reject) => {
-      resolveReady = resolve
-      rejectReady = reject
-    })
-    const marker = new Promise<void>((resolve, reject) => {
+    const ready =
+      process.platform === 'win32'
+        ? undefined
+        : new Promise<void>((resolve, reject) => {
+            resolveReady = resolve
+            rejectReady = reject
+          })
+    const marked = new Promise<void>((resolve, reject) => {
       resolveMarker = resolve
       rejectMarker = reject
     })
@@ -291,16 +314,15 @@ async function smokeTerminal(workspace: string): Promise<void> {
       onData: (event) => {
         output = `${output}${event.data}`.slice(-16_384)
         if (
-          process.platform === 'win32'
-            ? event.data.length > 0
-            : output.includes('ground-packaged-pty-ready')
+          process.platform !== 'win32' &&
+          output.includes('ground-packaged-pty-ready')
         ) {
           resolveReady?.()
         }
-        if (output.includes('ground-packaged-pty-ok')) resolveMarker?.()
+        if (output.includes(marker)) resolveMarker?.()
       },
       onExit: (event) => {
-        if (!output.includes('ground-packaged-pty-ok')) {
+        if (!output.includes(marker)) {
           const error = new Error(
             `Packaged PTY exited before its marker (exit ${String(
               event.exitCode
@@ -319,11 +341,13 @@ async function smokeTerminal(workspace: string): Promise<void> {
       }
     })
     try {
-      await waitFor('Packaged PTY readiness', ready, 12_000)
+      if (ready) {
+        await waitFor('Packaged PTY readiness', ready, 12_000)
+      }
       service.sendInput(session.id, input)
       await waitFor(
         'Packaged PTY marker and exit',
-        Promise.all([marker, exited]),
+        Promise.all([marked, exited]),
         12_000
       )
     } finally {
@@ -669,7 +693,7 @@ export async function runPackagedNativeSmoke(
   const checks: Record<string, boolean> = {}
 
   reportNativeSmokeProgress('pty', 'starting')
-  await smokeTerminal(workspace)
+  await smokeTerminal(config, workspace)
   checks.pty = true
   reportNativeSmokeProgress('pty', 'passed')
 
