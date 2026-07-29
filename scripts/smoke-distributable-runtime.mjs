@@ -185,9 +185,35 @@ async function prepareLinuxArtifact(
       'The AppImage chrome-sandbox differs from the trusted unpacked package'
     )
   }
+  if (process.env.GROUND_PACKAGE_SMOKE_PREPARE_SANDBOX === 'sudo') {
+    await runChecked('/usr/bin/sudo', [
+      '--',
+      '/usr/bin/chown',
+      'root:root',
+      extractedSandbox
+    ])
+    await runChecked('/usr/bin/sudo', [
+      '--',
+      '/usr/bin/chmod',
+      '4755',
+      extractedSandbox
+    ])
+  }
+  const preparedDetails = await lstat(extractedSandbox)
+  if (
+    preparedDetails.isSymbolicLink() ||
+    !preparedDetails.isFile() ||
+    preparedDetails.uid !== 0 ||
+    preparedDetails.gid !== 0 ||
+    (preparedDetails.mode & 0o4777) !== 0o4755
+  ) {
+    throw new Error(
+      'The extracted AppImage chrome-sandbox must be root-owned with mode 4755; set GROUND_PACKAGE_SMOKE_PREPARE_SANDBOX=sudo only on a trusted package-smoke host'
+    )
+  }
   return {
     installationSource: 'linux-appimage-extracted',
-    chromiumSandbox: trustedSandbox
+    chromiumSandbox: extractedSandbox
   }
 }
 

@@ -36,6 +36,13 @@ npm run smoke:package:native
 npm run smoke:package:distributable
 ```
 
+For the Linux AppImage distributable smoke, set
+`GROUND_PACKAGE_SMOKE_PREPARE_SANDBOX=sudo` on a trusted package-test host.
+Extraction does not preserve the Chromium helper's root/setuid metadata; the
+smoke hashes it against the already verified unpacked package, elevates only that
+temporary regular file, and then requires root ownership plus mode `4755`. It
+does not disable the Chromium sandbox.
+
 The macOS command clears ambient signing and notarization credentials for both its
 source build and packaging process and sets
 `CSC_IDENTITY_AUTO_DISCOVERY=false`, making the local preview explicitly unsigned.

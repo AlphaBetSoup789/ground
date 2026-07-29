@@ -263,6 +263,8 @@ jobs:
       - name: Smoke-test packaged native runtime with ephemeral Secret Service
         if: runner.os == 'Linux'
         shell: bash
+        env:
+          GROUND_PACKAGE_SMOKE_PREPARE_SANDBOX: sudo
         run: |
           dbus-run-session -- bash -euo pipefail -c '
             export XDG_RUNTIME_DIR="$RUNNER_TEMP/ground-keyring-runtime"

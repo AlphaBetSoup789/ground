@@ -626,6 +626,11 @@ distributions.
 `dist:mac:unsigned` clears signing/notarization credentials and disables signing
 identity auto-discovery for both the source build and packaging step, so a local
 macOS preview cannot silently become a release artifact.
+On Linux, AppImage extraction does not preserve the Chromium helper's root/setuid
+metadata. Run the distributable smoke on a trusted package-test host with
+`GROUND_PACKAGE_SMOKE_PREPARE_SANDBOX=sudo`; Ground elevates only the regular,
+hash-matched temporary helper and verifies root ownership plus mode `4755` before
+launch. The smoke never falls back to `--no-sandbox`.
 
 The package workflows target macOS arm64, macOS x64, Windows x64, and Linux x64 on
 matching native runners. They launch the unpacked app with an isolated temporary
