@@ -49,7 +49,7 @@ interface TaskViewProps {
     item: DesktopActivityItem,
     approved: boolean
   ) => Promise<void>
-  onOpenSettings: () => void
+  onOpenSettings: (providerId?: string) => void
   onImportTask: () => void
   onForkTask: () => void
   onSetArchived: (archived: boolean) => void
@@ -283,7 +283,7 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
           <button
             className="icon-button header-settings"
             type="button"
-            onClick={props.onOpenSettings}
+            onClick={() => props.onOpenSettings(provider?.id)}
             aria-label="Provider settings"
           >
             <Settings2 size={16} />
@@ -441,7 +441,10 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
             <strong>{readiness.title}</strong>
             <span>{readiness.detail}</span>
           </div>
-          <button type="button" onClick={props.onOpenSettings}>
+          <button
+            type="button"
+            onClick={() => props.onOpenSettings(provider.id)}
+          >
             {readiness.tone === 'error' ? 'Review and retest' : 'Test provider'}
           </button>
         </div>

@@ -89,20 +89,25 @@ const CLI_ADAPTER_LABELS = {
 interface ProviderModalProps {
   providers: ProviderProfile[]
   mcpServers: McpServerProfile[]
+  initialProviderId?: string
   onClose: () => void
   onSaved: () => Promise<void>
   onError: (error: unknown) => void
 }
 
 export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
+  const initialProvider =
+    props.providers.find(
+      (provider) => provider.id === props.initialProviderId
+    ) ?? props.providers[0]
   const dialogRef = useRef<HTMLDivElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const deleteTriggerRef = useRef<HTMLButtonElement>(null)
   const deleteCancelRef = useRef<HTMLButtonElement>(null)
   const onCloseRef = useRef(props.onClose)
-  const [selectedId, setSelectedId] = useState(props.providers[0]?.id)
+  const [selectedId, setSelectedId] = useState(initialProvider?.id)
   const [draft, setDraft] = useState<ProviderDraft>(() =>
-    providerToDraft(props.providers[0])
+    providerToDraft(initialProvider)
   )
   const [detected, setDetected] = useState<DetectedCli[]>([])
   const [testing, setTesting] = useState(false)
@@ -745,7 +750,7 @@ function ApiProviderForm(props: {
 
       {props.draft.kind === 'openai-compatible' ? (
         <div className="local-preset-row" aria-label="Local API presets">
-          <span>Quick local setup</span>
+          <span>Local server must be running</span>
           <div>
             <button
               type="button"

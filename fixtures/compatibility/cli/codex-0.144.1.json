@@ -117,8 +117,8 @@
       ]
     },
     {
-      "id": "declined-command-and-nonfatal-error",
-      "description": "Treat declined commands and non-fatal error items as failed diagnostic activities.",
+      "id": "declined-command-and-nonfatal-notice",
+      "description": "Treat declined commands as failed activities and Codex non-fatal error items as warning diagnostics.",
       "inputEvents": [
         {
           "type": "item.completed",
@@ -152,14 +152,8 @@
           }
         },
         {
-          "type": "activity",
-          "activity": {
-            "runtimeId": "codex:warning-1",
-            "activityType": "error",
-            "title": "Codex reported an error",
-            "detail": "An optional MCP server did not start",
-            "status": "error"
-          }
+          "type": "diagnostic",
+          "detail": "An optional MCP server did not start"
         }
       ]
     }
