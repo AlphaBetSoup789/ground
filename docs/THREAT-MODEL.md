@@ -182,6 +182,10 @@ therefore retains the current account’s OS authority.
   schema. Stdio tool fingerprints also bind the launch invocation. Added/changed
   definitions are blocked pending exact reapproval, connection identity changes
   clear trust, and every invocation requires separate approval.
+- Every positive write, command, and MCP-call decision crosses a
+  main-process-owned native dialog. The dialog renders control and bidirectional
+  characters visibly, displays the exact immutable action envelope, and binds it
+  to a SHA-256 identity before one-shot execution can continue.
 - MCP results are JSON-normalized and bounded; Apps/UI material is stripped, and
   elicitation is not advertised.
 - Interrupted in-progress state is recovered explicitly rather than presented as a
@@ -208,10 +212,6 @@ therefore retains the current account’s OS authority.
 - Replace renderer-visible workspace paths with opaque, revocable grant IDs.
 - Persist executable trust by code signature or equivalent platform identity and
   run external runtimes in a dedicated constrained helper where practical.
-- Move write, command, and MCP-call decisions behind a native user-presence surface
-  so compromise of expected renderer content cannot synthesize side-effect
-  approval. Terminal creation is native-confirmed, but an attached terminal remains
-  renderer-driven.
 - Replace JSON snapshots with a transactional, sequenced event log and add a
   user-driven, versioned backup/restore workflow. The current single-snapshot
   fallback is crash recovery, not durable history.
@@ -278,8 +278,8 @@ The developer preview does not claim:
 - confinement of an arbitrary trusted native CLI;
 - confinement of an interactive PTY or local MCP stdio server;
 - termination of a task PTY merely because its task was archived;
-- containment of a compromised expected renderer that can drive the current
-  approval surface or an already attached terminal;
+- containment of a compromised expected renderer that can drive the task UI,
+  summon a native approval prompt, or drive an already attached terminal;
 - protection from a malicious operating-system user or compromised machine;
 - safe execution of code the user explicitly approves;
 - provider-side privacy, retention, or account security;

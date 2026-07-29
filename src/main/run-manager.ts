@@ -133,10 +133,26 @@ interface ActiveRun {
   provider: ProviderAttribution
   workspacePath?: string
   mode: Task['mode']
+  includeImportedHistory: boolean
   controller: AbortController
-  pendingApprovals: Map<string, (approved: boolean) => void>
+  pendingApprovals: Map<string, PendingApprovalState>
   credentialValues: Set<string>
   completion?: Promise<void>
+}
+
+export interface PendingAgentApproval {
+  runId: string
+  taskId: string
+  approvalId: string
+  title: string
+  detail: string
+  toolName: string
+  provider?: ProviderAttribution
+}
+
+interface PendingApprovalState {
+  envelope: PendingAgentApproval
+  resolve: (approved: boolean) => void
 }
 
 interface RequestToolCandidate {
@@ -199,6 +215,7 @@ export class RunManager {
       },
       workspacePath: task.workspacePath,
       mode: task.mode,
+      includeImportedHistory: task.includeImportedHistory === true,
       controller: new AbortController(),
       pendingApprovals: new Map(),
       credentialValues: new Set()
@@ -246,7 +263,7 @@ export class RunManager {
   async stop(runId: string): Promise<void> {
     const run = this.activeRuns.get(runId)
     if (!run) return
-    for (const resolve of run.pendingApprovals.values()) resolve(false)
+    for (const pending of run.pendingApprovals.values()) pending.resolve(false)
     run.pendingApprovals.clear()
     run.controller.abort()
     await run.completion
@@ -272,7 +289,7 @@ export class RunManager {
   async stopAll(): Promise<void> {
     const runs = [...this.activeRuns.values()]
     for (const run of runs) {
-      for (const resolve of run.pendingApprovals.values()) resolve(false)
+      for (const pending of run.pendingApprovals.values()) pending.resolve(false)
       run.pendingApprovals.clear()
       run.controller.abort()
     }
@@ -291,13 +308,24 @@ export class RunManager {
     if (timeout) clearTimeout(timeout)
   }
 
+  getPendingApproval(
+    runId: string,
+    approvalId: string
+  ): PendingAgentApproval {
+    const run = this.activeRuns.get(runId)
+    if (!run) throw new Error('The run is no longer active')
+    const pending = run.pendingApprovals.get(approvalId)
+    if (!pending) throw new Error('Approval request not found')
+    return structuredClone(pending.envelope)
+  }
+
   async resolveApproval(runId: string, approvalId: string, approved: boolean): Promise<void> {
     const run = this.activeRuns.get(runId)
     if (!run) throw new Error('The run is no longer active')
-    const resolve = run.pendingApprovals.get(approvalId)
-    if (!resolve) throw new Error('Approval request not found')
+    const pending = run.pendingApprovals.get(approvalId)
+    if (!pending) throw new Error('Approval request not found')
     run.pendingApprovals.delete(approvalId)
-    resolve(approved)
+    pending.resolve(approved)
   }
 
   private async execute(run: ActiveRun, provider: ProviderProfile): Promise<void> {
@@ -354,7 +382,8 @@ export class RunManager {
       ...this.store.getTask(run.taskId),
       providerId: run.providerId,
       workspacePath: run.workspacePath,
-      mode: run.mode
+      mode: run.mode,
+      includeImportedHistory: run.includeImportedHistory
     }
     const canUseWorkspaceTools =
       Boolean(task.workspacePath) && provider.supportsTools
@@ -374,12 +403,17 @@ export class RunManager {
       provider,
       runtime.adapter.id
     )
+    const includeImportedTimeline =
+      task.includeImportedHistory === true &&
+      (!resumableSession ||
+        !modelSessionIncludesImportedHistory(resumableSession, task))
     const conversation = resumableSession
       ? appendTimelineContext(
           structuredClone(
             resumableSession.conversation
           ) as unknown as ConversationItem[],
-          recentTimelineItems(task.items)
+          recentTimelineItems(task.items, includeImportedTimeline),
+          includeImportedTimeline
         )
       : buildModelConversation(task)
     const workspaceInstructions =
@@ -732,7 +766,10 @@ export class RunManager {
         item: activity
       })
       const approved = await new Promise<boolean>((resolve) => {
-        run.pendingApprovals.set(approvalId, resolve)
+        run.pendingApprovals.set(approvalId, {
+          envelope: pendingApprovalEnvelope(run, activity, approvalId),
+          resolve
+        })
       })
       if (!approved) {
         const updated = await this.store.updateItem(run.taskId, activity.id, (item) => {
@@ -898,7 +935,10 @@ export class RunManager {
       item: activity
     })
     const approved = await new Promise<boolean>((resolve) => {
-      run.pendingApprovals.set(approvalId, resolve)
+      run.pendingApprovals.set(approvalId, {
+        envelope: pendingApprovalEnvelope(run, activity, approvalId),
+        resolve
+      })
     })
     if (!approved) {
       const updated = await this.store.updateItem(run.taskId, activity.id, (item) => {
@@ -1202,6 +1242,8 @@ export class RunManager {
         model: provider.model,
         workspacePath: run.workspacePath,
         mode: run.mode,
+        includesImportedHistory: run.includeImportedHistory,
+        origin: 'ground',
         conversation: structuredClone(
           conversation
         ) as unknown as StoredModelConversationItem[],
@@ -1347,6 +1389,22 @@ export class RunManager {
   }
 }
 
+function pendingApprovalEnvelope(
+  run: ActiveRun,
+  item: ActivityItem,
+  approvalId: string
+): PendingAgentApproval {
+  return {
+    runId: run.id,
+    taskId: run.taskId,
+    approvalId,
+    title: item.title,
+    detail: item.detail ?? '',
+    toolName: item.toolName ?? 'unknown',
+    ...(item.provider ? { provider: structuredClone(item.provider) } : {})
+  }
+}
+
 function statusTransitionToRunning(item: ActivityItem): void {
   item.status = 'running'
   if (item.activityType === 'approval') item.activityType = item.toolName === 'run_command' ? 'command' : 'tool'
@@ -1439,11 +1497,37 @@ function matchingModelSession(
     saved.model !== provider.model ||
     saved.workspacePath !== task.workspacePath ||
     saved.mode !== task.mode ||
+    !modelSessionImportedHistoryMatches(saved, task) ||
     !Array.isArray(saved.conversation)
   ) {
     return undefined
   }
   return saved
+}
+
+function modelSessionImportedHistoryMatches(
+  session: NonNullable<Task['modelSessions']>[string],
+  task: Task
+): boolean {
+  if (!task.items.some((item) => item.historyOnly)) return true
+  return (
+    modelSessionIncludesImportedHistory(session, task) ===
+    (task.includeImportedHistory === true)
+  )
+}
+
+function modelSessionIncludesImportedHistory(
+  session: NonNullable<Task['modelSessions']>[string],
+  task: Task
+): boolean {
+  if (!task.items.some((item) => item.historyOnly)) return false
+  return (
+    session.includesImportedHistory ??
+    // Sessions written before this binding existed are treated as containing
+    // imported history. Invalidating and rebuilding is safer than silently
+    // forwarding an old continuation after the user keeps history excluded.
+    (session.origin === 'ground' ? false : true)
+  )
 }
 
 function toolDefinitionForProvider(
@@ -1456,14 +1540,22 @@ function toolDefinitionForProvider(
 }
 
 function buildModelConversation(task: Task): ConversationItem[] {
-  return appendTimelineContext([], recentTimelineItems(task.items))
+  const includeImportedHistory = task.includeImportedHistory === true
+  return appendTimelineContext(
+    [],
+    recentTimelineItems(task.items, includeImportedHistory),
+    includeImportedHistory
+  )
 }
 
-function recentTimelineItems(items: Task['items']): Task['items'] {
+function recentTimelineItems(
+  items: Task['items'],
+  includeImportedHistory = false
+): Task['items'] {
   const selected: Task['items'] = []
   let characters = 0
   for (const item of [...items].reverse()) {
-    if (item.historyOnly) continue
+    if (item.historyOnly && !includeImportedHistory) continue
     const cost = JSON.stringify(item).length
     if (selected.length && (selected.length >= 240 || characters + cost > 800_000)) {
       break
@@ -1476,7 +1568,8 @@ function recentTimelineItems(items: Task['items']): Task['items'] {
 
 function appendTimelineContext(
   initial: ConversationItem[],
-  items: Task['items']
+  items: Task['items'],
+  includeImportedHistory = false
 ): ConversationItem[] {
   const conversation = [...initial]
   const messageIds = new Set(
@@ -1496,13 +1589,19 @@ function appendTimelineContext(
 
   for (const item of items) {
     if (item.kind === 'message') {
-      if (!item.content || item.historyOnly || messageIds.has(item.id)) continue
+      if (
+        !item.content ||
+        (item.historyOnly && !includeImportedHistory) ||
+        messageIds.has(item.id)
+      ) {
+        continue
+      }
       conversation.push(toConversationMessage(item))
       messageIds.add(item.id)
       continue
     }
     if (
-      item.historyOnly ||
+      (item.historyOnly && !includeImportedHistory) ||
       !item.callId ||
       !item.toolName ||
       item.status === 'pending' ||

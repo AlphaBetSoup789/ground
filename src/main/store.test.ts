@@ -333,6 +333,7 @@ describe('StateStore', () => {
     expect(imported).toMatchObject({
       title: 'Portable task',
       providerId: exactProvider.id,
+      includeImportedHistory: false,
       runStatus: 'idle'
     })
     expect(imported).not.toHaveProperty('workspacePath')
@@ -353,7 +354,9 @@ describe('StateStore', () => {
     expect(imported.modelSessions?.[exactProvider.id]).toMatchObject({
       adapterId: 'anthropic.messages',
       providerRevision: exactProvider.updatedAt,
-      model: exactProvider.model
+      model: exactProvider.model,
+      includesImportedHistory: true,
+      origin: 'imported'
     })
     expect(imported.modelSessions?.[exactProvider.id]).not.toHaveProperty(
       'workspacePath'
@@ -551,6 +554,7 @@ describe('StateStore', () => {
     const source = await store.createTask(directory)
     await store.mutateTask(source.id, (task) => {
       task.title = 'Long-running review'
+      task.includeImportedHistory = true
       task.items = [
         {
           id: 'source-user',
@@ -599,6 +603,8 @@ describe('StateStore', () => {
           model: 'llama3.2',
           workspacePath: directory,
           mode: 'agent',
+          includesImportedHistory: true,
+          origin: 'ground',
           conversation: [
             {
               kind: 'message',
@@ -680,6 +686,7 @@ describe('StateStore', () => {
       workspacePath: directory,
       providerId: 'ollama-local',
       mode: 'agent',
+      includeImportedHistory: true,
       runStatus: 'idle'
     })
     expect(forked.id).not.toBe(source.id)
@@ -700,6 +707,10 @@ describe('StateStore', () => {
 
     const session = forked.modelSessions?.['ollama-local']
     expect(session).not.toHaveProperty('checkpoint')
+    expect(session).toMatchObject({
+      includesImportedHistory: true,
+      origin: 'ground'
+    })
     const userMessage = session?.conversation.find(
       (item) => item.kind === 'message' && item.role === 'user'
     )

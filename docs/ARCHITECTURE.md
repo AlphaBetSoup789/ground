@@ -47,10 +47,10 @@ Privileged desktop      ▼
 
 The renderer is never the authority for a workspace path, CLI executable identity,
 stored secret, prepared action envelope, or tool implementation. It requests
-actions and presents main-process state. It currently returns approval decisions
-and terminal input through trusted IPC, so compromise of the expected renderer is
-not equivalent to compromise of an arbitrary web origin but remains a
-high-authority threat. New terminal creation is a separate native exact-launch
+actions and presents main-process state. Approval requests and terminal input
+cross trusted IPC, but every positive write, command, and MCP-call decision must
+also cross a main-process-owned native dialog bound to the exact immutable
+approval envelope. New terminal creation has a separate native exact-launch
 confirmation; later terminal input remains renderer-driven through a short-lived
 opaque attachment capability.
 
@@ -285,8 +285,11 @@ prose or tool output remain possible and require user review.
 
 Import creates a new task without a workspace, runtime session, or approval
 authority. Timeline items are visibly history-only and ignored by normal timeline
-context reconstruction. If the provider hint exactly matches a configured API
-profile, the portable canonical conversation can seed a subsequent explicit run.
+context reconstruction. A native-warning-backed per-task control can include them
+again. If the provider hint exactly matches a configured API profile, the portable
+canonical conversation can seed a subsequent explicit run only while that control
+is enabled. Model-session compatibility is bound to the choice, so excluding
+history invalidates any continuation that may contain it.
 
 `StateStore` applies a 128 MiB ceiling and validates the full persisted schema
 before each replacement. Reads require a regular file, refuse symlinks where the
@@ -330,9 +333,8 @@ but do not yet use the experimental agent-runtime registry.
 
 The next storage boundary is a transactional, append-only event store with schema
 migrations and materialized task views. Stronger OS-specific confinement,
-handle-based executable authority, durable terminal/background-process state,
-native write/command/MCP-call approval, and authenticated MCP are still future
-execution boundaries.
+handle-based executable authority, durable terminal/background-process state, and
+authenticated MCP are still future execution boundaries.
 
 See [PROVIDER-SDK.md](PROVIDER-SDK.md) for adapter requirements and
 [THREAT-MODEL.md](THREAT-MODEL.md) for the security consequences of these ownership

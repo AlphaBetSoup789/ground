@@ -498,6 +498,7 @@ export class StateStore {
           workspacePath: source.workspacePath,
           providerId: source.providerId,
           mode: source.mode,
+          includeImportedHistory: source.includeImportedHistory,
           runStatus: 'idle',
           createdAt: timestamp,
           updatedAt: timestamp,
@@ -514,6 +515,8 @@ export class StateStore {
                 model: session.model,
                 workspacePath: session.workspacePath,
                 mode: session.mode,
+                includesImportedHistory: session.includesImportedHistory,
+                origin: session.origin,
                 conversation: forkConversation(session.conversation, ids),
                 updatedAt: timestamp
               }
@@ -581,6 +584,7 @@ export class StateStore {
           title: importedTaskTitle(templateSnapshot.title),
           providerId: provider.id,
           mode: templateSnapshot.mode,
+          includeImportedHistory: false,
           runStatus: 'idle',
           createdAt: timestamp,
           updatedAt: timestamp,
@@ -664,6 +668,8 @@ export class StateStore {
               providerRevision: exactProvider.updatedAt,
               model: exactProvider.model,
               mode: templateSnapshot.mode,
+              includesImportedHistory: true,
+              origin: 'imported',
               conversation: importedConversation(
                 templateSnapshot.conversation
               ),

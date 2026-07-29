@@ -129,7 +129,8 @@ const taskPatchSchema = z
     title: z.string().trim().min(1).max(120).optional(),
     providerId: z.string().min(1).max(200).optional(),
     mode: z.enum(['ask', 'agent']).optional(),
-    workspacePath: z.string().min(1).max(8_192).optional()
+    workspacePath: z.string().min(1).max(8_192).optional(),
+    includeImportedHistory: z.boolean().optional()
   })
   .strict()
 

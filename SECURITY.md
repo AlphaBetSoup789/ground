@@ -297,12 +297,14 @@ before the first supported release.
   latest content at execution is staged. The later commit confirmation does bind an
   exact tree. A same-user process can also race a newly introduced Git filter
   driver between configuration discovery and process spawn.
-- Approval decisions and terminal input currently arrive through the trusted
-  renderer bridge. Frame/origin checks reject an unexpected renderer, but a
-  compromise of the expected renderer could synthesize an approval decision or
-  drive an already attached task terminal. Native confirmation protects terminal
-  creation, but the renderer remains the interactive terminal after launch. A
-  native surface for write/command/MCP call decisions remains release work.
+- Approval requests and terminal input arrive through the trusted renderer bridge.
+  Frame/origin checks reject an unexpected renderer. A positive write, command, or
+  MCP-call decision cannot resolve until a main-process-owned native dialog shows
+  the exact immutable envelope and receives user confirmation; a compromised
+  expected renderer can summon that dialog but cannot synthesize its response.
+  Native confirmation also protects terminal creation, but the renderer remains
+  the interactive terminal after launch and can drive an already attached task
+  terminal.
 - Workspace grants are represented internally by canonical paths rather than opaque
   capability handles.
 - Task history uses a JSON snapshot rather than a transactional, append-only event
@@ -317,10 +319,11 @@ before the first supported release.
 - Export filtering is structural, not a general secret scanner. Plain-text prompts,
   pasted credentials, file contents, command output, and tool results can remain in
   a task bundle or Markdown export; users must review exports before sharing.
-- Imported canonical conversation is untrusted content. For an exact API-provider
-  match, it can seed a later model request after the user starts a run, so it can
-  carry prompt-injection text even though it carries no workspace or execution
-  authority.
+- Imported canonical conversation is untrusted content and is excluded from model
+  context by default. For an exact API-provider match, it can seed a later model
+  request only after the user enables the per-task control through a native warning
+  and starts a run. It can still carry prompt-injection text even though it carries
+  no workspace or execution authority.
 - Cloud-provider adapters are covered by mocked protocol and application tests;
   CI does not contain paid-provider credentials or certify live service versions.
 - Dependency installation fails closed on unreviewed lifecycle scripts; release

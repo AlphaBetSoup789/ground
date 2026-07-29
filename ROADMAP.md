@@ -59,7 +59,7 @@ are not necessarily release-certified.
 - [x] Bind approved commands to resolved executable identity and fingerprint
 - [ ] Replace path-bearing renderer DTOs with opaque workspace grants
 - [x] Put new terminal creation behind a native exact-launch confirmation
-- [ ] Move write, command, and MCP-call approval behind a native user-presence
+- [x] Move write, command, and MCP-call approval behind a native user-presence
   surface
 - [x] Add Git status/diff/history, selected-path staging/unstaging, exact-tree
   commits, and clean managed-worktree create/remove
@@ -76,7 +76,7 @@ are not necessarily release-certified.
 - [ ] Resume interrupted runs safely without duplicating side effects
 - [x] Add portable JSON import/export, Markdown export, and task deletion
 - [x] Add task archive/restore, active/archive search, and safe fork
-- [ ] Add explicit controls for including imported history in later model context
+- [x] Add explicit controls for including imported history in later model context
 
 ### Public release engineering
 

@@ -247,6 +247,8 @@ const modelRuntimeSessionSchema = z.object({
   model: z.string().max(200),
   workspacePath: z.string().min(1).max(8_192).optional(),
   mode: z.enum(['ask', 'agent']),
+  includesImportedHistory: z.boolean().optional(),
+  origin: z.enum(['ground', 'imported']).optional(),
   conversation: z.array(storedConversationItemSchema).max(10_000),
   checkpoint: portableJson.optional(),
   updatedAt: timestamp
@@ -259,6 +261,7 @@ const taskSchema = z
     workspacePath: z.string().min(1).max(8_192).optional(),
     providerId: identifier,
     mode: z.enum(['ask', 'agent']),
+    includeImportedHistory: z.boolean().optional(),
     runStatus: z.enum(['idle', 'running', 'awaiting-approval', 'failed']),
     archivedAt: archivedTimestamp.optional(),
     createdAt: timestamp,

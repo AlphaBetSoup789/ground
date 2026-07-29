@@ -450,6 +450,9 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
           })
         }}
         onResolveApproval={props.onResolveApproval}
+        onSetImportedHistory={(include) =>
+          props.onUpdateTask({ includeImportedHistory: include })
+        }
       />
 
       <Composer

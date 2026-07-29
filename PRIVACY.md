@@ -164,10 +164,12 @@ still contain private data. Exported files are outside Ground’s state director
 remain until the user deletes them. Review an export in full before sharing it.
 
 Imports are strict, bounded, and receive new local identities without a workspace
-grant or execution authority. Their visible timeline is history-only. If an
-imported bundle exactly matches a configured API provider, its portable canonical
-conversation can seed a later request after the user starts a new run; that
-imported content may then be sent to the configured endpoint.
+grant or execution authority. Their visible timeline is excluded from model
+context by default. If the user enables the task’s imported-history control
+through its native warning, an exact provider match can seed a later request after
+the user starts a new run; that imported content may then be sent to the configured
+endpoint. Re-excluding it invalidates provider continuation state that was bound to
+the included context.
 
 ## Changes
 

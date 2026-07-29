@@ -1056,21 +1056,42 @@ kbd {
 }
 
 .imported-history-note {
-  display: flex;
-  width: fit-content;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  width: min(100%, 760px);
   align-items: center;
-  gap: 7px;
+  gap: 9px;
   margin: -19px 0 24px;
-  padding: 6px 9px;
+  padding: 8px 9px;
   border: 1px solid rgba(143, 185, 247, 0.12);
   border-radius: 8px;
   color: #8e9ba8;
-  font-size: 9px;
+  font-size: 10px;
   background: rgba(143, 185, 247, 0.045);
 }
 
 .imported-history-note svg {
   color: var(--blue);
+}
+
+.imported-history-note strong {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.imported-history-note button {
+  padding: 5px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  background: var(--surface-raised);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.imported-history-note button:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
 }
 
 .message {

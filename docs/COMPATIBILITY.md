@@ -77,7 +77,7 @@ built-in adapter currently emits one.
 | Local MCP | Resolved stdio executable and argv | Integrated | Native exact-invocation confirmation; current-user OS permissions; not sandboxed |
 | MCP tools | Namespaced canonical definitions | Integrated | Tools only; no resources, prompts, Apps/UI, or elicitation |
 | Task portability | Strict JSON bundle + Markdown transcript | Integrated | User must review exports; imported content is untrusted |
-| Task lifecycle | Safe fork, archive/restore, bounded active/archive search | Integrated | Imported-history context has no separate toggle |
+| Task lifecycle | Safe fork, archive/restore, bounded active/archive search | Integrated | Imported history is excluded by default and requires an explicit per-task opt-in |
 | State recovery | Bounded atomic primary + one rotating validated backup | Integrated | Automatic fallback only; no backup browser/manual restore |
 
 State and credential-vault readers use `O_NOFOLLOW` where the host exposes it.

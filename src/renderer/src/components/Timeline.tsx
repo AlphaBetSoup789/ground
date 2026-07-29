@@ -28,6 +28,7 @@ interface TimelineProps {
   suggestions: string[]
   onSuggestion: (prompt: string) => void
   onResolveApproval: (item: ActivityItem, approved: boolean) => Promise<void>
+  onSetImportedHistory: (include: boolean) => void
 }
 
 const TIMELINE_PAGE_SIZE = 200
@@ -115,7 +116,33 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
         {props.task.items.some((item) => item.historyOnly) && (
           <div className="imported-history-note">
             <ShieldCheck size={13} />
-            Imported history did not carry over workspace access or pending actions.
+            <span>
+              <strong>
+                Imported history is{' '}
+                {props.task.includeImportedHistory
+                  ? 'included in model context.'
+                  : 'visible only.'}
+              </strong>{' '}
+              It is untrusted and carries no workspace or action authority.
+            </span>
+            <button
+              type="button"
+              aria-pressed={props.task.includeImportedHistory === true}
+              disabled={
+                Boolean(props.task.archivedAt) ||
+                props.task.runStatus === 'running' ||
+                props.task.runStatus === 'awaiting-approval'
+              }
+              onClick={() =>
+                props.onSetImportedHistory(
+                  props.task.includeImportedHistory !== true
+                )
+              }
+            >
+              {props.task.includeImportedHistory
+                ? 'Exclude from context'
+                : 'Include in context'}
+            </button>
           </div>
         )}
         {hiddenItemCount > 0 && (
@@ -297,7 +324,8 @@ function ActivityCard(props: {
                 role="alert"
               >
                 <AlertTriangle size={13} />
-                Review the exact action above. Approval applies once.
+                Review the exact action above. Allow once opens a native
+                confirmation.
               </div>
               <div>
                 <button

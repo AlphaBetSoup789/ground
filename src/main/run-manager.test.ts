@@ -977,6 +977,142 @@ describe('RunManager model runtime', () => {
     )
   })
 
+  it('includes imported history only after the task opts in explicitly', async () => {
+    const run = await harness([
+      (request) => textResponse(request, 'Fresh response.')
+    ])
+    await run.store.mutateTask(run.taskId, (task) => {
+      task.includeImportedHistory = true
+      task.items.push({
+        id: 'imported-history',
+        kind: 'message',
+        role: 'user',
+        content: 'Explicitly included imported transcript',
+        createdAt: new Date().toISOString(),
+        historyOnly: true
+      })
+    })
+
+    await run.manager.start(run.taskId, 'Fresh request')
+    await run.terminal
+
+    const providerId = run.store.getTask(run.taskId).providerId
+    expect(JSON.stringify(run.requests[0]?.conversation)).toContain(
+      'Explicitly included imported transcript'
+    )
+    expect(run.store.getTask(run.taskId).modelSessions?.[providerId]).toMatchObject({
+      includesImportedHistory: true,
+      origin: 'ground'
+    })
+  })
+
+  it('invalidates an imported provider continuation while history stays excluded', async () => {
+    const run = await harness([
+      (request) => textResponse(request, 'Fresh response.')
+    ])
+    const providerId = run.store.getTask(run.taskId).providerId
+    const provider = run.store.getProvider(providerId)
+    await run.store.mutateTask(run.taskId, (task) => {
+      task.includeImportedHistory = false
+      task.items.push({
+        id: 'imported-history',
+        kind: 'message',
+        role: 'user',
+        content: 'Excluded imported timeline',
+        createdAt: task.createdAt,
+        historyOnly: true
+      })
+      task.modelSessions = {
+        [provider.id]: {
+          adapterId: 'test.model',
+          providerRevision: provider.updatedAt,
+          model: provider.model,
+          workspacePath: task.workspacePath,
+          mode: task.mode,
+          includesImportedHistory: true,
+          origin: 'imported',
+          conversation: [
+            {
+              kind: 'message',
+              id: 'imported-provider-message',
+              role: 'user',
+              parts: [
+                {
+                  kind: 'text',
+                  text: 'Excluded imported provider conversation'
+                }
+              ]
+            }
+          ],
+          updatedAt: task.createdAt
+        }
+      }
+    })
+
+    await run.manager.start(run.taskId, 'Fresh request')
+    await run.terminal
+
+    const conversation = JSON.stringify(run.requests[0]?.conversation)
+    expect(conversation).not.toContain('Excluded imported timeline')
+    expect(conversation).not.toContain('Excluded imported provider conversation')
+    expect(run.store.getTask(run.taskId).modelSessions?.[provider.id]).toMatchObject({
+      includesImportedHistory: false,
+      origin: 'ground'
+    })
+  })
+
+  it('uses an opted-in imported continuation without duplicating history-only timeline items', async () => {
+    const run = await harness([
+      (request) => textResponse(request, 'Fresh response.')
+    ])
+    const providerId = run.store.getTask(run.taskId).providerId
+    const provider = run.store.getProvider(providerId)
+    await run.store.mutateTask(run.taskId, (task) => {
+      task.includeImportedHistory = true
+      task.items.push({
+        id: 'visible-imported-history',
+        kind: 'message',
+        role: 'user',
+        content: 'Visible projection of the imported turn',
+        createdAt: task.createdAt,
+        historyOnly: true
+      })
+      task.modelSessions = {
+        [provider.id]: {
+          adapterId: 'test.model',
+          providerRevision: provider.updatedAt,
+          model: provider.model,
+          workspacePath: task.workspacePath,
+          mode: task.mode,
+          includesImportedHistory: true,
+          origin: 'imported',
+          conversation: [
+            {
+              kind: 'message',
+              id: 'canonical-imported-history',
+              role: 'user',
+              parts: [
+                {
+                  kind: 'text',
+                  text: 'Canonical imported provider conversation'
+                }
+              ]
+            }
+          ],
+          updatedAt: task.createdAt
+        }
+      }
+    })
+
+    await run.manager.start(run.taskId, 'Fresh request')
+    await run.terminal
+
+    const conversation = JSON.stringify(run.requests[0]?.conversation)
+    expect(conversation).toContain('Canonical imported provider conversation')
+    expect(conversation).not.toContain('Visible projection of the imported turn')
+    expect(conversation).toContain('Fresh request')
+  })
+
   it('feeds Ground-owned tool results back through the canonical conversation', async () => {
     const run = await harness([
       (request) => toolCallResponse(request, 'list_files', { depth: 1 }),
@@ -1197,6 +1333,19 @@ describe('RunManager model runtime', () => {
     const runId = await run.manager.start(run.taskId, 'Update tracked.txt')
     const approval = await run.approval
     expect(approval.item.detail).toContain('+model edit')
+    expect(
+      run.manager.getPendingApproval(
+        runId,
+        approval.item.approvalId as string
+      )
+    ).toMatchObject({
+      runId,
+      taskId: run.taskId,
+      approvalId: approval.item.approvalId,
+      title: 'Update tracked.txt',
+      detail: approval.item.detail,
+      toolName: 'write_file'
+    })
 
     await writeFile(target, 'concurrent user edit\n')
     await run.manager.resolveApproval(runId, approval.item.approvalId as string, true)

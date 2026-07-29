@@ -162,6 +162,16 @@ export interface ModelRuntimeSession {
   model: string
   workspacePath?: string
   mode: RunMode
+  /**
+   * Binds provider continuation state to the user's imported-history context
+   * choice. Older sessions omit this field and are handled conservatively.
+   */
+  includesImportedHistory?: boolean
+  /**
+   * Marks portable provider-neutral conversation that has not yet been
+   * accepted into a fresh Ground-owned model session.
+   */
+  origin?: 'ground' | 'imported'
   conversation: StoredModelConversationItem[]
   checkpoint?: PortableJsonValue
   updatedAt: string
@@ -212,6 +222,7 @@ export interface Task {
   workspacePath?: string
   providerId: string
   mode: RunMode
+  includeImportedHistory?: boolean
   runStatus: RunStatus
   archivedAt?: string
   createdAt: string
@@ -388,6 +399,7 @@ export interface TaskPatch {
   providerId?: string
   mode?: RunMode
   workspacePath?: string
+  includeImportedHistory?: boolean
 }
 
 export type TaskExportFormat = 'bundle' | 'markdown'

@@ -182,7 +182,9 @@ The version 1 task-bundle format is a content-portability boundary, not adapter
 state serialization. It omits provider-owned state, credentials, runtime sessions,
 workspace grants, pending approvals, and original IDs. An exact configured API
 provider may use the imported portable canonical conversation only after the user
-starts a later run; imported content remains untrusted.
+explicitly enables imported-history context and starts a later run. Adapter
+continuation compatibility is bound to that choice; imported content remains
+untrusted.
 
 ## Configuration and secrets
 

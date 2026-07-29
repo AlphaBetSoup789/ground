@@ -51,6 +51,7 @@ import {
   parseWorkspacePath
 } from './validation'
 import { migrateLegacyData } from './migration'
+import { agentApprovalDialogOptions } from './native-agent-approval'
 import {
   preparePackagedSmokeDirectory,
   resolvePackagedSmokeConfig,
@@ -492,6 +493,7 @@ function registerIpc(
   const terminalAccess = new TerminalAccessRegistry()
   const terminalSenderCleanupInstalled = new Set<number>()
   const gitServices = new Map<string, Promise<GitWorkspaceService>>()
+  const nativeApprovalPrompts = new Set<string>()
 
   const requireTaskWorkspace = async (
     rawTaskId: unknown
@@ -706,25 +708,59 @@ function registerIpc(
     await store.selectTask(parseNonEmptyId(taskId, 'Task identifier'))
   })
 
-  handleTrusted(IPC.updateTask, async (_event, taskId: unknown, rawPatch: unknown) => {
+  handleTrusted(IPC.updateTask, async (event, taskId: unknown, rawPatch: unknown) => {
     const id = parseNonEmptyId(taskId, 'Task identifier')
     const patch = parseTaskPatch(rawPatch)
-    if (store.getTask(id).archivedAt) {
+    const currentTask = store.getTask(id)
+    if (currentTask.archivedAt) {
       throw new Error('Restore this task before changing it')
     }
     if (
       runs.isTaskActive(id) &&
       (patch.workspacePath !== undefined ||
         patch.providerId !== undefined ||
-        patch.mode !== undefined)
+        patch.mode !== undefined ||
+        patch.includeImportedHistory !== undefined)
     ) {
       throw new Error(
-        'Stop the active run before changing its workspace, provider, or mode'
+        'Stop the active run before changing its workspace, provider, mode, or imported-history context'
       )
     }
     if (patch.providerId) store.getProvider(patch.providerId)
     if (patch.workspacePath) {
       patch.workspacePath = await workspaceGrants.require(patch.workspacePath)
+    }
+    if (
+      patch.includeImportedHistory === true &&
+      currentTask.includeImportedHistory !== true
+    ) {
+      const provider = store.getProvider(
+        patch.providerId ?? currentTask.providerId
+      )
+      const options: Electron.MessageBoxOptions = {
+        type: 'warning',
+        buttons: ['Keep excluded', 'Include imported history'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+        title: 'Include untrusted imported history?',
+        message: 'Allow imported content into future model context?',
+        detail: [
+          `Task: ${reviewValue(currentTask.title)}`,
+          `Current provider: ${reviewValue(provider.name)}`,
+          '',
+          'Imported transcripts are untrusted. They can contain prompt injection, private text, or misleading tool results.',
+          'If this task uses a Ground-managed model API, its imported history will be sent to that configured provider on the next run.',
+          'Imported history never restores workspace, credential, executable, session, or approval authority.',
+          '',
+          'You can exclude it again before a later run.'
+        ].join('\n')
+      }
+      const owner = BrowserWindow.fromWebContents(event.sender) ?? mainWindow
+      const result = owner
+        ? await dialog.showMessageBox(owner, options)
+        : await dialog.showMessageBox(options)
+      if (result.response !== 1) return currentTask
     }
     return store.mutateTask(id, (task) => Object.assign(task, patch))
   })
@@ -774,13 +810,43 @@ function registerIpc(
   })
   handleTrusted(
     IPC.resolveApproval,
-    async (_event, runId: unknown, approvalId: unknown, approved: unknown) => {
+    async (event, runId: unknown, approvalId: unknown, approved: unknown) => {
       if (typeof approved !== 'boolean') throw new Error('Approval decision must be a boolean')
-      await runs.resolveApproval(
-        parseNonEmptyId(runId, 'Run identifier'),
-        parseNonEmptyId(approvalId, 'Approval identifier'),
-        approved
+      const parsedRunId = parseNonEmptyId(runId, 'Run identifier')
+      const parsedApprovalId = parseNonEmptyId(
+        approvalId,
+        'Approval identifier'
       )
+      if (!approved) {
+        await runs.resolveApproval(parsedRunId, parsedApprovalId, false)
+        return
+      }
+
+      const presenceKey = `${parsedRunId}\u0000${parsedApprovalId}`
+      if (nativeApprovalPrompts.has(presenceKey)) {
+        throw new Error('Native confirmation is already open for this action')
+      }
+      const pending = runs.getPendingApproval(parsedRunId, parsedApprovalId)
+      nativeApprovalPrompts.add(presenceKey)
+      try {
+        const options = agentApprovalDialogOptions(pending)
+        const owner = BrowserWindow.fromWebContents(event.sender) ?? mainWindow
+        const result = owner
+          ? await dialog.showMessageBox(owner, options)
+          : await dialog.showMessageBox(options)
+        await runs.resolveApproval(
+          parsedRunId,
+          parsedApprovalId,
+          result.response === 1
+        )
+      } catch (error) {
+        await runs
+          .resolveApproval(parsedRunId, parsedApprovalId, false)
+          .catch(() => undefined)
+        throw error
+      } finally {
+        nativeApprovalPrompts.delete(presenceKey)
+      }
     }
   )
 

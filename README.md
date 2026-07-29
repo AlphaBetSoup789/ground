@@ -52,8 +52,8 @@ profile kind still requires a reviewed source change and rebuild. See
   Ground-managed tool set
 - Provider switching with per-item provider attribution and normalized tool-call
   and tool-result context
-- Approval-gated full writes, exact localized edits, and commands for
-  Ground-managed API agents
+- Approval-gated full writes, exact localized edits, commands, and MCP calls for
+  Ground-managed API agents, with an exact native allow-once confirmation
 - Sensitive-path filtering and workspace-relative model-visible paths
 - Portable JSON task bundles, Markdown transcript export, and confirmed task
   deletion
@@ -239,10 +239,12 @@ sharing it.
 
 Imported bundles are size- and structure-bounded, receive new local identities, and
 do not receive a workspace grant, runtime session, pending approval, or execution
-authority. Imported timeline entries remain visibly marked as history. When the
-bundle’s model hint exactly matches a configured API provider, its portable
-canonical conversation may seed a later request after the user explicitly starts
-one; imported content must therefore be treated as untrusted.
+authority. Imported timeline entries remain visibly marked and excluded from model
+context by default. The task banner can explicitly include or re-exclude them;
+enabling the control requires a native warning. When the bundle’s model hint
+exactly matches a configured API provider, its portable canonical conversation may
+seed a later request only after that opt-in and a user-started run. Imported
+content must therefore be treated as untrusted.
 
 Task forks are explicit local working copies. Ground assigns new task, item, run,
 and tool-call identities; drops pending approvals, CLI sessions, checkpoints,
@@ -306,8 +308,9 @@ Ground distinguishes two execution models:
 The renderer receives a narrow typed API. Secrets, workspace grants, filesystem
 operations, network credentials, process creation, pending approval state, and
 prepared side-effect envelopes stay in Electron’s main process. The renderer
-presents approvals and returns the user’s decision; the current preview does not
-yet use a separate native approval surface.
+presents the exact approval card. A denial resolves immediately, while an
+allow-once request opens a main-process-owned native dialog bound to the same
+immutable action envelope before execution can continue.
 
 Read [SECURITY.md](SECURITY.md) and
 [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) before using Ground with important
