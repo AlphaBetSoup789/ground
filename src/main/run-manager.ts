@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type {
   ActivityItem,
   CliProvider,
@@ -59,7 +60,13 @@ import {
   providerCredentialReferenceFor,
   resolveProviderCredential
 } from './provider-credentials'
-import { ProviderOperationGate } from './provider-operation-gate'
+import {
+  ProviderOperationGate,
+  type ProviderStartBinding,
+  type ProviderStartReservation
+} from './provider-operation-gate'
+import { providerConfigurationFingerprint } from './provider-revision'
+import { assertProviderCanStartRun } from './provider-service'
 import {
   RuntimeSecretStreamRedactor,
   createRuntimeSecretRedactionPlan,
@@ -68,7 +75,7 @@ import {
   type RuntimeSecretRedactionPlan
 } from './runtime-secret-redaction'
 import { SecretVault } from './secrets'
-import { StateStore } from './store'
+import { StatePersistenceError, StateStore } from './store'
 import {
   AGENT_TOOLS,
   executeTool,
@@ -109,6 +116,9 @@ export interface AgentRuntime<C = unknown> {
 export type ModelRuntimeFactory = (provider: ApiProvider) => ModelRuntime
 export type AgentRuntimeFactory = (provider: CliProvider) => AgentRuntime
 export type WorkspaceAuthorizer = (storedPath: string) => Promise<string>
+export type ProviderStartAuthorizer = (
+  provider: Readonly<ProviderProfile>
+) => Promise<void>
 
 export interface ModelAdapterBinding {
   adapterId: string
@@ -130,6 +140,7 @@ export type AgentRuntimeBindingResolver = (
 ) => AgentRuntimeBinding
 
 export interface McpRuntime {
+  ready?(): Promise<void>
   listApprovedTools(): McpExposedTool[]
   executeTool(
     namespacedName: string,
@@ -313,9 +324,110 @@ interface PlannedModelInput {
 
 type EventSink = (event: RunEvent) => void
 
+function providerStartFingerprint(provider: ProviderProfile): string {
+  const material =
+    provider.kind === 'cli'
+      ? [
+          provider.id,
+          provider.name,
+          provider.kind,
+          provider.model,
+          provider.command,
+          provider.args,
+          provider.promptMode,
+          provider.outputMode,
+          provider.cliAdapter ?? null,
+          provider.environmentVariables ?? [],
+          provider.environmentFingerprint ?? null,
+          provider.environmentRevision ?? null,
+          provider.trustConfirmed,
+          provider.verification ?? null,
+          provider.createdAt,
+          provider.updatedAt
+        ]
+      : [
+          provider.id,
+          provider.name,
+          provider.kind,
+          provider.model,
+          provider.baseUrl,
+          provider.hasApiKey,
+          provider.credentialRevision ?? null,
+          provider.supportsTools,
+          provider.contextWindowTokens ?? null,
+          provider.maxOutputTokens ?? null,
+          provider.reasoningEffort ?? null,
+          provider.verification ?? null,
+          provider.createdAt,
+          provider.updatedAt
+        ]
+  return createHash('sha256')
+    .update(JSON.stringify(material), 'utf8')
+    .digest('hex')
+}
+
+function taskStartRevision(task: Task): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        task.id,
+        task.updatedAt,
+        task.providerId,
+        task.workspacePath ?? null,
+        task.mode,
+        task.includeImportedHistory === true,
+        task.archivedAt ?? null
+      ]),
+      'utf8'
+    )
+    .digest('hex')
+}
+
+function providerCredentialBoundary(provider: ProviderProfile): string {
+  return provider.kind === 'cli'
+    ? `${cliEnvironmentSecretReference(
+        provider.id,
+        provider.environmentRevision
+      )}:${
+        provider.environmentFingerprint ?? 'no-environment'
+      }`
+    : `${provider.hasApiKey ? 'key' : 'no-key'}:${providerCredentialReferenceFor(
+        provider
+      )}`
+}
+
+function providerStartBinding(
+  task: Task,
+  provider: ProviderProfile
+): ProviderStartBinding {
+  return {
+    taskId: task.id,
+    taskRevision: taskStartRevision(task),
+    providerId: provider.id,
+    providerRevision: provider.updatedAt,
+    providerFingerprint: providerStartFingerprint(provider),
+    credentialBoundary: providerCredentialBoundary(provider)
+  }
+}
+
+function sameProviderStartBinding(
+  left: Readonly<ProviderStartBinding>,
+  right: Readonly<ProviderStartBinding>
+): boolean {
+  return (
+    left.taskId === right.taskId &&
+    left.taskRevision === right.taskRevision &&
+    left.providerId === right.providerId &&
+    left.providerRevision === right.providerRevision &&
+    left.providerFingerprint === right.providerFingerprint &&
+    left.credentialBoundary === right.credentialBoundary
+  )
+}
+
 export class RunManager {
   private readonly activeRuns = new Map<string, ActiveRun>()
   private readonly startingTaskIds = new Set<string>()
+  private stateRestoreReserved = false
   private readonly agentRuntimeFactory: AgentRuntimeFactory
 
   constructor(
@@ -329,7 +441,9 @@ export class RunManager {
     private readonly authorizeWorkspace: WorkspaceAuthorizer = async () => {
       throw new Error('Workspace access is unavailable')
     },
-    agentRuntimeFactory?: AgentRuntimeFactory
+    agentRuntimeFactory?: AgentRuntimeFactory,
+    private readonly authorizeProviderStart: ProviderStartAuthorizer =
+      async () => undefined
   ) {
     this.agentRuntimeFactory =
       agentRuntimeFactory ??
@@ -337,6 +451,11 @@ export class RunManager {
   }
 
   assertTaskCanStart(taskId: string): void {
+    if (this.stateRestoreReserved) {
+      throw new Error(
+        'Wait for local state restore to finish before starting a run'
+      )
+    }
     const task = this.store.getTask(taskId)
     if (task.archivedAt) {
       throw new Error('Unarchive this task before starting a run')
@@ -361,27 +480,60 @@ export class RunManager {
   async start(taskId: string, prompt: string): Promise<string> {
     this.assertTaskCanStart(taskId)
     this.startingTaskIds.add(taskId)
+    let providerReservation: ProviderStartReservation | undefined
     try {
-      return await this.startReserved(taskId, prompt)
+      const task = this.store.getTask(taskId)
+      const provider = this.store.getProvider(task.providerId)
+      assertProviderCanStartRun(provider)
+      const binding = providerStartBinding(task, provider)
+      providerReservation =
+        this.providerOperations?.reserveStart(binding)
+      await this.authorizeProviderStart(structuredClone(provider))
+      return await this.startReserved(
+        task,
+        provider,
+        binding,
+        providerReservation,
+        prompt
+      )
     } finally {
+      if (providerReservation) {
+        this.providerOperations?.releaseStart(providerReservation)
+      }
       this.startingTaskIds.delete(taskId)
     }
   }
 
-  private async startReserved(taskId: string, prompt: string): Promise<string> {
-    const task = this.store.getTask(taskId)
-    const provider = this.store.getProvider(task.providerId)
-    const workspacePath = task.workspacePath
-      ? await this.authorizeWorkspace(task.workspacePath)
+  private async startReserved(
+    initialTask: Task,
+    initialProvider: ProviderProfile,
+    binding: Readonly<ProviderStartBinding>,
+    providerReservation: ProviderStartReservation | undefined,
+    prompt: string
+  ): Promise<string> {
+    const workspacePath = initialTask.workspacePath
+      ? await this.authorizeWorkspace(initialTask.workspacePath)
       : undefined
+    const { task, provider } = this.requireUnchangedProviderStart(
+      binding,
+      providerReservation
+    )
     if (provider.kind === 'cli' && !workspacePath) {
       throw new Error('Choose a workspace before running a CLI agent')
+    }
+    if (
+      providerStartFingerprint(initialProvider) !==
+      providerStartFingerprint(provider)
+    ) {
+      throw new Error(
+        'The task or provider changed while the run was starting'
+      )
     }
 
     const runId = createId('run')
     const run: ActiveRun = {
       id: runId,
-      taskId,
+      taskId: task.id,
       providerId: provider.id,
       provider: {
         id: provider.id,
@@ -407,7 +559,16 @@ export class RunManager {
       createdAt: nowIso()
     }
     try {
-      await this.store.mutateTask(taskId, (mutable) => {
+      await this.store.mutateTask(task.id, (mutable) => {
+        if (
+          mutable.id !== binding.taskId ||
+          taskStartRevision(mutable) !== binding.taskRevision ||
+          mutable.providerId !== binding.providerId
+        ) {
+          throw new Error(
+            'The task or provider changed while the run was starting'
+          )
+        }
         if (mutable.archivedAt) {
           throw new Error('Unarchive this task before starting a run')
         }
@@ -424,8 +585,13 @@ export class RunManager {
       if (this.activeRuns.get(runId) === run) this.activeRuns.delete(runId)
       throw error
     }
-    this.emit({ type: 'run-started', taskId, runId })
-    this.emit({ type: 'item-added', taskId, runId, item: userMessage })
+    this.emit({ type: 'run-started', taskId: task.id, runId })
+    this.emit({
+      type: 'item-added',
+      taskId: task.id,
+      runId,
+      item: userMessage
+    })
 
     run.completion = Promise.resolve()
       .then(() => this.execute(run, provider))
@@ -442,6 +608,44 @@ export class RunManager {
       })
     void run.completion
     return runId
+  }
+
+  private requireUnchangedProviderStart(
+    expected: Readonly<ProviderStartBinding>,
+    reservation: ProviderStartReservation | undefined
+  ): { task: Task; provider: ProviderProfile } {
+    const task = this.store.getTask(expected.taskId)
+    if (task.archivedAt) {
+      throw new Error('Unarchive this task before starting a run')
+    }
+    if (taskHasStartedManagedExecution(task)) {
+      throw new Error(
+        'This task has a managed action with an unresolved outcome. Restart Ground to recover it before starting another run.'
+      )
+    }
+    if (task.providerId !== expected.providerId) {
+      throw new Error(
+        'The task or provider changed while the run was starting'
+      )
+    }
+    const provider = this.store.getProvider(expected.providerId)
+    assertProviderCanStartRun(provider)
+    const current = providerStartBinding(task, provider)
+    if (!sameProviderStartBinding(expected, current)) {
+      throw new Error(
+        'The task or provider changed while the run was starting'
+      )
+    }
+    if (reservation) {
+      this.providerOperations?.assertStartReservation(
+        reservation,
+        current
+      )
+    }
+    return {
+      task: structuredClone(task),
+      provider: structuredClone(provider)
+    }
   }
 
   async stop(runId: string): Promise<void> {
@@ -463,7 +667,31 @@ export class RunManager {
   }
 
   isTaskActive(taskId: string): boolean {
-    return [...this.activeRuns.values()].some((run) => run.taskId === taskId)
+    return (
+      this.startingTaskIds.has(taskId) ||
+      [...this.activeRuns.values()].some((run) => run.taskId === taskId)
+    )
+  }
+
+  hasActiveRuns(): boolean {
+    return this.activeRuns.size > 0 || this.startingTaskIds.size > 0
+  }
+
+  async withStateRestoreReservation<Result>(
+    restore: () => Promise<Result>
+  ): Promise<Result> {
+    if (this.stateRestoreReserved) {
+      throw new Error('A local state restore is already in progress')
+    }
+    if (this.hasActiveRuns()) {
+      throw new Error('Stop active runs before restoring local state')
+    }
+    this.stateRestoreReserved = true
+    try {
+      return await restore()
+    } finally {
+      this.stateRestoreReserved = false
+    }
   }
 
   isProviderActive(providerId: string): boolean {
@@ -615,6 +843,7 @@ export class RunManager {
         }
       }
     } catch (error) {
+      if (error instanceof StatePersistenceError) throw error
       if (run.controller.signal.aborted || isAbortError(error)) {
         await finalizeStopped()
       } else {
@@ -648,6 +877,9 @@ export class RunManager {
   }
 
   private async runModelProvider(run: ActiveRun, provider: ApiProvider): Promise<void> {
+    run.controller.signal.throwIfAborted()
+    await this.mcp?.ready?.()
+    run.controller.signal.throwIfAborted()
     const task = {
       ...this.store.getTask(run.taskId),
       providerId: run.providerId,
@@ -1511,6 +1743,8 @@ export class RunManager {
       savedSession.sessionCompatibilityId ===
         runtime.sessionCompatibilityId &&
       savedSession.providerRevision === provider.updatedAt &&
+      savedSession.providerFingerprint ===
+        providerConfigurationFingerprint(provider) &&
       savedSession.workspacePath === workspacePath &&
       savedSession.mode === task.mode &&
       savedSession.sessionId.length <= 200
@@ -1751,7 +1985,8 @@ export class RunManager {
             secrets: {
               resolve: async (reference) => {
                 const expectedReference = cliEnvironmentSecretReference(
-                  provider.id
+                  provider.id,
+                  provider.environmentRevision
                 )
                 if (reference !== expectedReference) {
                   throw new Error(
@@ -1862,6 +2097,8 @@ export class RunManager {
           sessionCompatibilityId,
           sessionId: persistedSessionId,
           providerRevision: provider.updatedAt,
+          providerFingerprint:
+            providerConfigurationFingerprint(provider),
           workspacePath,
           mode: task.mode,
           updatedAt: nowIso()
@@ -1888,6 +2125,8 @@ export class RunManager {
       mutable.modelSessions[provider.id] = {
         adapterId,
         providerRevision: provider.updatedAt,
+        providerFingerprint:
+          providerConfigurationFingerprint(provider),
         model: provider.model,
         workspacePath: run.workspacePath,
         mode: run.mode,
@@ -2237,7 +2476,29 @@ export function resolveBuiltinAgentRuntimeBinding(
     BUILT_IN_CLI_RUNTIME_BINDINGS[provider.cliAdapter ?? 'generic']
   return {
     adapterId: binding.adapterId,
-    config: structuredClone(provider),
+    config: structuredClone({
+      id: provider.id,
+      name: provider.name,
+      kind: provider.kind,
+      model: provider.model,
+      command: provider.command,
+      args: provider.args,
+      promptMode: provider.promptMode,
+      outputMode: provider.outputMode,
+      ...(provider.cliAdapter ? { cliAdapter: provider.cliAdapter } : {}),
+      ...(provider.environmentVariables
+        ? { environmentVariables: provider.environmentVariables }
+        : {}),
+      ...(provider.environmentFingerprint
+        ? { environmentFingerprint: provider.environmentFingerprint }
+        : {}),
+      ...(provider.environmentRevision
+        ? { environmentRevision: provider.environmentRevision }
+        : {}),
+      trustConfirmed: provider.trustConfirmed,
+      createdAt: provider.createdAt,
+      updatedAt: provider.updatedAt
+    } satisfies CliProvider),
     ...('sessionCompatibilityId' in binding
       ? {
           sessionCompatibilityId: binding.sessionCompatibilityId
@@ -2278,8 +2539,11 @@ function matchingModelSession(
     !saved ||
     saved.adapterId !== adapterId ||
     saved.providerRevision !== provider.updatedAt ||
+    saved.providerFingerprint !==
+      providerConfigurationFingerprint(provider) ||
     saved.model !== provider.model ||
-    saved.workspacePath !== task.workspacePath ||
+    (saved.workspacePath !== task.workspacePath &&
+      !(saved.origin === 'imported' && saved.workspacePath === undefined)) ||
     saved.mode !== task.mode ||
     !modelSessionImportedHistoryMatches(saved, task) ||
     !Array.isArray(saved.conversation)

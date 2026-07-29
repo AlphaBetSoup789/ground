@@ -10,16 +10,36 @@ import {
   normalizeCliEnvironmentVariableNames
 } from './cli-environment'
 import { BUILT_IN_CLI_RUNTIME_BINDINGS } from './cli-runtime-bindings'
+import {
+  migrateStateDocument,
+  type StateMigration
+} from './state-migrations'
 
 export interface PersistedStateData {
-  version: 1
+  version: 2
   providers: ProviderProfile[]
   mcpServers: McpServerProfile[]
   tasks: Task[]
   settings: AppSettings
+  /**
+   * Main-only write-ahead cleanup intents for the separate encrypted vault.
+   * These exact references are never projected to the renderer.
+   */
+  pendingSecretDeletes: string[]
 }
 
 export const MAX_PERSISTED_TASK_ITEMS = 100_000
+export const CURRENT_PERSISTED_STATE_VERSION = 2
+
+const STATE_MIGRATIONS = new Map<number, StateMigration>([
+  [
+    1,
+    (document) => ({
+      ...document,
+      version: 2
+    })
+  ]
+])
 
 const timestamp = z.string().min(1).max(100)
 const archivedTimestamp = z.iso.datetime({ offset: true })
@@ -28,11 +48,22 @@ const identifier = z.string().min(1).max(200)
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/u)
 const portableJson = z.json()
 const portableJsonObject = z.record(z.string(), portableJson)
+const providerVerificationSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('unverified') }).strict(),
+  z
+    .object({
+      status: z.enum(['passed', 'failed']),
+      scope: z.enum(['connection', 'configuration']),
+      checkedAt: z.iso.datetime({ offset: true })
+    })
+    .strict()
+])
 
 const baseProvider = {
   id: identifier,
   name: z.string().min(1).max(80),
   model: z.string().max(200),
+  verification: providerVerificationSchema.optional(),
   createdAt: timestamp,
   updatedAt: timestamp
 }
@@ -41,6 +72,7 @@ const modelProviderFields = {
   ...baseProvider,
   baseUrl: z.string().url().max(2_000),
   hasApiKey: z.boolean(),
+  credentialRevision: identifier.optional(),
   supportsTools: z.boolean(),
   contextWindowTokens: z.number().int().min(4_096).max(2_000_000).optional(),
   maxOutputTokens: z.number().int().min(128).max(262_144).optional(),
@@ -55,7 +87,9 @@ const cliProviderSchema = z
     args: z.array(z.string().max(8_192)).max(64),
     promptMode: z.enum(['stdin', 'argument']),
     outputMode: z.enum(['plain', 'ndjson']),
-    cliAdapter: z.enum(['generic', 'codex', 'claude', 'gemini']).optional(),
+    cliAdapter: z
+      .enum(['generic', 'codex', 'claude', 'gemini', 'antigravity'])
+      .optional(),
     environmentVariables: z
       .array(
         z
@@ -93,6 +127,10 @@ const cliProviderSchema = z
       .string()
       .regex(/^[a-f0-9]{64}$/u)
       .optional(),
+    environmentRevision: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/u)
+      .optional(),
     trustConfirmed: z.boolean()
   })
   .superRefine((value, context) => {
@@ -106,6 +144,14 @@ const cliProviderSchema = z
         path: hasVariables
           ? ['environmentFingerprint']
           : ['environmentVariables']
+      })
+    }
+    if (!hasVariables && value.environmentRevision !== undefined) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'CLI environment revision requires environment variables',
+        path: ['environmentRevision']
       })
     }
   })
@@ -389,6 +435,7 @@ const storedConversationItemSchema = z.discriminatedUnion('kind', [
 const runtimeSessionFields = {
   sessionId: z.string().min(1).max(10_000),
   providerRevision: timestamp,
+  providerFingerprint: sha256.optional(),
   workspacePath: z.string().min(1).max(8_192),
   mode: z.enum(['ask', 'agent']),
   updatedAt: timestamp
@@ -402,7 +449,7 @@ const runtimeSessionSchema = z.union([
   }),
   z
     .object({
-      adapter: z.enum(['codex', 'claude', 'gemini']),
+      adapter: z.enum(['codex', 'claude', 'gemini', 'antigravity']),
       ...runtimeSessionFields
     })
     .transform(({ adapter, ...session }) => {
@@ -428,6 +475,7 @@ const runtimeSessionsSchema = z
 const modelRuntimeSessionSchema = z.object({
   adapterId: z.string().min(1).max(200),
   providerRevision: timestamp,
+  providerFingerprint: sha256.optional(),
   model: z.string().max(200),
   workspacePath: z.string().min(1).max(8_192).optional(),
   mode: z.enum(['ask', 'agent']),
@@ -502,7 +550,7 @@ const taskSchema = z
 
 const persistedStateSchema = z
   .object({
-    version: z.literal(1),
+    version: z.literal(CURRENT_PERSISTED_STATE_VERSION),
     providers: z.array(providerSchema).min(1).max(1_000),
     mcpServers: z.array(mcpServerSchema).max(100).default([]),
     tasks: z.array(taskSchema).max(10_000),
@@ -510,9 +558,30 @@ const persistedStateSchema = z
       selectedTaskId: identifier.optional(),
       defaultProviderId: identifier.optional(),
       sidebarCollapsed: z.boolean()
-    })
+    }),
+    pendingSecretDeletes: z
+      .array(identifier)
+      .max(5_000)
+      .refine(
+        (references) => new Set(references).size === references.length,
+        'Pending secret cleanup references must be unique'
+      )
+      .default([])
   })
   .superRefine((state, context) => {
+    for (const [providerIndex, provider] of state.providers.entries()) {
+      if (
+        provider.kind !== 'cli' &&
+        !provider.hasApiKey &&
+        provider.credentialRevision !== undefined
+      ) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Credential revision requires a saved API key',
+          path: ['providers', providerIndex, 'credentialRevision']
+        })
+      }
+    }
     const operationIds = new Set<string>()
     const claimsByCall = new Map<string, string>()
     for (const [taskIndex, task] of state.tasks.entries()) {
@@ -560,7 +629,11 @@ const persistedStateSchema = z
   })
 
 export function parsePersistedState(value: unknown): PersistedStateData {
-  const state = persistedStateSchema.parse(value)
+  const migrated = migrateStateDocument(value, {
+    currentVersion: CURRENT_PERSISTED_STATE_VERSION,
+    migrations: STATE_MIGRATIONS
+  })
+  const state = persistedStateSchema.parse(migrated)
   const selectedTask = state.tasks.find(
     (task) => task.id === state.settings.selectedTaskId
   )

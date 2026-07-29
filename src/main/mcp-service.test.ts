@@ -749,6 +749,32 @@ describe('MCP service execution lifecycle', () => {
     await service.close()
   })
 
+  it('runs a manager-owned authorization guard at the final dispatch boundary', async () => {
+    const { client, service } = harness()
+    const name = await connectAndTrust(service)
+    const input = { path: 'README.md' }
+    const assertDispatchAuthorized = vi.fn(() => {
+      throw new McpServiceError(
+        'tool-drift',
+        'The persisted MCP profile changed before dispatch'
+      )
+    })
+
+    await expect(
+      service.executeTool(
+        name,
+        input,
+        approvedCallOptions(service, name, input),
+        assertDispatchAuthorized
+      )
+    ).rejects.toMatchObject({
+      code: 'tool-drift'
+    } satisfies Partial<McpServiceError>)
+    expect(assertDispatchAuthorized).toHaveBeenCalledOnce()
+    expect(client.calls).toEqual([])
+    await service.close()
+  })
+
   it('rejects dispatch evidence for a different server, tool, fingerprint, or arguments', async () => {
     const { client, service } = harness()
     const name = await connectAndTrust(service)

@@ -62,7 +62,9 @@ Two no-code connection paths cover most models:
 
 The generic CLI path does not gain structured activity, usage, native session
 resume, or Ground-managed tools automatically. It runs as an external runtime and
-owns its own permissions.
+owns its own permissions. See the public
+[Generic CLI bridge](GENERIC-CLI.md) and its
+[dependency-free example](../examples/generic-cli/README.md).
 
 Ground’s built-in workspace tools and approved MCP tools belong to the managed
 model path. Any registered `ModelAdapter` receives the same canonical definitions;
@@ -72,9 +74,10 @@ OpenAI-compatible endpoint must genuinely support the advertised tool-call shape
 and support remains model-dependent. External CLIs do not receive Ground-hosted
 MCP tools—their own runtime configuration owns any MCP integrations.
 
-Codex, Claude, Gemini, and Generic CLI profiles resolve to the built-in runtime IDs
-`openai.codex-cli`, `anthropic.claude-code`, `google.gemini-cli`, and
-`ground.cli.generic`. Their adapters delegate to the bounded launcher and parsers
+Codex, Claude, Gemini, Antigravity, and Generic CLI profiles resolve to the
+built-in runtime IDs `openai.codex-cli`, `anthropic.claude-code`,
+`google.gemini-cli`, `google.antigravity-cli`, and `ground.cli.generic`. Their
+adapters delegate to the bounded launcher and parsers
 in `src/main/providers/cli.ts`, but all emitted objects cross the canonical runtime
 reducer before persistence or presentation. Native session resume binds both the
 adapter ID and a separate compatibility ID; Generic CLI has no compatibility ID
@@ -156,8 +159,18 @@ reuse the existing endpoint/model/credential profile envelope in a downstream
 build. A new first-class provider kind, provider-specific fields, capability UI,
 or discovery behavior still requires reviewed changes to the shared profile
 schema, validation, renderer form, `ProviderService` connection test, portability
-rules, and desktop composition. Reusing an existing kind also inherits that kind’s
-model-discovery and request-policy defaults.
+rules, secret-reference/journal migration rules, and desktop composition. Reusing
+an existing kind also inherits that kind’s model-discovery and request-policy
+defaults.
+
+It also inherits the saved-provider readiness lifecycle. Every save resets
+verification to unverified; Test can persist a result only for the exact still-saved
+revision, and run startup requires a pass. First-class provider kinds perform their
+bounded discovery probe. The OpenAI-compatible kind first tries `/models` and can
+fall back to one non-streaming four-token `/chat/completions` generation when
+listing cannot prove compatibility. A new first-class kind must define a truthful
+preflight in `ProviderService` without describing that preflight as live
+certification.
 
 ## Model adapters
 
@@ -247,8 +260,9 @@ interface ProviderState {
 }
 ```
 
-An adapter may replay opaque state only when its adapter, provider revision, model,
-workspace, and task mode still match. When a user switches providers, Ground sends
+An adapter may replay opaque state only when its adapter, complete
+provider-configuration fingerprint, model, workspace, and task mode still match.
+When a user switches providers, Ground sends
 the normalized conversation—including reconstructed tool-call/tool-result pairs—
 and omits foreign opaque state. Assistant messages and activities retain the
 provider/model attribution captured when their run began. Provider state is an
@@ -256,11 +270,14 @@ acceleration layer, never the sole readable history.
 
 The version 1 task-bundle format is a content-portability boundary, not adapter
 state serialization. It omits provider-owned state, credentials, runtime sessions,
-workspace grants, pending approvals, and original IDs. An exact configured API
-provider may use the imported portable canonical conversation only after the user
-explicitly enables imported-history context and starts a later run. Adapter
-continuation compatibility is bound to that choice; imported content remains
-untrusted.
+workspace grants, pending approvals, and original IDs. An API hint matches a
+configured profile only on its exported public descriptor: type/kind, name, model,
+and tool-support flag. A CLI hint matches type/kind, name, model, and adapter.
+Provider IDs, endpoints, credentials, and secret revisions are neither exported nor
+matched. Only a matching API profile may use the imported portable canonical
+conversation, and only after the user explicitly enables imported-history context
+and starts a later run. Adapter continuation compatibility is bound to that choice;
+imported content remains untrusted.
 
 ## Configuration and secrets
 
@@ -270,8 +287,7 @@ untrusted.
 - Resolve every credential before yielding the first event. Ground rejects late
   resolution so one immutable redaction boundary covers the complete stream.
 - Bind saved credentials to the provider ID, protocol, and canonical endpoint
-  through an opaque reference. Write a new-boundary secret before profile
-  persistence and garbage-collect the old reference only afterward.
+  through an opaque versioned reference.
 - Reject non-loopback plaintext endpoints, redirects, embedded credentials, query
   strings, and fragments.
 - Redact authorization headers, prompt content, tool results, and provider state
@@ -279,6 +295,26 @@ untrusted.
 - Treat successful response content as untrusted reflection. Never place a
   credential in text, notices, tool calls, provider state, checkpoints, or IDs
   even though Ground applies an independent projection boundary.
+
+The public adapter contract exposes indirect secret reads, not vault mutation.
+Any downstream desktop change that creates, replaces, clears, deletes, or migrates
+a secret reference must use the main-process state-coupled cleanup protocol:
+
+1. journal a unique replacement reference as provisional cleanup before staging
+   ciphertext;
+2. publish the provider pointer and replace that provisional intent with exact
+   obsolete references in one persisted-state transaction;
+3. delete only those journaled references after checking the selected provider
+   state's metadata-derived live set, then acknowledge successful deletion; and
+4. abort startup, or seal and relaunch an already-running app, on ambiguous state
+   or vault publication instead of attempting an inverse cross-file mutation.
+
+Clear and provider deletion must publish their state change and cleanup intents
+together. A migration must define exact current, legacy, and obsolete reference
+rules, preserve pre-versioned fallbacks only where runtime resolution still permits
+them, and leave unknown unjournaled ciphertext untouched. Adapter code and migration
+hooks must not write/delete `SecretVault` directly, enumerate-delete the complement
+of current providers, or infer disposability from credential decryption failure.
 
 ## Contract tests
 
@@ -307,7 +343,12 @@ and should additionally cover:
 - explicit runtime-owned permission disclosure.
 
 Tests must use local fixtures or mocked transports. CI must never require a real
-provider key or paid model request.
+provider key or paid model request. Ground additionally has a credential-free
+loopback SSE integration test that performs an actual
+`POST /v1/chat/completions` through the production OpenAI-compatible AI SDK
+adapter, including system/user messages, tool definitions, and streamed text. It
+exercises only that deterministic local wire path—not an authenticated cloud,
+Ollama, LM Studio, or CLI deployment.
 
 ## Adapter review checklist
 
@@ -315,6 +356,7 @@ provider key or paid model request.
 - [ ] Runtime validation for all configuration
 - [ ] Conservative capability report
 - [ ] Indirect secret resolution
+- [ ] No direct or unjournaled vault mutation; explicit current/legacy cleanup rules
 - [ ] Direct endpoint/executable disclosure
 - [ ] Bounded input, output, and buffering
 - [ ] Abort and timeout behavior

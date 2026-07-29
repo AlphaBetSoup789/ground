@@ -184,7 +184,8 @@ summary:focus-visible {
   color: var(--text);
 }
 
-.recovery-banner-state-reset {
+.recovery-banner-state-reset,
+.recovery-banner-credential-warning {
   border-color: rgba(239, 141, 132, 0.32);
   background: rgba(49, 31, 27, 0.97);
 }
@@ -760,6 +761,18 @@ kbd {
   grid-template-rows: 58px auto minmax(0, 1fr) auto;
 }
 
+.task-view.provider-needs-test {
+  grid-template-rows: 58px auto minmax(0, 1fr) auto;
+}
+
+.task-view.provider-needs-test.workspace-panel-open {
+  grid-template-rows: 58px auto minmax(0, 1fr) auto minmax(240px, 34vh);
+}
+
+.task-view.provider-needs-test.archived-task-view {
+  grid-template-rows: 58px auto auto minmax(0, 1fr) auto;
+}
+
 .task-header {
   position: relative;
   z-index: 4;
@@ -1018,6 +1031,58 @@ kbd {
 .archived-task-banner > button:hover {
   color: var(--text);
   background: rgba(143, 185, 247, 0.13);
+}
+
+.provider-readiness-banner {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 18px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-soft);
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.provider-readiness-banner.error {
+  border-bottom-color: rgba(239, 141, 132, 0.18);
+  background: rgba(239, 141, 132, 0.035);
+}
+
+.provider-readiness-banner > div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.provider-readiness-banner strong {
+  flex: 0 0 auto;
+  font-size: 10px;
+}
+
+.provider-readiness-banner span {
+  overflow: hidden;
+  color: #898d82;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-readiness-banner button {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--text-soft);
+  font-size: 9px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.provider-readiness-banner button:hover {
+  border-color: rgba(216, 255, 125, 0.24);
+  color: var(--text);
 }
 
 /* Timeline */
@@ -1684,6 +1749,18 @@ kbd {
   font-size: 10px;
 }
 
+.first-run-secondary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px 18px;
+  margin-top: 16px;
+}
+
+.first-run-secondary-actions .setup-link {
+  margin-top: 0;
+}
+
 /* Composer */
 
 .composer-wrap {
@@ -1897,6 +1974,7 @@ kbd {
 .terminal-toolbar-heading,
 .terminal-toolbar-actions,
 .git-panel-heading,
+.git-panel-header-actions,
 .git-repository-summary,
 .git-repository-branch,
 .git-repository-facts,
@@ -2005,7 +2083,8 @@ kbd {
 }
 
 .terminal-action,
-.git-panel-refresh {
+.git-panel-refresh,
+.git-panel-executable {
   display: flex;
   height: 26px;
   align-items: center;
@@ -2022,7 +2101,8 @@ kbd {
 }
 
 .terminal-action:hover:not(:disabled),
-.git-panel-refresh:hover:not(:disabled) {
+.git-panel-refresh:hover:not(:disabled),
+.git-panel-executable:hover:not(:disabled) {
   color: var(--text);
   background: rgba(255, 255, 255, 0.055);
 }
@@ -2103,6 +2183,18 @@ kbd {
 
 .git-panel-header {
   padding: 0 11px 0 14px;
+}
+
+.git-panel-header-actions {
+  gap: 3px;
+}
+
+.git-panel-executable {
+  padding: 0 7px;
+}
+
+.git-panel-executable span {
+  font-size: 8px;
 }
 
 .git-panel-heading {
@@ -2294,6 +2386,33 @@ kbd {
   display: none;
 }
 
+.git-recovery-required {
+  display: flex;
+  min-height: 50px;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(239, 141, 132, 0.22);
+  color: #efb0aa;
+  background: rgba(239, 141, 132, 0.075);
+}
+
+.git-recovery-required > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.git-recovery-required strong {
+  font-size: 11px;
+}
+
+.git-recovery-required p {
+  margin-top: 2px;
+  color: #c99b96;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .git-mutation-status {
   display: flex;
   min-height: 28px;
@@ -2310,14 +2429,231 @@ kbd {
   display: grid;
   min-height: 100%;
   grid-template-columns: minmax(180px, 27%) minmax(0, 1fr);
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "recovery recovery"
+    "actions diff"
+    "files diff"
+    "files commit";
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   align-items: start;
+}
+
+.git-recovery-actions {
+  display: grid;
+  min-width: 0;
+  grid-area: recovery;
+  grid-template-columns: minmax(240px, 1fr) minmax(280px, 1fr);
+  gap: 9px 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(216, 255, 125, 0.018);
+}
+
+.git-recovery-heading {
+  display: flex;
+  min-width: 0;
+  grid-column: 1 / -1;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--accent);
+}
+
+.git-recovery-heading > svg {
+  flex: 0 0 auto;
+}
+
+.git-recovery-heading h3 {
+  color: #d2d5ca;
+  font-size: 11px;
+}
+
+.git-recovery-heading p {
+  margin-top: 2px;
+  color: #777b70;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.git-restore-picker {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px 9px;
+  padding: 0;
+  border: 0;
+}
+
+.git-restore-picker legend,
+.git-recovery-history h4 {
+  padding: 0;
+  margin: 0 0 4px;
+  color: #92968a;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.git-restore-picker legend {
+  grid-column: 1 / -1;
+}
+
+.git-restore-picker ul,
+.git-recovery-history ul {
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  overflow: auto;
+  list-style: none;
+  scrollbar-color: #373a31 transparent;
+  scrollbar-width: thin;
+}
+
+.git-restore-picker ul {
+  max-height: 92px;
+}
+
+.git-restore-picker li {
+  min-width: 0;
+}
+
+.git-restore-picker label {
+  display: flex;
+  min-width: 0;
+  min-height: 26px;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 5px;
+  border-radius: 4px;
+  color: #aeb2a6;
+  font-size: 11px;
+}
+
+.git-restore-picker label:hover {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.git-restore-picker input {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  accent-color: var(--accent);
+}
+
+.git-restore-picker code,
+.git-recovery-paths code {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-restore-picker button,
+.git-recovery-record button {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 1px solid rgba(216, 255, 125, 0.18);
+  border-radius: 6px;
+  color: #cbdcaf;
+  font-size: 11px;
+  background: rgba(216, 255, 125, 0.045);
+}
+
+.git-restore-picker button {
+  align-self: start;
+}
+
+.git-restore-picker button:hover:not(:disabled),
+.git-recovery-record button:hover:not(:disabled) {
+  border-color: rgba(216, 255, 125, 0.3);
+  color: #e1e8d4;
+  background: rgba(216, 255, 125, 0.075);
+}
+
+.git-recovery-history {
+  min-width: 0;
+}
+
+.git-recovery-history ul {
+  max-height: 112px;
+}
+
+.git-recovery-record {
+  display: flex;
+  min-width: 0;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.git-recovery-record + .git-recovery-record {
+  margin-top: 3px;
+}
+
+.git-recovery-record.recovery-required {
+  border: 1px solid rgba(239, 141, 132, 0.17);
+  background: rgba(239, 141, 132, 0.045);
+}
+
+.git-recovery-record > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.git-recovery-record strong {
+  color: #bdc1b5;
+  font-size: 11px;
+}
+
+.git-recovery-record.recovery-required strong {
+  color: #e1a29c;
+}
+
+.git-recovery-record span {
+  color: #71756b;
+  font-size: 10px;
+}
+
+.git-recovery-paths {
+  display: flex;
+  min-width: 0;
+  gap: 5px;
+}
+
+.git-recovery-paths code {
+  max-width: 150px;
+  color: #909489;
+}
+
+.git-recovery-paths em {
+  flex: 0 0 auto;
+  color: #696d63;
+  font-style: normal;
+}
+
+.git-recovery-record button {
+  flex: 0 0 auto;
+}
+
+.git-recovery-truncated {
+  margin-top: 4px !important;
+  color: #71756b;
+  font-size: 10px;
 }
 
 .git-index-actions {
   display: grid;
-  grid-column: 1;
-  grid-row: 1;
+  grid-area: actions;
   grid-template-columns: 1fr 1fr;
   gap: 5px;
   padding: 8px 10px 0;
@@ -2356,8 +2692,8 @@ kbd {
 }
 
 .git-file-groups {
-  grid-column: 1;
-  grid-row: 2 / span 2;
+  min-height: 0;
+  grid-area: files;
   padding: 10px;
   overflow: auto;
   border-right: 1px solid var(--border);
@@ -2435,8 +2771,8 @@ kbd {
 
 .git-diff-stack {
   min-width: 0;
-  grid-column: 2;
-  grid-row: 1 / span 2;
+  min-height: 0;
+  grid-area: diff;
   padding: 10px;
   overflow: auto;
 }
@@ -2499,8 +2835,7 @@ kbd {
 
 .git-commit-form {
   display: grid;
-  grid-column: 2;
-  grid-row: 3;
+  grid-area: commit;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 9px 12px;
   padding: 12px;
@@ -2908,6 +3243,164 @@ kbd {
   animation: modal-in 180ms ease;
 }
 
+.command-palette-backdrop {
+  align-items: start;
+  padding-top: min(16vh, 150px);
+}
+
+.command-palette {
+  display: grid;
+  width: min(620px, calc(100vw - 28px));
+  max-height: min(610px, calc(100vh - 56px));
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid rgba(241, 243, 228, 0.16);
+  border-radius: 14px;
+  background: #1b1c17;
+  box-shadow:
+    0 34px 100px rgba(0, 0, 0, 0.58),
+    inset 0 1px rgba(255, 255, 255, 0.035);
+  animation: modal-in 150ms ease;
+}
+
+.command-palette-search {
+  display: grid;
+  min-height: 60px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.command-palette-search > svg {
+  color: var(--accent);
+}
+
+.command-palette-search input {
+  width: 100%;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  color: var(--text);
+  font-size: 15px;
+  background: transparent;
+}
+
+.command-palette-search input::placeholder {
+  color: #777b70;
+}
+
+.command-palette-search input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.command-palette kbd {
+  padding: 2px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  color: #aeb2a5;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.035);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.command-palette-actions {
+  min-height: 74px;
+  overflow: auto;
+  padding: 7px;
+  scrollbar-color: #373a31 transparent;
+  scrollbar-width: thin;
+}
+
+.command-palette-actions > button {
+  display: grid;
+  width: 100%;
+  min-height: 54px;
+  grid-template-columns: 31px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 9px;
+  color: var(--text-soft);
+  text-align: left;
+  background: transparent;
+}
+
+.command-palette-actions > button.selected {
+  color: var(--text);
+  background: rgba(216, 255, 125, 0.075);
+}
+
+.command-palette-icon {
+  display: grid;
+  width: 29px;
+  height: 29px;
+  place-items: center;
+  border: 1px solid rgba(216, 255, 125, 0.1);
+  border-radius: 8px;
+  color: var(--accent);
+  background: rgba(216, 255, 125, 0.055);
+}
+
+.command-palette-actions > button > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.command-palette-actions strong {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.command-palette-actions small {
+  overflow: hidden;
+  color: #989c91;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-palette-empty {
+  display: grid;
+  min-height: 92px;
+  margin: 0;
+  place-items: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.command-palette-footer {
+  display: flex;
+  min-height: 37px;
+  align-items: center;
+  gap: 15px;
+  padding: 0 13px;
+  border-top: 1px solid var(--border);
+  color: #85897e;
+  font-size: 10px;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.command-palette-footer span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.command-palette-footer span:last-child {
+  margin-left: auto;
+}
+
+.command-palette-footer kbd {
+  padding: 1px 4px;
+  font-size: 9px;
+}
+
 .settings-nav {
   display: flex;
   min-height: 0;
@@ -3113,6 +3606,22 @@ kbd {
     #191a15;
 }
 
+.settings-provider-form {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-row: 2 / -1;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+}
+
+.settings-provider-form > .test-result {
+  grid-row: 2;
+}
+
+.settings-provider-form > .settings-actions {
+  grid-row: 3;
+}
+
 .settings-content-header {
   display: flex;
   height: 86px;
@@ -3138,6 +3647,58 @@ kbd {
   min-height: 0;
   padding: 21px 23px 24px;
   overflow-y: auto;
+}
+
+.provider-verification-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-bottom: 16px;
+  padding: 10px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-soft);
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.provider-verification-summary.success {
+  border-color: rgba(216, 255, 125, 0.14);
+  background: rgba(216, 255, 125, 0.035);
+}
+
+.provider-verification-summary.error {
+  border-color: rgba(239, 141, 132, 0.15);
+  background: rgba(239, 141, 132, 0.035);
+}
+
+.provider-verification-led {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: #85897e;
+}
+
+.provider-verification-summary.success .provider-verification-led {
+  background: var(--accent);
+}
+
+.provider-verification-summary.error .provider-verification-led {
+  background: var(--red);
+}
+
+.provider-verification-summary strong {
+  display: block;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.provider-verification-summary p {
+  margin: 3px 0 0;
+  color: #898d82;
+  font-size: 9px;
+  line-height: 1.45;
 }
 
 .provider-form > label,
@@ -3267,6 +3828,37 @@ kbd {
 
 .input-with-icon input {
   padding-left: 32px;
+}
+
+.cli-executable-field {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 16px;
+}
+
+.cli-executable-field > label {
+  color: #a5a99d;
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.cli-executable-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.cli-executable-choose {
+  min-height: 35px;
+  padding: 0 11px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.cli-executable-field > small {
+  color: #61655b;
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .mono-input input,
@@ -3659,6 +4251,10 @@ kbd {
   white-space: pre-wrap;
 }
 
+.test-result .test-result-retention {
+  color: #a8ab9f;
+}
+
 .model-suggestions {
   display: flex;
   flex-wrap: wrap;
@@ -3740,6 +4336,17 @@ kbd {
   background: rgba(230, 189, 108, 0.08);
 }
 
+.settings-data-label {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.provider-nav-icon.recovery {
+  color: var(--blue);
+  background: rgba(143, 185, 247, 0.08);
+}
+
 .mcp-settings-shell-header {
   height: 72px;
 }
@@ -3751,6 +4358,230 @@ kbd {
   grid-row: 2 / -1;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
+}
+
+/* Local state recovery */
+
+.recovery-settings-shell-header {
+  height: 72px;
+}
+
+.recovery-pane {
+  min-width: 0;
+  min-height: 0;
+  grid-row: 2 / -1;
+  padding: 20px 22px 24px;
+  overflow-y: auto;
+}
+
+.recovery-intro {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 11px;
+}
+
+.recovery-intro-icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid rgba(143, 185, 247, 0.13);
+  border-radius: 9px;
+  color: var(--blue);
+  background: rgba(143, 185, 247, 0.06);
+}
+
+.recovery-intro h2 {
+  margin: 0 0 5px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 640;
+}
+
+.recovery-intro p,
+.recovery-secret-boundary p,
+.recovery-footnote {
+  margin: 0;
+  color: #8e9287;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.recovery-refresh {
+  min-width: 82px;
+}
+
+.recovery-secret-boundary {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 17px 0;
+  padding: 10px 11px;
+  border: 1px solid rgba(216, 255, 125, 0.12);
+  border-radius: 8px;
+  background: rgba(216, 255, 125, 0.025);
+}
+
+.recovery-secret-boundary > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--accent);
+}
+
+.recovery-secret-boundary strong {
+  color: var(--text-soft);
+  font-weight: 650;
+}
+
+.recovery-snapshot-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.recovery-loading {
+  display: flex;
+  min-height: 130px;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.recovery-snapshot {
+  display: grid;
+  min-width: 0;
+  min-height: 178px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 13px;
+  padding: 13px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.recovery-snapshot.valid:first-child {
+  border-color: rgba(143, 185, 247, 0.14);
+  background: rgba(143, 185, 247, 0.025);
+}
+
+.recovery-snapshot.invalid {
+  border-color: rgba(239, 141, 132, 0.13);
+}
+
+.recovery-snapshot-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.recovery-snapshot-led {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: #575b52;
+}
+
+.recovery-snapshot.valid .recovery-snapshot-led {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(216, 255, 125, 0.055);
+}
+
+.recovery-snapshot.invalid .recovery-snapshot-led {
+  background: var(--red);
+}
+
+.recovery-snapshot-heading h3 {
+  margin: 0 0 3px;
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.recovery-snapshot-status {
+  color: #74786e;
+  font-size: 8px;
+}
+
+.recovery-snapshot-metadata {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) repeat(3, minmax(0, 0.7fr));
+  align-content: start;
+  gap: 9px;
+  margin: 0;
+}
+
+.recovery-snapshot-metadata div {
+  min-width: 0;
+}
+
+.recovery-snapshot-metadata dt {
+  margin-bottom: 3px;
+  color: #686c61;
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.recovery-snapshot-metadata dd {
+  margin: 0;
+  overflow: hidden;
+  color: #a8aca1;
+  font-family: var(--mono);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recovery-snapshot-unavailable {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0;
+  color: #7b7f75;
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.recovery-snapshot-unavailable-detail {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.recovery-snapshot-metadata.invalid-metadata {
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+}
+
+.recovery-snapshot-unavailable > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: #72766c;
+}
+
+.recovery-snapshot.invalid .recovery-snapshot-unavailable > svg {
+  color: var(--red);
+}
+
+.recovery-snapshot-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.recovery-restore {
+  border-color: rgba(230, 189, 108, 0.19);
+  color: var(--amber);
+}
+
+.recovery-footnote {
+  margin-top: 13px;
 }
 
 .mcp-header {
@@ -4517,7 +5348,7 @@ kbd {
 .mcp-eyebrow,
 .mcp-section-kicker,
 .mcp-transport-picker legend {
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .provider-nav-row strong,
@@ -4540,7 +5371,7 @@ kbd {
 .test-result p,
 .model-suggestions button {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .mono-input input,
@@ -4556,7 +5387,7 @@ kbd {
 .save-provider,
 .provider-add-buttons button,
 .local-preset-row button {
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .provider-delete-confirmation {
@@ -4564,7 +5395,7 @@ kbd {
   align-items: center;
   gap: 6px;
   color: var(--red);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .provider-delete-confirmation > button:not(.delete-provider) {
@@ -4605,7 +5436,7 @@ kbd {
 .mcp-trust-confirmation strong,
 .mcp-trust-confirmation p,
 .mcp-runtime-unsaved p {
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .mcp-server-copy strong,
@@ -4617,7 +5448,7 @@ kbd {
 
 .mcp-tool-fingerprint span {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .mcp-server-copy small,
@@ -4640,7 +5471,7 @@ kbd {
 .mcp-delete-confirmation button,
 .mcp-trust-confirmation-actions > button:first-child {
   min-height: 32px;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .mcp-transport-picker label:has(input:focus-visible) {
@@ -4672,7 +5503,7 @@ kbd {
 .git-worktree-form-error,
 .git-worktree-copy > code,
 .git-worktree-badge {
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .terminal-toolbar h2,
@@ -4699,6 +5530,211 @@ kbd {
   color: var(--muted);
 }
 
+/* Readability for the primary workspace and conversation controls. */
+
+.task-scope-switch button,
+.mode-switch button,
+.provider-picker select,
+.task-actions-popover button,
+.imported-history-note,
+.imported-history-note button,
+.message-author,
+.deny-button,
+.approve-button,
+.composer-notice {
+  font-size: 12px;
+}
+
+.task-scope-switch button > span,
+kbd,
+.task-group-header,
+.task-count,
+.task-row-meta,
+.local-note,
+.workspace-path,
+.provider-kind-icon,
+.archived-task-banner,
+.message-author span,
+.activity-title,
+.activity-meta,
+.activity-result > span,
+.approval-copy,
+.awaiting-note,
+.empty-kicker,
+.empty-provider,
+.eyebrow,
+.setup-link,
+.context-chip,
+.permission-label,
+.composer-caption {
+  font-size: 11px;
+}
+
+.empty-description,
+.composer-notice,
+.toast {
+  font-size: 12px;
+}
+
+.composer textarea {
+  font-size: 13px;
+}
+
+.large-button {
+  font-size: 12px;
+}
+
+.sidebar-search,
+.sidebar-search input::placeholder,
+.command-palette-search input::placeholder,
+.task-scope-switch button,
+.task-scope-switch button > span,
+kbd,
+.task-count,
+.local-note,
+.mode-switch button,
+.workspace-panel-switch .icon-button,
+.activity-result > span,
+.terminal-status,
+.terminal-process,
+.terminal-empty,
+.git-repository-facts,
+.git-panel-tab,
+.git-panel-tab-count,
+.git-file-group h3 > span:last-child,
+.git-diff-header span,
+.git-diff-note,
+.git-worktree-form small,
+.nav-section-label,
+.api-kind-picker legend,
+.local-preset-row > span,
+.provider-form input::placeholder,
+.provider-form textarea::placeholder,
+.cli-environment-header small,
+.cli-environment-note,
+.cli-environment-empty,
+.mcp-header p,
+.mcp-server-list-empty,
+.mcp-enabled-toggle,
+.mcp-status-badge,
+.mcp-tool-card > p,
+.mcp-tools-empty,
+.mcp-runtime-empty {
+  color: var(--muted);
+}
+
+.trust-check span {
+  color: var(--muted) !important;
+  font-size: 11px !important;
+}
+
+.command-palette-footer {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.task-scope-switch button {
+  min-height: 30px;
+}
+
+.sidebar-search-clear {
+  width: 24px;
+  height: 24px;
+  flex-basis: 24px;
+}
+
+.mode-switch button,
+.workspace-panel-switch .icon-button,
+.context-chip {
+  min-height: 28px;
+}
+
+.task-actions-popover button {
+  min-height: 34px;
+}
+
+.imported-history-note button,
+.deny-button,
+.approve-button,
+.send-button {
+  min-height: 32px;
+}
+
+.terminal-session-select,
+.terminal-status,
+.terminal-process,
+.terminal-action,
+.terminal-empty p,
+.terminal-empty button,
+.git-panel-refresh,
+.git-panel-inline-error,
+.git-file-group li,
+.git-index-actions button > span,
+.git-diff-note,
+.git-unified-diff,
+.git-commit-body,
+.git-index-actions button,
+.git-commit-form label,
+.git-commit-form input,
+.git-commit-form textarea,
+.git-commit-submit,
+.git-worktree-form input,
+.git-worktree-create {
+  font-size: 11px;
+}
+
+.cli-environment-header span,
+.cli-environment-header small,
+.cli-environment-note,
+.cli-environment-empty,
+.test-result strong,
+.mcp-enabled-toggle,
+.mcp-tool-fingerprint span {
+  font-size: 11px;
+}
+
+.test-button,
+.delete-provider,
+.save-provider,
+.provider-add-buttons button,
+.local-preset-row button,
+.cli-environment-add,
+.mcp-add-button,
+.mcp-save-button,
+.mcp-connect-button,
+.mcp-review-button,
+.mcp-trust-button,
+.mcp-delete-button,
+.mcp-delete-confirmation button,
+.mcp-trust-confirmation-actions > button:first-child {
+  min-height: 32px;
+  font-size: 11px;
+}
+
+.mcp-field,
+.mcp-field input,
+.mcp-field textarea,
+.mcp-field > small,
+.mcp-notice,
+.mcp-editor-enabled small,
+.mcp-runtime-summary small,
+.mcp-tool-heading code,
+.mcp-tool-original-name,
+.mcp-tool-fingerprint code,
+.mcp-tool-card > p,
+.mcp-trust-confirmation p,
+.mcp-runtime-unsaved p {
+  font-size: 11px;
+}
+
+.git-panel-state button,
+.git-mutation-status,
+.git-commit-form-heading p,
+.provider-form label > span em,
+.cli-environment-row .mono-input {
+  font-size: 11px;
+}
+
 /* Toast */
 
 .toast {
@@ -4715,7 +5751,7 @@ kbd {
   border: 1px solid rgba(239, 141, 132, 0.2);
   border-radius: 10px;
   color: #c7c1b8;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.4;
   background: #27201e;
   box-shadow: 0 14px 44px rgba(0, 0, 0, 0.42);
@@ -4920,6 +5956,22 @@ kbd {
     display: block;
   }
 
+  .git-recovery-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .git-restore-picker {
+    grid-template-columns: 1fr;
+  }
+
+  .git-restore-picker legend {
+    grid-column: 1;
+  }
+
+  .git-restore-picker button {
+    width: 100%;
+  }
+
   .git-file-groups,
   .git-worktree-form {
     border-right: 0;
@@ -4945,6 +5997,19 @@ kbd {
 
   .modal-backdrop {
     padding: 14px;
+  }
+
+  .command-palette-backdrop {
+    padding-top: max(58px, 10vh);
+  }
+
+  .command-palette-actions > button {
+    grid-template-columns: 31px minmax(0, 1fr);
+  }
+
+  .command-palette-actions > button > kbd,
+  .command-palette-footer span:last-child {
+    display: none;
   }
 
   .settings-modal {
@@ -5006,6 +6071,27 @@ kbd {
     grid-template-columns: 1fr;
   }
 
+  .recovery-pane {
+    padding: 16px 15px 20px;
+  }
+
+  .recovery-intro {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .recovery-refresh {
+    grid-column: 1 / -1;
+    justify-self: stretch;
+  }
+
+  .recovery-snapshot-list {
+    grid-template-columns: 1fr;
+  }
+
+  .recovery-snapshot-metadata {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .mcp-server-list {
     display: flex;
     max-height: 150px;
@@ -5027,6 +6113,14 @@ kbd {
   .form-grid {
     grid-template-columns: 1fr;
     gap: 0;
+  }
+
+  .cli-executable-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .cli-executable-choose {
+    justify-self: start;
   }
 
   .cli-environment-header {
@@ -5086,9 +6180,14 @@ kbd {
   .activity-card,
   .composer,
   .settings-modal,
+  .command-palette,
   .mcp-editor,
   .mcp-runtime,
   .git-unified-diff {
     border: 1px solid CanvasText;
+  }
+
+  .command-palette-actions > button.selected {
+    outline: 1px solid Highlight;
   }
 }

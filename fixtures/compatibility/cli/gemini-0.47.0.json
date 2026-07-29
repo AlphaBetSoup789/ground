@@ -8,7 +8,7 @@
     "version": "0.47.0",
     "fixtureDate": "2026-07-29",
     "provenance": "synthetic-contract",
-    "provenanceNote": "Hand-authored from Ground's reviewed parser contract for the locally observed help surface; not captured from a live or authenticated Gemini CLI run.",
+    "provenanceNote": "Hand-authored from Ground's reviewed parser contract for the locally observed help, bundled documentation, and tagged 0.47.0 source surfaces; not captured from a live or authenticated Gemini CLI run.",
     "liveCapture": false
   },
   "cases": [
@@ -106,6 +106,37 @@
             "outputTokens": 4,
             "cachedInputTokens": 3,
             "totalTokens": 14
+          }
+        }
+      ]
+    },
+    {
+      "id": "warning-and-error-severity",
+      "description": "Keep non-fatal warnings diagnostic while surfacing error-severity events as failed activities.",
+      "inputEvents": [
+        {
+          "type": "error",
+          "severity": "warning",
+          "message": "Loop detected, stopping execution"
+        },
+        {
+          "type": "error",
+          "severity": "error",
+          "message": "Maximum session turns exceeded"
+        }
+      ],
+      "expectedCanonicalEvents": [
+        {
+          "type": "diagnostic",
+          "detail": "Loop detected, stopping execution"
+        },
+        {
+          "type": "activity",
+          "activity": {
+            "activityType": "error",
+            "title": "Gemini reported an error",
+            "detail": "Maximum session turns exceeded",
+            "status": "error"
           }
         }
       ]

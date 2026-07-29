@@ -3,14 +3,34 @@ export type RunStatus = 'idle' | 'running' | 'awaiting-approval' | 'failed'
 export type ActivityStatus = 'pending' | 'running' | 'success' | 'error' | 'denied'
 export type ModelProviderKind = 'openai' | 'anthropic' | 'google' | 'openai-compatible'
 export type ProviderKind = ModelProviderKind | 'cli'
-export type CliAdapter = 'generic' | 'codex' | 'claude' | 'gemini'
+export type CliAdapter =
+  | 'generic'
+  | 'codex'
+  | 'claude'
+  | 'gemini'
+  | 'antigravity'
 export type ReasoningEffort = 'low' | 'medium' | 'high'
+
+export type ProviderVerification =
+  | {
+      status: 'unverified'
+    }
+  | {
+      status: 'passed' | 'failed'
+      scope: 'connection' | 'configuration'
+      checkedAt: string
+    }
 
 export interface BaseProvider {
   id: string
   name: string
   kind: ProviderKind
   model: string
+  /**
+   * A bounded status record for the exact persisted provider revision.
+   * Missing records from older Ground versions are treated as unverified.
+   */
+  verification?: ProviderVerification
   createdAt: string
   updatedAt: string
 }
@@ -19,6 +39,12 @@ interface BaseModelApiProvider extends BaseProvider {
   kind: ModelProviderKind
   baseUrl: string
   hasApiKey: boolean
+  /**
+   * Main-generated opaque selector for a versioned encrypted credential.
+   * Older profiles omit it and continue to use their legacy boundary-scoped
+   * vault entry. Renderer drafts can never choose this value.
+   */
+  credentialRevision?: string
   supportsTools: boolean
   contextWindowTokens?: number
   maxOutputTokens?: number
@@ -56,6 +82,11 @@ export interface CliProvider extends BaseProvider {
   cliAdapter?: CliAdapter
   environmentVariables?: string[]
   environmentFingerprint?: string
+  /**
+   * Opaque selector for the exact versioned vault record. Profiles saved
+   * before versioned CLI environment records omit it and use the legacy slot.
+   */
+  environmentRevision?: string
   trustConfirmed: boolean
 }
 
@@ -103,6 +134,11 @@ export interface RuntimeSession {
   sessionCompatibilityId: string
   sessionId: string
   providerRevision: string
+  /**
+   * SHA-256 binding to the exact provider configuration. Older sessions omit
+   * it and are invalidated rather than trusted through timestamp collisions.
+   */
+  providerFingerprint?: string
   workspacePath: string
   mode: RunMode
   updatedAt: string
@@ -168,6 +204,11 @@ export type StoredModelConversationItem =
 export interface ModelRuntimeSession {
   adapterId: string
   providerRevision: string
+  /**
+   * SHA-256 binding to the exact provider configuration. Older sessions omit
+   * it and are invalidated rather than trusted through timestamp collisions.
+   */
+  providerFingerprint?: string
   model: string
   workspacePath?: string
   mode: RunMode
@@ -364,9 +405,29 @@ export interface AppSettings {
 
 export interface RecoveryNotice {
   id: string
-  kind: 'backup-restored' | 'state-reset'
+  kind: 'backup-restored' | 'credential-warning' | 'state-reset'
   title: string
   detail: string
+}
+
+export type LocalStateSnapshotStatus =
+  | 'valid'
+  | 'invalid'
+  | 'unavailable'
+
+/**
+ * Renderer-safe metadata for a private local state generation. The opaque ID
+ * is short-lived and content-bound; no application-data path crosses IPC.
+ */
+export interface LocalStateSnapshot {
+  id: string
+  kind: 'current' | 'retained'
+  generation: number
+  status: LocalStateSnapshotStatus
+  capturedAt?: string
+  sizeBytes?: number
+  taskCount?: number
+  providerCount?: number
 }
 
 interface BaseMcpServerProfile {
@@ -587,10 +648,15 @@ export interface ProviderTestResult {
   title: string
   detail: string
   models?: string[]
+  /**
+   * True only when this result was retained on an unchanged saved profile.
+   * Draft-only checks remain useful feedback but do not change saved status.
+   */
+  persisted?: boolean
 }
 
 export interface DetectedCli {
-  id: 'codex' | 'claude' | 'gemini'
+  id: 'codex' | 'claude' | 'gemini' | 'antigravity'
   name: string
   path: string
   description: string
@@ -670,9 +736,26 @@ export interface GitIdentity {
   email?: string
 }
 
+export type GitRecoveryStatus = 'applied' | 'recovery-required' | 'restored'
+
+/**
+ * Path-only, renderer-safe projection of a main-owned Git recovery manifest.
+ * Prepared snapshots, previews, host paths, and action fingerprints never
+ * cross the IPC boundary.
+ */
+export interface GitRecoverySummary {
+  id: string
+  createdAt: string
+  status: GitRecoveryStatus
+  trackedPaths: string[]
+  untrackedPaths: string[]
+  canUndo: boolean
+}
+
 export interface GitOverview {
   isRepository: boolean
   message?: string
+  requiresGitExecutable?: boolean
   status?: GitStatusSummary
   identity?: GitIdentity
   unstagedDiff?: GitDiffResult
@@ -680,6 +763,8 @@ export interface GitOverview {
   commits: GitLogEntry[]
   historyTruncated: boolean
   worktrees: GitWorktreeSummary[]
+  recoveries: GitRecoverySummary[]
+  recoveriesTruncated: boolean
 }
 
 export interface CreateGitWorktreeInput {
@@ -695,6 +780,9 @@ export interface GitCommitInput {
 
 export interface DesktopApi {
   getSnapshot: () => Promise<AppSnapshot>
+  listStateSnapshots: () => Promise<LocalStateSnapshot[]>
+  exportStateSnapshot: (snapshotId: string) => Promise<boolean>
+  restoreStateSnapshot: (snapshotId: string) => Promise<boolean>
   createTask: (workspaceGrantId?: string) => Promise<DesktopTask>
   forkTask: (taskId: string) => Promise<DesktopTask>
   setTaskArchived: (taskId: string, archived: boolean) => Promise<DesktopTask>
@@ -709,6 +797,7 @@ export interface DesktopApi {
   deleteProvider: (providerId: string) => Promise<void>
   testProvider: (draft: ProviderDraft) => Promise<ProviderTestResult>
   detectClis: () => Promise<DetectedCli[]>
+  chooseCliExecutable: () => Promise<string | undefined>
   startRun: (input: StartRunInput) => Promise<{ runId: string }>
   stopRun: (taskId: string) => Promise<void>
   resolveApproval: (runId: string, approvalId: string, approved: boolean) => Promise<void>
@@ -744,12 +833,21 @@ export interface DesktopApi {
   ) => Promise<void>
   onTerminalEvent: (listener: (event: TerminalEvent) => void) => () => void
   getGitOverview: (taskId: string) => Promise<GitOverview>
+  chooseGitExecutable: () => Promise<boolean>
   createGitWorktree: (
     taskId: string,
     input: CreateGitWorktreeInput
   ) => Promise<DesktopTask | undefined>
   stageGitPaths: (taskId: string, paths: string[]) => Promise<boolean>
   unstageGitPaths: (taskId: string, paths: string[]) => Promise<boolean>
+  revertGitPaths: (
+    taskId: string,
+    paths: string[]
+  ) => Promise<GitRecoverySummary | undefined>
+  undoGitRecovery: (
+    taskId: string,
+    recoveryId: string
+  ) => Promise<GitRecoverySummary | undefined>
   commitGitChanges: (
     taskId: string,
     input: GitCommitInput

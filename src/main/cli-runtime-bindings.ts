@@ -4,7 +4,8 @@ export const BUILT_IN_CLI_RUNTIME_DIALECTS = Object.freeze([
   'generic',
   'codex',
   'claude',
-  'gemini'
+  'gemini',
+  'antigravity'
 ] as const satisfies readonly CliAdapter[])
 
 export type CliRuntimeSessionCompatibilityId = Exclude<CliAdapter, 'generic'>
@@ -29,6 +30,10 @@ export const BUILT_IN_CLI_RUNTIME_BINDINGS = Object.freeze({
   gemini: Object.freeze({
     adapterId: 'google.gemini-cli',
     sessionCompatibilityId: 'gemini'
+  }),
+  antigravity: Object.freeze({
+    adapterId: 'google.antigravity-cli',
+    sessionCompatibilityId: 'antigravity'
   })
 } as const satisfies Readonly<
   Record<CliAdapter, Readonly<BuiltInCliRuntimeBinding>>
@@ -39,7 +44,8 @@ export const CLI_RUNTIME_ADAPTER_IDS: Readonly<Record<CliAdapter, string>> =
     generic: BUILT_IN_CLI_RUNTIME_BINDINGS.generic.adapterId,
     codex: BUILT_IN_CLI_RUNTIME_BINDINGS.codex.adapterId,
     claude: BUILT_IN_CLI_RUNTIME_BINDINGS.claude.adapterId,
-    gemini: BUILT_IN_CLI_RUNTIME_BINDINGS.gemini.adapterId
+    gemini: BUILT_IN_CLI_RUNTIME_BINDINGS.gemini.adapterId,
+    antigravity: BUILT_IN_CLI_RUNTIME_BINDINGS.antigravity.adapterId
   })
 
 const BUILT_IN_CLI_DIALECT_BY_ADAPTER_ID = new Map<string, CliAdapter>(
@@ -82,5 +88,7 @@ export const CLI_RUNTIME_SESSION_COMPATIBILITY_IDS: Readonly<
 > = Object.freeze({
   codex: BUILT_IN_CLI_RUNTIME_BINDINGS.codex.sessionCompatibilityId,
   claude: BUILT_IN_CLI_RUNTIME_BINDINGS.claude.sessionCompatibilityId,
-  gemini: BUILT_IN_CLI_RUNTIME_BINDINGS.gemini.sessionCompatibilityId
+  gemini: BUILT_IN_CLI_RUNTIME_BINDINGS.gemini.sessionCompatibilityId,
+  antigravity:
+    BUILT_IN_CLI_RUNTIME_BINDINGS.antigravity.sessionCompatibilityId
 })

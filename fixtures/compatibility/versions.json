@@ -12,6 +12,10 @@
     "gemini": {
       "runtime": "Gemini CLI",
       "version": "0.47.0"
+    },
+    "antigravity": {
+      "runtime": "Antigravity CLI",
+      "version": "1.1.8"
     }
   },
   "apiPackages": {

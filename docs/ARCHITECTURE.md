@@ -92,6 +92,19 @@ than a characters-per-token ratio but is not the model’s exact tokenizer. Thes
 numeric/reasoning settings are user-supplied protocol hints, not model capability
 certification.
 
+Provider configuration has a separate persisted readiness state. Saving creates an
+unverified provider revision. **Test** can persist `passed` or `failed` only when
+the submitted form still exactly matches the complete configuration fingerprint,
+and the main-process run boundary requires `passed`. First-class APIs test bounded
+model discovery.
+OpenAI-compatible profiles prefer `/models` but can fall back to one bounded,
+non-streaming four-token generation request when listing does not prove
+compatibility. A CLI Test validates resolution and argv construction; it does not
+launch an authenticated agent turn. A run reserves the exact task revision,
+provider revision/configuration fingerprint, and credential boundary before CLI
+authorization or workspace lookup. Provider mutation and verification publication
+cannot interleave with that reservation or an active run.
+
 ### Agent runtime adapters
 
 `AgentRuntimeAdapter` represents an external coding agent. The runtime may own:
@@ -106,6 +119,14 @@ Ground resolves and launches the executable, supplies the selected workspace and
 mode, resumes a compatible native session when possible, and normalizes events. A
 runtime event saying that a command ran is useful observability; it is not proof
 that Ground could approve or prevent the command.
+
+Recognized CLI detection is passive and bounded to conventional system, app-PATH,
+and user tool-manager locations. The native executable picker validates a chosen
+direct executable or reviewed Windows Node package shim without launching it.
+Workspace-controlled candidates are excluded. Saving the template and starting the
+fully expanded invocation retain distinct native confirmations; Antigravity’s
+1.1.8+ version probe is permitted only after the save confirmation and
+revalidation.
 
 ## Provider-neutral core
 
@@ -141,11 +162,12 @@ or built-in CLI dialect still requires a reviewed source change and rebuild.
 | Data | Owner | Current storage |
 | --- | --- | --- |
 | Workspace grant | Ground main process | Canonical path grant restored from task state |
-| Task timeline and per-item provider attribution | Ground | Bounded schema-normalized atomic state + one validated previous snapshot |
-| Provider profile | Ground | Bounded atomic state + backup, without key material |
-| MCP server profile and trusted definition fingerprints | Ground | Bounded atomic state + backup |
-| API credential | User / configured provider | Strict private vault containing Electron `safeStorage` ciphertext |
-| CLI profile environment values | User / configured runtime | One fingerprinted `safeStorage` vault record; names and opaque revision only in provider state |
+| Task timeline and per-item provider attribution | Ground | Bounded schema-normalized atomic state + three validated retained snapshots |
+| Provider profile | Ground | Bounded atomic state + retained snapshots, without key material |
+| MCP server profile and trusted definition fingerprints | Ground | Bounded atomic state + retained snapshots |
+| API credential | User / configured provider | Strict private vault containing versioned, boundary-scoped Electron `safeStorage` ciphertext |
+| CLI profile environment values | User / configured runtime | One fingerprinted `safeStorage` vault record; sorted names plus separate non-secret fingerprint and record revision in provider state |
+| Pending secret cleanup journal | Ground main process | Bounded exact vault references in persisted state; excluded from renderer snapshots |
 | Normalized model output | Ground | Task timeline |
 | Native CLI session ID | External runtime, referenced by Ground | Provider/task-scoped runtime metadata |
 | Provider-owned message-part state | Owning model adapter | Bounded JSON-safe opaque state, replayed only by that adapter |
@@ -153,20 +175,23 @@ or built-in CLI dialect still requires a reviewed source change and rebuild.
 | MCP connection and discovered live tool state | Ground main process | Memory; rebuilt on connection |
 | Terminal session and scrollback | Ground main process | Memory; disposed on app shutdown |
 | Git status, diff, and history views | Repository, derived by Ground | Read live; not copied into task state |
+| Preferred Git executable path/fingerprint | Ground main process | Private bounded preference; revalidated into process-local authority |
+| Git restore recovery payloads | User / Ground recovery | Private local files under Ground’s managed worktree root |
 | Managed worktree contents | User / Git | Dedicated local Ground worktree root |
 | Portable task bundle / Markdown transcript | User | User-selected file outside Ground’s state store |
 | Unreadable state quarantine | User / Ground recovery | Application-data directory until manually removed |
 
 A CLI session is resumed only when its source-registered adapter ID, explicit
-session-compatibility ID, provider revision, workspace, and task mode still match.
-Legacy Codex, Claude, and Gemini session records migrate to those two identities.
+session-compatibility ID, complete provider-configuration fingerprint, workspace,
+and task mode still match. Legacy Codex, Claude, and Gemini session records migrate
+to the adapter identities, but any record without the fingerprint is invalidated.
 Generic runtimes never persist opaque sessions. An incompatible record is deleted
 before Ground constructs the next prompt. A compatible record is a one-attempt
 lease: Ground durably deletes it before launch and persists a replacement only
 after canonical completion. Switching back, stopping, failing, or crashing
 therefore cannot revive context that skipped intervening normalized history.
 Otherwise Ground starts a new runtime session and supplies bounded readable
-history.
+history. Model checkpoints use the same fingerprint rule.
 
 Each assistant message and runtime/tool activity is stored with the provider name,
 kind, model, and provider ID captured when the run begins. A run also captures its
@@ -201,9 +226,9 @@ reducer completion, and every terminal persistence step.
 
 Persisted assistant messages and activities are attributable to a task, run,
 provider, and model. Model history and native runtime-session records additionally
-bind provider revision, workspace, mode, and—when available—runtime session.
-Built-in model adapters resume from normalized history; provider-owned message-part
-state is replayed only through its owning adapter.
+bind the complete provider-configuration fingerprint, workspace, mode, and—when
+available—runtime session. Built-in model adapters resume from normalized history;
+provider-owned message-part state is replayed only through its owning adapter.
 
 Ground-managed writes, commands, and MCP calls use a two-record execution
 protocol. Before dispatch, `StateStore.beginManagedExecution` atomically consumes
@@ -237,10 +262,27 @@ the starting directory, not the shell’s OS permissions.
 
 ### Git and worktrees
 
+`GitExecutableTrustService` builds a bounded candidate list from fixed conventional
+locations and absolute entries in the app’s PATH without recursively enumerating
+directories. It excludes lexical and canonical paths inside the dynamic set of
+configured workspaces. Passive validation creates an immutable process-local
+binding over canonical path, content hash, filesystem identity, size, mode, and
+timestamps without running the candidate. Windows accepts only direct `.exe`
+targets.
+
+`GitExecutableCoordinator` treats a private persisted path/fingerprint as a hint,
+not authority. It recreates and exactly revalidates that binding at startup and
+before every Git process. The native picker follows the same passive validation,
+then a default-cancel main-owned dialog shows path/hash/size/fingerprint. Only
+after approval does a bounded `git --version` run establish the required 2.23+
+feature level, with revalidation around the probe and preference write. Identity
+drift revokes the active binding and evicts cached workspace services.
+
 `GitWorkspaceService` pins a canonical repository root, a resolved system Git
 executable, and a dedicated Ground worktree root outside the repository. It exposes
 bounded status, staged/unstaged diff, log, selected-path stage/unstage, exact-tree
-commit, and managed-worktree create/list/remove operations. Git runs with fixed
+commit, recoverable selected-path restore/undo, and managed-worktree
+create/list/remove operations. Git 2.23 or newer is required. Git runs with fixed
 argv, no shell, disabled hooks/global configuration, no pager or prompt, disabled
 external diff/text conversion, and bounded time/output.
 
@@ -255,12 +297,29 @@ pointers/ciphertext, false dirty state, or unusable managed checkout content.
 The desktop can create a validated branch in a managed worktree and create a new
 Ground task for it. Selected path mutations are prepared in the main process and
 confirmed natively. A commit records the exact prepared index tree through
-`commit-tree`, then conditionally advances `HEAD` only if the confirmed parent still
-matches; hooks and signing are disabled, and concurrent index/working-tree edits
-remain outside that commit. Removal is limited to a clean, registered worktree
-inside Ground’s managed root and detaches linked tasks without deleting their
-history. Revert/reset, remote operations, signed commits, dirty force-removal, and
-arbitrary worktree deletion are not exposed.
+`commit-tree`, binds repository/worktree directory identities plus the exact
+checked-out symbolic local ref, and refuses detached HEAD. It then advances only
+that approved ref with a non-dereferencing compare-and-swap update if the confirmed
+parent still matches. Hooks and signing are disabled, and concurrent
+index/working-tree edits remain outside that commit. Removal is limited to a clean,
+registered worktree inside Ground’s managed root and detaches linked tasks without
+deleting their history.
+
+A selected-file restore can include unstaged tracked files and untracked regular
+files. Preparation rejects conflicts, submodules, directories, links, unsafe path
+states, stale input, and bounded-size violations. The native review contains the
+complete diff/untracked preview and hashes its immutable action. Before changing
+the workspace, Ground writes and fsyncs a private recovery manifest, copies tracked
+contents, and renames untracked files into a recovery operation beneath the
+managed worktree root. `git restore --worktree` returns tracked files to the
+current index without altering staged changes. Undo is prepared independently and
+proceeds only when the manifest, payloads, parents, and every affected path still
+match the expected post-restore state. Partial failure is retained and projected
+as recovery-required. Ground also refuses restore/undo while one of its runs or
+task terminals is active in the same workspace. Untracked recovery uses an atomic
+rename and therefore fails recovery-required rather than copy-and-delete across
+filesystems. Arbitrary reset, remote operations, signed commits, dirty
+force-removal, and arbitrary worktree deletion are not exposed.
 
 ## MCP host
 
@@ -269,6 +328,14 @@ without failing the app when one connection fails. `McpService` supports
 unauthenticated remote Streamable HTTP and local stdio. Remote cleartext is
 loopback-only and redirects fail; stdio uses an absolute executable, argv without a
 shell, a reduced environment, bounded JSON-RPC, and lifecycle cleanup.
+
+Startup connects remote profiles concurrently but serializes local profiles so
+main-owned executable dialogs cannot overlap. `RunManager` awaits that one startup
+attempt, with cancellation checks before and after, before assembling the first
+managed API tool set. A still-initializing MCP profile therefore cannot disappear
+silently from the first model request. Every queued turn re-reads the current
+profile; connection, tool listing, and final tool dispatch require its exact
+persisted enabled/configuration/trust identity to remain current.
 
 Before the first exact stdio invocation in an app session, a native dialog displays
 the executable, content/metadata identity, complete argv, cwd, environment-key set,
@@ -328,21 +395,47 @@ prose or tool output remain possible and require user review.
 Import creates a new task without a workspace, runtime session, or approval
 authority. Timeline items are visibly history-only and ignored by normal timeline
 context reconstruction. A native-warning-backed per-task control can include them
-again. If the provider hint exactly matches a configured API profile, the portable
-canonical conversation can seed a subsequent explicit run only while that control
-is enabled. Model-session compatibility is bound to the choice, so excluding
+again. An API hint matches only on its exported public descriptor: type/kind, name,
+model, and tool-support flag. A CLI hint matches type/kind, name, model, and adapter.
+Provider IDs, endpoints, credentials, and secret revisions are neither exported nor
+matched. Only a matching API profile can receive the portable canonical
+conversation, and only on a subsequent explicit run while imported-history context
+is enabled. Model-session compatibility is bound to that choice, so excluding
 history invalidates any continuation that may contain it.
 
-`StateStore` applies a 128 MiB ceiling and validates the full persisted schema
-before each replacement. Reads require a regular file, refuse symlinks where the
-platform supports no-follow opens, stream within the ceiling, and reject malformed
-UTF-8. Writes use unpredictable exclusive `0600` temporary files, fsync their
-contents, rotate only a schema-valid prior primary to `.bak`, atomically rename the
-new primary, and sync the directory where supported. Startup falls back to the
-single backup when possible, quarantines unreadable files, and reports backup
-restore or clean-state fallback through an ephemeral renderer banner. This is
-crash recovery, not a transactional event log, multi-version backup system, or
-user-driven restore browser.
+Persisted state is currently schema version 2. A pure migration dispatcher clones
+the input and advances exactly one version at a time; the registered v1-to-v2 step
+runs before current-schema validation. A newer document, a missing step, or a
+migration that skips versions fails closed. `StateStore` applies a 128 MiB ceiling
+and validates the full current schema before each replacement. Reads require a
+regular file, refuse symlinks where the platform supports no-follow opens, stream
+within the ceiling, and reject malformed UTF-8. Writes use unpredictable exclusive
+`0600` temporary files, fsync their contents, rotate only schema-valid prior
+generations through three retained slots, atomically rename the new primary, and
+sync the directory where supported. Startup falls back through the retained
+generations, quarantines unreadable files, and reports backup restore or clean-state
+fallback through an ephemeral renderer banner.
+
+Retained restore uses a main-derived review descriptor with generation, capture
+time, counts, size, and content digest. Requests are single-flight before the native
+default-cancel prompt. After confirmation, a process-wide mutation gate drains
+admitted renderer work, aborts MCP startup, waits through the manager's bounded
+2.5-second shutdown drain, and revalidates the exact selection before publication.
+The gate is held through relaunch even if a post-rename fsync or another late
+restore step reports failure, preventing stale in-memory services from writing over
+a possibly replaced on-disk state.
+
+The Recovery settings pane asks main for renderer-safe metadata through short-lived
+opaque IDs. Each selection is bound to the source content digest, schema, size, and
+generation; if rotation changes that slot, export or restore fails closed until the
+list is refreshed. Main owns the native export path and default-cancel restore
+confirmation. Restore accepts only a retained validated generation and a run-start
+reservation. After confirmation it seals the application-wide renderer operation
+boundary, drains work that entered before the seal, revalidates the content-bound
+selection, rotates the current primary into history, repairs interrupted markers,
+and keeps the boundary sealed through relaunch. State exports contain no
+credential-vault document. This is bounded recovery history, not a transactional
+event log or arbitrary snapshot-import system.
 
 Startup converts any unresolved approved started marker to uncertain while
 preserving its operation and hashes. It reports the outcome as unknown and adds at
@@ -356,33 +449,119 @@ marker without invented action or approval hashes. Recovery is idempotent.
 `SecretVault` separately bounds and validates the encrypted credential map, rejects
 symlink/non-regular vault files, uses private exclusive atomic replacement, and
 quarantines unreadable data. It refuses credential writes when Electron encryption
-is unavailable and treats Linux’s `basic_text` fallback as unavailable. API keys
-are addressed by an opaque hash of provider ID, protocol, and canonical endpoint.
-A boundary change writes the new reference, persists the new provider profile, and
-only then garbage-collects the old reference, so an interrupted transition cannot
-redirect the replacement key to the old endpoint.
+is unavailable and treats Linux’s `basic_text` fallback as unavailable. Plaintext
+passed to `safeStorage` is capped at 768 KiB. Decoded ciphertext is capped at
+1 MiB, with a canonical-base64 ceiling of 1,398,104 characters. The whole vault has
+a 1,000-entry / 8 MiB steady-state bound and a 2,000-entry / 16 MiB transitional
+hard bound, reserving one complete extra generation while replacements stage. The
+128,000-byte CLI name/value budget can expand under JSON escaping but remains
+inside the plaintext ceiling. A staged write normally requires its declared
+obsolete references to project the vault back within steady capacity. If an
+interrupted transition already left the vault above steady state, only a strict
+non-growing improvement toward that bound is accepted.
 
-Each optional CLI profile environment is a single versioned, fingerprinted vault
-record addressed by an opaque hash of provider ID. Provider state holds sorted
-variable names and a random 256-bit revision, never values. Save/delete operations
-roll the vault record back when the corresponding state write reports failure.
-Runtime resolution requires the encrypted record’s variable set and revision to
-match the provider exactly, then binds that non-secret metadata into both native
-configuration and final-invocation authorization. A cross-file operating-system
-crash can leave a mismatch, which fails closed and requires re-entry rather than
-launching with unreviewed values.
+Secret replacement and removal use the main-only `pendingSecretDeletes`
+write-ahead journal in the same persisted document as provider pointers. It is
+bounded to 5,000 unique exact references. Before writing a unique replacement
+record, Ground durably journals that new exact reference as provisional cleanup.
+One later state transaction publishes the provider pointer, removes the new
+reference from cleanup, and journals the exact obsolete references. Batched vault
+deletion happens afterward; only a successful deletion is acknowledged out of
+state. Clear and provider deletion publish their state change and cleanup intents
+in that same transaction. Ground never enumerates the vault and deletes the
+complement of current provider state.
+
+A state or vault publication can report an error after its atomic rename may
+already have selected the new disk generation. Startup cleanup rethrows either
+`StatePersistenceError` or `SecretVaultPersistenceError` and aborts initialization
+before any writable service is exposed. At runtime, `StateStore` seals itself before
+reporting an ambiguous publication to any caller, and the process-wide application
+mutation boundary relaunches; run and MCP error paths may not issue compensating
+state writes. A provider-vault ambiguity uses the same process exit instead of an
+inverse cross-file mutation. Definite failures before primary publication remain
+ordinary operational errors and may be retried. On startup, the selected state
+therefore identifies whether the journaled new or old exact reference is
+disposable. Cleanup derives live
+references from provider metadata without using decryption availability, refuses
+to delete a queued live reference, retires that stale intent, and leaves
+unjournaled ciphertext untouched. If recovery selected a retained generation or
+reset clean state after rejecting saved generations, cleanup is deferred for that
+process so an older view cannot delete a value possibly published by the
+quarantined primary. Vault-deletion failures leave their intents journaled; other
+definite drain failures surface bounded generic recovery guidance, while ambiguous
+publication failures abort startup.
+
+Every API key replacement has a unique opaque record revision under the provider
+ID, protocol, and canonical endpoint boundary. A versioned API profile resolves
+only that exact record. The boundary-scoped legacy record and raw provider-ID
+fallback remain live only for a pre-versioned profile; a same-boundary blank save
+must read a usable saved value before Ground can publish a versioned replacement.
+Separate startup validation reports a missing or undecryptable live credential
+without treating temporary keychain failure as proof that any ciphertext is
+orphaned.
+
+Each optional CLI profile environment is one fingerprinted envelope addressed by
+an opaque hash of provider ID plus a unique random record revision. Provider state
+holds sorted variable names, a separate random 256-bit environment fingerprint,
+and the record revision—never values. The revision selects the exact vault record;
+the fingerprint must match the encrypted envelope and is what native configuration
+and final-invocation authorization display and bind. The complete provider
+configuration fingerprint includes both fields for continuation compatibility.
+Versioned profiles never consult the legacy hashed slot. A full re-entry or
+explicit clear therefore succeeds even when old ciphertext cannot decrypt; only a
+partial edit that leaves values blank must resolve the exact old envelope.
+
+## Renderer interaction model
+
+The renderer keeps unsent composer drafts in process memory keyed by task, so
+switching tasks does not mix text and no draft gains durable authority. A global
+command palette provides filterable keyboard actions, traps/restores focus, and
+does not interpret command keys while an input method is composing. Modal state
+makes the underlying app surface inert.
+
+Assistant streaming remains visually live but uses a separate polite announcer
+that batches and normalizes bounded chunks. Timeline following is conditional on
+the viewport remaining near the latest output, preserving a reader’s scroll
+position. Responsive styles, forced-color treatment, focus-visible states, and
+reduced-motion rules are part of the public-preview baseline; they are not a claim of
+complete cross-platform accessibility certification.
+
+A Playwright-over-Electron suite drives that real built renderer with the
+explicit browser-preview desktop mock. Its six scenarios cover palette
+keyboard/focus, provider-form labels and Chromium constraint validation, task-local
+drafts, deterministic send/cancel, archive/search, responsive settings, and
+reduced-motion CSS. It does not load production main/preload authority or replace
+manual screen-reader/native review.
 
 ## Current composition and migration
 
 The runnable desktop uses `RunManager` and an atomic JSON `StateStore`. OpenAI
 Responses, Anthropic Messages, Google Gemini, OpenAI-compatible, Codex CLI, Claude
-Code, Gemini CLI, and Generic CLI are resolved through one static adapter registry.
-All runtime output crosses `AgentRuntimeEventReducer` before durable task state or
-renderer events. Recognized CLI adapters normalize activities, usage, diagnostics,
-and compatible native sessions while retaining the existing executable,
-environment, native-confirmation, cancellation, and process-tree safeguards.
-Tests use mocked transports and synthetic pinned fixtures; CI does not make
-credentialed live-provider requests or launch paid/native agent sessions.
+Code, Gemini CLI, Antigravity CLI, and Generic CLI are resolved through one static
+adapter registry. All runtime output crosses `AgentRuntimeEventReducer` before
+durable task state or renderer events. Recognized CLI adapters normalize
+activities, usage, diagnostics, and compatible native sessions while retaining
+the existing executable, environment, native-confirmation, cancellation, and
+process-tree safeguards. Tests use mocked transports and synthetic or documented
+pinned fixtures. A credential-free loopback HTTP/SSE test also drives a real
+`POST /v1/chat/completions` through the production OpenAI-compatible AI SDK adapter
+with system/user messages, tools, and streamed text. CI does not contact a real
+cloud, Ollama, or LM Studio deployment, make a paid request, or launch an
+authenticated native coding-agent session.
+
+Native package workflows target macOS arm64/x64, Windows x64, and Linux x64. A
+fixed packaged smoke verifies app identity, OS-encrypted vault round-trip, the
+fail-closed Cancel result of a real native approval dialog, PTY, Git, exact local
+MCP launch/call, and process-tree cleanup. The distributable layer reruns that
+scope against an extracted macOS ZIP, a temporarily installed Windows NSIS
+package, or an extracted Linux AppImage and emits an artifact-hash-bound evidence
+record. Release aggregation requires all four target records. These are bounded
+runtime checks, not signing, notarization, DMG/DEB installation, renderer,
+accessibility, live-provider/CLI, or distribution certification.
+
+The current local macOS arm64 package passes launch, native, and extracted-ZIP
+native scope. The remaining architecture records require their own native workflow
+runs.
 
 The next storage boundary is a transactional, append-only event store with schema
 migrations and materialized task views. Stronger OS-specific confinement,

@@ -12,6 +12,11 @@ import type {
 
 const api: DesktopApi = {
   getSnapshot: () => ipcRenderer.invoke(IPC.getSnapshot),
+  listStateSnapshots: () => ipcRenderer.invoke(IPC.listStateSnapshots),
+  exportStateSnapshot: (snapshotId) =>
+    ipcRenderer.invoke(IPC.exportStateSnapshot, snapshotId),
+  restoreStateSnapshot: (snapshotId) =>
+    ipcRenderer.invoke(IPC.restoreStateSnapshot, snapshotId),
   createTask: (workspaceGrantId) =>
     ipcRenderer.invoke(IPC.createTask, workspaceGrantId),
   forkTask: (taskId) => ipcRenderer.invoke(IPC.forkTask, taskId),
@@ -30,6 +35,7 @@ const api: DesktopApi = {
   deleteProvider: (providerId) => ipcRenderer.invoke(IPC.deleteProvider, providerId),
   testProvider: (draft) => ipcRenderer.invoke(IPC.testProvider, draft),
   detectClis: () => ipcRenderer.invoke(IPC.detectClis),
+  chooseCliExecutable: () => ipcRenderer.invoke(IPC.chooseCliExecutable),
   startRun: (input) => ipcRenderer.invoke(IPC.startRun, input),
   stopRun: (runId) => ipcRenderer.invoke(IPC.stopRun, runId),
   resolveApproval: (runId, approvalId, approved) =>
@@ -73,12 +79,17 @@ const api: DesktopApi = {
     return () => ipcRenderer.removeListener(IPC.terminalEvent, wrapped)
   },
   getGitOverview: (taskId) => ipcRenderer.invoke(IPC.getGitOverview, taskId),
+  chooseGitExecutable: () => ipcRenderer.invoke(IPC.chooseGitExecutable),
   createGitWorktree: (taskId, input) =>
     ipcRenderer.invoke(IPC.createGitWorktree, taskId, input),
   stageGitPaths: (taskId, paths) =>
     ipcRenderer.invoke(IPC.stageGitPaths, taskId, paths),
   unstageGitPaths: (taskId, paths) =>
     ipcRenderer.invoke(IPC.unstageGitPaths, taskId, paths),
+  revertGitPaths: (taskId, paths) =>
+    ipcRenderer.invoke(IPC.revertGitPaths, taskId, paths),
+  undoGitRecovery: (taskId, recoveryId) =>
+    ipcRenderer.invoke(IPC.undoGitRecovery, taskId, recoveryId),
   commitGitChanges: (taskId, input) =>
     ipcRenderer.invoke(IPC.commitGitChanges, taskId, input),
   removeGitWorktree: (taskId, relativePath) =>

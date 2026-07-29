@@ -80,6 +80,7 @@ describe('sidebar task search', () => {
         onCreateTask: () => undefined,
         onChooseWorkspace: () => undefined,
         onImportTask: () => undefined,
+        onOpenCommands: () => undefined,
         onOpenSettings: () => undefined,
         onClose: () => undefined
       })

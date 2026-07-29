@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { access, mkdir, readFile, rm } from 'node:fs/promises'
+import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -8,10 +8,35 @@ import {
   assertPackagedRuntimeFiles,
   locatePackagedApp
 } from './lib/packaged-app.mjs'
+import { sha256File } from './lib/packaged-components.mjs'
 
 const scope = process.argv[2] ?? 'launch'
 if (scope !== 'launch' && scope !== 'native') {
   throw new Error('Packaged runtime smoke scope must be "launch" or "native"')
+}
+const installationSource = process.argv[3] ?? 'unpacked'
+const allowedInstallationSources = new Set([
+  'unpacked',
+  'mac-zip-extracted',
+  'windows-nsis-installed',
+  'linux-appimage-extracted'
+])
+if (!allowedInstallationSources.has(installationSource)) {
+  throw new Error('Packaged runtime smoke received an invalid installation source')
+}
+const packagedReleaseDirectory = process.argv[4]
+  ? path.resolve(process.argv[4])
+  : path.resolve('release')
+const distributablePath = process.argv[5]
+  ? path.resolve(process.argv[5])
+  : undefined
+if (
+  (installationSource === 'unpacked' && distributablePath) ||
+  (installationSource !== 'unpacked' && !distributablePath)
+) {
+  throw new Error(
+    'Distributable runtime evidence requires one artifact path and unpacked smoke evidence accepts none'
+  )
 }
 
 const unexpectedControlKey = Object.keys(process.env).find((key) =>
@@ -23,7 +48,7 @@ if (unexpectedControlKey) {
   )
 }
 
-const packagedApp = await locatePackagedApp()
+const packagedApp = await locatePackagedApp(packagedReleaseDirectory)
 await assertPackagedRuntimeFiles(packagedApp)
 
 const token = randomBytes(16).toString('hex')
@@ -32,6 +57,7 @@ const smokeDirectory = path.join(
   `ground-packaged-smoke-${token}`
 )
 const resultPath = path.join(smokeDirectory, 'result.json')
+const evidencePath = path.join(smokeDirectory, 'native-evidence.json')
 const timeoutMs = scope === 'native' ? 180_000 : 75_000
 await mkdir(smokeDirectory, { recursive: false, mode: 0o700 })
 
@@ -39,6 +65,9 @@ const appArguments = [
   `--ground-packaged-smoke=${token}:${scope}`,
   '--disable-gpu'
 ]
+if (process.platform === 'linux') {
+  appArguments.push('--password-store=gnome-libsecret')
+}
 let executable = packagedApp.executable
 let argumentsList = appArguments
 
@@ -181,9 +210,13 @@ try {
           'main',
           'preload',
           'rendererDocument',
+          'appIdentity',
+          'safeStorage',
+          'nativeApprovalDialog',
           'pty',
           'git',
           'mcp',
+          'mcpLaunchApproval',
           'processTreeCancellation'
         ]
       : ['main', 'preload', 'rendererDocument']
@@ -202,6 +235,70 @@ try {
       )
         .toString('utf8')
         .trim()}`
+    )
+  }
+  if (scope === 'native') {
+    const evidence = JSON.parse(await readFile(evidencePath, 'utf8'))
+    if (
+      evidence.version !== 1 ||
+      evidence.app?.packaged !== true ||
+      evidence.app?.platform !== process.platform ||
+      evidence.app?.architecture !== process.arch ||
+      evidence.credentialStorage?.roundTrip !== true ||
+      evidence.nativeApproval?.cancelled !== true ||
+      evidence.mcpLaunchApproval?.exactEnvelopeValidated !== true
+    ) {
+      throw new Error(
+        `Packaged native evidence failed validation: ${JSON.stringify(evidence)}`
+      )
+    }
+    const packageMetadata = JSON.parse(
+      await readFile(path.resolve('package.json'), 'utf8')
+    )
+    if (
+      evidence.app?.name !== packageMetadata.build?.productName ||
+      evidence.app?.version !== packageMetadata.version ||
+      evidence.app?.configuredAppId !== packageMetadata.build?.appId
+    ) {
+      throw new Error('Packaged application identity differs from package.json')
+    }
+    const releaseDirectory = path.resolve('release')
+    await mkdir(releaseDirectory, { recursive: true })
+    const evidenceReportPath = path.join(
+      releaseDirectory,
+      `ground-package-runtime-evidence-${process.platform}-${process.arch}.json`
+    )
+    const commit =
+      typeof process.env.GITHUB_SHA === 'string' &&
+      /^[a-f0-9]{40,64}$/iu.test(process.env.GITHUB_SHA)
+        ? process.env.GITHUB_SHA.toLowerCase()
+        : undefined
+    await writeFile(
+      evidenceReportPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          status: 'passed',
+          packageVersion: packageMetadata.version,
+          platform: process.platform,
+          architecture: process.arch,
+          installationSource,
+          ...(distributablePath
+            ? {
+                distributable: {
+                  name: path.basename(distributablePath),
+                  sha256: await sha256File(distributablePath)
+                }
+              }
+            : {}),
+          ...(commit ? { commit } : {}),
+          checks: result.checks,
+          evidence
+        },
+        null,
+        2
+      )}\n`,
+      { encoding: 'utf8', mode: 0o600 }
     )
   }
   process.stdout.write(

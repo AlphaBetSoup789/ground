@@ -63,6 +63,50 @@ describe('CLI profile environments', () => {
     ).toThrow(/duplicated/i)
   })
 
+  it('bounds raw UTF-8 input while accommodating the reachable worst JSON envelope', () => {
+    const names = [
+      ...Array.from({ length: 26 }, (_, index) =>
+        String.fromCharCode(65 + index)
+      ),
+      '_'
+    ]
+    let remaining =
+      128_000 -
+      names.reduce(
+        (total, name) => total + Buffer.byteLength(name, 'utf8'),
+        0
+      )
+    const entries = names.map((name, index) => {
+      const valueBytes = Math.floor(
+        remaining / (names.length - index)
+      )
+      remaining -= valueBytes
+      return { name, value: '\u0001'.repeat(valueBytes) }
+    })
+
+    const plan = prepareCliEnvironmentPlan(
+      'maximum-environment',
+      entries,
+      undefined,
+      undefined
+    )
+    expect(remaining).toBe(0)
+    expect(
+      Buffer.byteLength(plan.desiredSerializedSecret as string, 'utf8')
+    ).toBe(768_132)
+
+    const oversized = structuredClone(entries)
+    oversized[0]!.value += '\u0001'
+    expect(() =>
+      prepareCliEnvironmentPlan(
+        'oversized-environment',
+        oversized,
+        undefined,
+        undefined
+      )
+    ).toThrow(/total size limit/i)
+  })
+
   it('creates an opaque revision, retains blank edits, and never needs values in profile metadata', () => {
     const initial = prepareCliEnvironmentPlan(
       'enterprise-cli',
@@ -116,6 +160,80 @@ describe('CLI profile environments', () => {
     } as unknown as SecretVault
     expect(() => resolveCliEnvironment(vault, storedProvider)).toThrow(
       /no longer match/i
+    )
+  })
+
+  it('can replace or clear an unreadable legacy environment without overwriting its slot', () => {
+    const storedProvider = provider('a'.repeat(64))
+    const replaced = prepareCliEnvironmentPlan(
+      storedProvider.id,
+      [{ name: 'ACME_AGENT_TOKEN', value: 'replacement-secret' }],
+      storedProvider,
+      undefined
+    )
+    expect(replaced).toMatchObject({
+      mutation: 'set',
+      variables: ['ACME_AGENT_TOKEN']
+    })
+    expect(replaced.revision).toMatch(/^[a-f0-9]{64}$/u)
+    expect(replaced.secretReference).not.toBe(
+      cliEnvironmentSecretReference(storedProvider.id)
+    )
+    expect(replaced.obsoleteSecretReferences).toContain(
+      cliEnvironmentSecretReference(storedProvider.id)
+    )
+
+    const cleared = prepareCliEnvironmentPlan(
+      storedProvider.id,
+      [],
+      storedProvider,
+      undefined
+    )
+    expect(cleared).toMatchObject({
+      mutation: 'delete',
+      variables: []
+    })
+
+    expect(() =>
+      prepareCliEnvironmentPlan(
+        storedProvider.id,
+        [{ name: 'ACME_AGENT_TOKEN', value: '' }],
+        storedProvider,
+        undefined
+      )
+    ).toThrow(/unavailable/i)
+  })
+
+  it('resolves a versioned environment only from its exact revision', () => {
+    const storedProvider = {
+      ...provider('c'.repeat(64)),
+      environmentRevision: 'd'.repeat(64)
+    }
+    const exact = cliEnvironmentSecretReference(
+      storedProvider.id,
+      storedProvider.environmentRevision
+    )
+    const legacy = cliEnvironmentSecretReference(storedProvider.id)
+    const vault = {
+      get: vi.fn((candidate: string) =>
+        candidate === exact
+          ? serializedEnvironment(storedProvider.environmentFingerprint as string, {
+              ACME_AGENT_TOKEN: 'versioned-secret'
+            })
+          : candidate === legacy
+            ? serializedEnvironment(storedProvider.environmentFingerprint as string, {
+                ACME_AGENT_TOKEN: 'stale-legacy-secret'
+              })
+            : undefined
+      )
+    } as unknown as SecretVault
+
+    expect(resolveCliEnvironment(vault, storedProvider)).toEqual({
+      ACME_AGENT_TOKEN: 'versioned-secret'
+    })
+    expect((vault.get as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(exact)
+    expect((vault.get as ReturnType<typeof vi.fn>)).not.toHaveBeenCalledWith(
+      legacy
     )
   })
 

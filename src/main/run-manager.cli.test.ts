@@ -10,6 +10,7 @@ import type {
   Task
 } from '../shared/types'
 import { createProcessLaunchEnvelope } from './process-launch'
+import { providerConfigurationFingerprint } from './provider-revision'
 import type { CliInvocationAuthorizer } from './providers/cli'
 import { RunManager } from './run-manager'
 import { BUILT_IN_CLI_RUNTIME_BINDINGS } from './cli-runtime-bindings'
@@ -52,6 +53,72 @@ process.stdin.on('end', () => {
     emit({
       type: 'item.completed',
       item: { type: 'agent_message', text: 'Codex finished.' }
+    })
+    return
+  }
+  if (dialect === 'antigravity') {
+    emit({
+      event: 'init',
+      conversation_id: 'antigravity-session',
+      init: {
+        cwd: process.cwd(),
+        tools: ['run_command'],
+        permission_mode: 'request-review'
+      }
+    })
+    emit({
+      event: 'step_update',
+      step_update: {
+        conversation_id: 'antigravity-session',
+        step_index: 4,
+        state: 'ACTIVE',
+        step_type: 'tool',
+        tool_name: 'run_command',
+        tool_info: {
+          name: 'run_command',
+          parameters: { CommandLine: 'npm test' }
+        }
+      }
+    })
+    emit({
+      event: 'step_update',
+      step_update: {
+        conversation_id: 'antigravity-session',
+        step_index: 4,
+        state: 'DONE',
+        step_type: 'tool',
+        tool_name: 'run_command',
+        tool_info: {
+          name: 'run_command',
+          parameters: { CommandLine: 'npm test' },
+          output: 'passed'
+        }
+      }
+    })
+    emit({
+      event: 'step_update',
+      step_update: {
+        conversation_id: 'antigravity-session',
+        step_index: 5,
+        state: 'DONE',
+        step_type: 'agent_response',
+        text_delta: 'Antigravity finished.'
+      }
+    })
+    emit({
+      event: 'result',
+      result: {
+        conversation_id: 'antigravity-session',
+        status: 'SUCCESS',
+        response: 'Antigravity finished.',
+        usage: {
+          input_tokens: 5,
+          output_tokens: 2,
+          thinking_tokens: 1,
+          cache_read_tokens: 3,
+          total_tokens: 7
+        }
+      }
     })
     return
   }
@@ -113,6 +180,7 @@ async function runCliFixture(
     environmentSecret?: string
     emitSensitiveActivity?: boolean
     savedSessionId?: string
+    savedSessionEnvironmentRevision?: string
   } = {}
 ): Promise<{
   activities: ActivityItem[]
@@ -142,24 +210,39 @@ async function runCliFixture(
     args:
       adapter === 'codex'
         ? [fixture, 'exec', '--json', `--dialect=${adapter}`, '-']
-        : [
-            fixture,
-            `--dialect=${adapter}`,
-            ...(options.emitSensitiveActivity
-              ? ['--sensitive-runtime']
-              : []),
-            ...(options.stopAfterFirstRuntimeActivity ? ['--hold'] : [])
-          ],
-    promptMode: 'stdin',
+        : adapter === 'antigravity'
+          ? [
+              fixture,
+              `--dialect=${adapter}`,
+              '-p',
+              '{prompt}',
+              '--output-format',
+              'stream-json'
+            ]
+          : [
+              fixture,
+              `--dialect=${adapter}`,
+              ...(options.emitSensitiveActivity
+                ? ['--sensitive-runtime']
+                : []),
+              ...(options.stopAfterFirstRuntimeActivity ? ['--hold'] : [])
+            ],
+    promptMode: adapter === 'antigravity' ? 'argument' : 'stdin',
     outputMode: 'ndjson',
     cliAdapter: adapter,
     ...(options.environmentSecret
       ? {
           environmentVariables: ['ACME_AGENT_TOKEN'],
-          environmentFingerprint: 'f'.repeat(64)
+          environmentFingerprint: 'f'.repeat(64),
+          environmentRevision: 'e'.repeat(64)
         }
       : {}),
     trustConfirmed: true,
+    verification: {
+      status: 'passed',
+      scope: 'configuration',
+      checkedAt: timestamp
+    },
     createdAt: timestamp,
     updatedAt: timestamp
   }
@@ -175,6 +258,16 @@ async function runCliFixture(
           sessionCompatibilityId: binding.sessionCompatibilityId,
           sessionId: options.savedSessionId,
           providerRevision: provider.updatedAt,
+          providerFingerprint:
+            providerConfigurationFingerprint(
+              options.savedSessionEnvironmentRevision
+                ? {
+                    ...provider,
+                    environmentRevision:
+                      options.savedSessionEnvironmentRevision
+                  }
+                : provider
+            ),
           workspacePath: workspace,
           mode: 'agent',
           updatedAt: timestamp
@@ -314,6 +407,22 @@ describe('RunManager CLI activity lifecycle', () => {
     expect(run.activities.some((item) => item.status === 'running')).toBe(false)
   })
 
+  it('runs Antigravity structured events through the canonical lifecycle', async () => {
+    const run = await runCliFixture('antigravity')
+    expect(run.terminal).toMatchObject({ type: 'run-completed' })
+    expect(
+      run.activities.find((item) => item.title === 'run_command')
+    ).toMatchObject({
+      activityType: 'command',
+      detail: '"passed"',
+      status: 'success'
+    })
+    expect(
+      run.task.runtimeSessions?.['antigravity-fixture']?.sessionId
+    ).toBe('antigravity-session')
+    expect(run.activities.some((item) => item.status === 'running')).toBe(false)
+  })
+
   it('finalizes an in-flight CLI activity when the user stops the run', async () => {
     const run = await runCliFixture('gemini', {
       stopAfterFirstRuntimeActivity: true
@@ -359,5 +468,20 @@ describe('RunManager CLI activity lifecycle', () => {
       run.task.runtimeSessions?.['gemini-fixture']?.sessionId
     ).toBe('gemini-session')
     expect(JSON.stringify(run.task)).not.toContain(secret)
+  })
+
+  it('does not resume a same-timestamp session after the CLI environment revision changes', async () => {
+    const previousSession = 'previous-environment-session'
+    const run = await runCliFixture('gemini', {
+      environmentSecret: 'current-environment-secret',
+      savedSessionId: previousSession,
+      savedSessionEnvironmentRevision: 'd'.repeat(64)
+    })
+
+    expect(run.terminal).toMatchObject({ type: 'run-completed' })
+    expect(run.authorizationArgs.flat()).not.toContain(previousSession)
+    expect(
+      run.task.runtimeSessions?.['gemini-fixture']?.sessionId
+    ).toBe('gemini-session')
   })
 })

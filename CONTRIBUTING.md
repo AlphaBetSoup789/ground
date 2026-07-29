@@ -1,8 +1,9 @@
 # Contributing to Ground
 
-Ground is an early open-source coding-agent workspace. Contributions are welcome,
-especially around provider adapters, security boundaries, durable storage,
-accessibility, Git/worktree workflows, and cross-platform behavior.
+Ground is a public-alpha open-source coding-agent workspace. Contributions are
+welcome, especially around provider adapters, security boundaries, durable
+storage, accessibility, Git/worktree workflows, and cross-platform behavior. The
+alpha is experimental and is not a supported production binary.
 
 ## Before you start
 
@@ -45,6 +46,7 @@ Useful commands:
 ```bash
 npm run typecheck
 npm test
+npm run test:e2e:renderer
 npm run test:watch
 npm run build
 npm run build-deps:check
@@ -52,19 +54,39 @@ npm run install-scripts:check
 npm run compatibility:check
 npm run adapter-sdk:pack-check
 npm run licenses:check
-npm run package:mac
+npm run dist:mac:unsigned
+npm run dist:win:unsigned
+npm run dist:linux
 npm run smoke:package:launch
 npm run smoke:package:native
+npm run smoke:package:distributable
 ```
 
-`package:mac` creates an unsigned local preview beneath `release/`; it is not an
-official release artifact. Native distributables must be built on their target
-operating system with `dist:mac`, `dist:win`, or `dist:linux`; the manual packaging
-workflow does the same on native hosted runners. The launch smoke verifies the
+Run only the matching host’s explicit preview command. These create unsigned local
+artifacts beneath `release/`; they are not official release artifacts. Native
+distributables must be built on their target operating system; the manual packaging
+workflow does the same on native hosted runners after source and renderer-E2E
+verification. The launch smoke verifies the
 unpacked app's main process, renderer document, and sandboxed preload without
-browser automation. The native smoke additionally exercises the packaged PTY
-binding, Git status, a fixed local stdio MCP exchange, and bounded process-tree
-cleanup.
+browser automation. The native smoke additionally checks packaged identity,
+performs an OS-encrypted credential-vault round trip, opens and automatically
+cancels a real native approval dialog, and exercises the packaged PTY binding, Git
+status, a fixed exact-envelope local stdio MCP exchange, and bounded process-tree
+cleanup. The distributable smoke reruns that native scope after extracting the
+macOS ZIP, temporarily installing and verifying removal of the Windows NSIS
+package, or extracting the Linux AppImage. It does not test DMG or DEB installation.
+
+Linux native/distributable smokes and real credential saves require a working
+Secret Service/libsecret backend and an unlocked keyring; Electron’s `basic_text`
+fallback is intentionally rejected. The hosted workflows create an ephemeral D-Bus
+and GNOME-keyring session for their fixed probes.
+
+`test:e2e:renderer` builds the explicitly flagged browser preview and launches its
+real React renderer in Electron through Playwright Core. It uses the deterministic
+preview desktop mock—not the production preload/main process—to cover keyboard
+focus, provider-form validation, task-local drafts, send/cancel, archive/search,
+responsive layout, and reduced motion. Treat it as renderer interaction evidence,
+not native IPC, screen-reader, provider, or packaged-app certification.
 
 ## Repository map
 
@@ -75,6 +97,7 @@ cleanup.
 | `src/main/` | Desktop composition, policy, storage, tools, secrets, and runtimes |
 | `src/main/agent/` | Canonical provider-neutral contracts, event reducers, registry, and adapters |
 | `packages/adapter-sdk/` | Provisional publishable manifest, declarations build, and adapter SDK guide |
+| `examples/` | Small dependency-free connection examples for public integration contracts |
 | `src/main/providers/` | Current provider/runtime transport implementations |
 | `src/shared/` | Typed IPC and renderer-safe data structures |
 | `docs/` | Architecture, compatibility, SDK, and threat-model documentation |
@@ -126,6 +149,8 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
 - Map authentication, rate-limit, timeout, cancellation, protocol, and mid-stream
   failures into typed provider errors.
 - Add provider-independent contract fixtures and protocol-specific mocked tests.
+- Ensure save invalidates readiness, Test persists only for the exact saved
+  revision, and run startup remains blocked until that revision passes.
 - Pass `assertModelAdapterConformance` with one valid configuration and at least
   one rejected configuration fixture.
 - Document data egress, endpoint rules, tool behavior, and tested model/version
@@ -152,9 +177,18 @@ separate design and explicit user consent.
   cross-delta output; Ground’s projection redaction is defense in depth, not an
   adapter API.
 - Pin fixtures to a documented CLI version and cover malformed/unknown events.
+- If adding discovery or selection, keep it passive and bounded: do not recursively
+  scan user directories or execute a candidate before the native trust boundary.
 - Validate every emitted object with `AgentRuntimeEventReducer` and pass
   `assertAgentRuntimeAdapterConformance` using a deterministic mocked process.
 - Do not enable bypass, unsafe, or “trust everything” flags by default.
+
+Compatibility and application tests must remain reproducible with local fixtures,
+mocked transports/processes, deterministic loopback wire servers, and deterministic
+child programs. CI must never require a provider key or paid model request. Fixed
+native package probes may exercise local OS facilities, but their results must not
+be described as live-provider, live-CLI, signing, accessibility, or distribution
+certification.
 
 ## Security-sensitive changes
 
@@ -182,6 +216,11 @@ tests for configuration drift, stale renderer capabilities, cancellation, helper
 process cleanup, and platform-specific limitations. Keep residual pathname races,
 interpreter/helper identity, large executable hashing, and best-effort descendant
 termination explicit in the security documentation.
+
+Git executable changes must preserve passive bounded discovery, dynamic exclusion
+of workspace-controlled candidates, main-owned selection/confirmation,
+post-confirmation 2.23+ probing, private preference-as-hint semantics, and exact
+process-local identity revalidation before every launch.
 
 ## Pull requests
 

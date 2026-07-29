@@ -1,5 +1,6 @@
 {
   "name": "ground",
+  "productName": "Ground",
   "version": "0.1.0",
   "private": true,
   "description": "The open workspace for coding agents.",
@@ -27,6 +28,7 @@
     "build": "npm run typecheck && electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run",
+    "test:e2e:renderer": "npm run build:preview && node scripts/test-renderer-electron.mjs",
     "test:watch": "vitest",
     "compatibility:check": "node scripts/check-compatibility-fixtures.mjs",
     "adapter-sdk:build": "node scripts/build-adapter-sdk.mjs",
@@ -35,6 +37,8 @@
     "licenses:generate": "node scripts/check-production-licenses.mjs --write",
     "licenses:check": "node scripts/check-production-licenses.mjs --check",
     "package:inventory": "node scripts/generate-packaged-components.mjs",
+    "package-artifacts:verify": "node scripts/verify-package-artifacts.mjs",
+    "package-evidence:verify": "node scripts/verify-package-runtime-evidence.mjs",
     "sbom:release": "node scripts/generate-release-sbom.mjs",
     "sbom:verify": "node scripts/verify-release-sbom.mjs",
     "checksums:release": "node scripts/generate-release-checksums.mjs",
@@ -44,11 +48,14 @@
     "package:mac": "npm run build && electron-builder --mac dir --publish never",
     "package:zip": "npm run build && electron-builder --mac zip --publish never",
     "dist:mac": "npm run build && electron-builder --mac zip dmg --publish never",
-    "dist:mac:unsigned": "env -u CSC_LINK -u CSC_KEY_PASSWORD -u APPLE_ID -u APPLE_APP_SPECIFIC_PASSWORD -u APPLE_TEAM_ID CSC_IDENTITY_AUTO_DISCOVERY=false npm run dist:mac",
+    "dist:mac:unsigned": "env -u CSC_LINK -u CSC_KEY_PASSWORD -u CSC_NAME -u APPLE_ID -u APPLE_APP_SPECIFIC_PASSWORD -u APPLE_TEAM_ID -u APPLE_API_KEY -u APPLE_API_KEY_ID -u APPLE_API_ISSUER -u APPLE_KEYCHAIN -u APPLE_KEYCHAIN_PROFILE CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && env -u CSC_LINK -u CSC_KEY_PASSWORD -u CSC_NAME -u APPLE_ID -u APPLE_APP_SPECIFIC_PASSWORD -u APPLE_TEAM_ID -u APPLE_API_KEY -u APPLE_API_KEY_ID -u APPLE_API_ISSUER -u APPLE_KEYCHAIN -u APPLE_KEYCHAIN_PROFILE CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac zip dmg --publish never",
     "dist:win": "npm run build && electron-builder --win nsis --publish never",
+    "dist:win:unsigned": "set WIN_CSC_LINK=&& set WIN_CSC_KEY_PASSWORD=&& set CSC_LINK=&& set CSC_KEY_PASSWORD=&& set CSC_NAME=&& set CSC_IDENTITY_AUTO_DISCOVERY=false&& npm run build && electron-builder --win nsis --publish never",
     "dist:linux": "npm run build && electron-builder --linux AppImage deb --publish never",
     "smoke:package:launch": "node scripts/smoke-packaged-runtime.mjs launch",
     "smoke:package:native": "node scripts/smoke-packaged-runtime.mjs native",
+    "smoke:package:distributable": "node scripts/smoke-distributable-runtime.mjs",
+    "verify:package:mac:unsigned": "node scripts/verify-unsigned-mac-preview.mjs",
     "smoke:package:mac": "node scripts/smoke-packaged-pty.mjs"
   },
   "dependencies": {
@@ -83,6 +90,7 @@
     "electron": "^43.2.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
+    "playwright-core": "1.62.0",
     "typescript": "^6.0.3",
     "vite": "^7.3.6",
     "vitest": "^4.1.10"

@@ -22,6 +22,7 @@ import {
   createRegisteredAgentRuntimeFactory,
   type AgentRuntimeFactory
 } from './run-manager'
+import { providerConfigurationFingerprint } from './provider-revision'
 import type { SecretVault } from './secrets'
 import { StateStore } from './store'
 
@@ -177,6 +178,11 @@ async function runFixture(options: {
         }
       : {}),
     trustConfirmed: true,
+    verification: {
+      status: 'passed',
+      scope: 'configuration',
+      checkedAt: TIMESTAMP
+    },
     createdAt: TIMESTAMP,
     updatedAt: TIMESTAMP
   }
@@ -192,6 +198,8 @@ async function runFixture(options: {
             options.savedSession.sessionId ??
             'runtime-session-previous',
           providerRevision: provider.updatedAt,
+          providerFingerprint:
+            providerConfigurationFingerprint(provider),
           workspacePath: workspace,
           mode: task.mode,
           updatedAt: TIMESTAMP
@@ -308,7 +316,8 @@ describe('RunManager registered agent-runtime integration', () => {
       adapterId: adapter.id,
       sessionCompatibilityId: 'scripted-session-v1',
       sessionId: 'runtime-session-next',
-      providerRevision: TIMESTAMP
+      providerRevision: TIMESTAMP,
+      providerFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u)
     })
     expect(
       run.events.filter((event) => event.type === 'text-delta')

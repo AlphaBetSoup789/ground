@@ -12,11 +12,19 @@ import {
 } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { describe, expect, it } from 'vitest'
-import type { ModelApiProvider, TaskItem } from '../shared/types'
+import { describe, expect, it, vi } from 'vitest'
+import type {
+  ModelApiProvider,
+  RecoveryNotice,
+  TaskItem
+} from '../shared/types'
 import { MAX_PERSISTED_TASK_ITEMS } from './state-schema'
-import { StateStore } from './store'
+import {
+  StatePersistenceError,
+  StateStore
+} from './store'
 import type { GroundTaskImportTemplate } from './task-portability'
+import { providerConfigurationFingerprint } from './provider-revision'
 
 const importedTemplate = (
   overrides: Partial<GroundTaskImportTemplate> = {}
@@ -145,6 +153,54 @@ describe('StateStore', () => {
     await expect(store.createTask()).resolves.toMatchObject({
       providerId: 'ollama-local'
     })
+  })
+
+  it('atomically journals staged and obsolete credential references outside renderer snapshots', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-store-'))
+    const filePath = path.join(directory, 'state.json')
+    const store = new StateStore(filePath)
+    await store.load()
+    const timestamp = new Date().toISOString()
+    const provider: ModelApiProvider = {
+      id: 'journaled-provider',
+      name: 'Journaled provider',
+      kind: 'openai',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'test-model',
+      hasApiKey: true,
+      credentialRevision: 'credential_current',
+      supportsTools: true,
+      createdAt: timestamp,
+      updatedAt: timestamp
+    }
+    const staged = 'provider-credential:v2:staged'
+    const obsolete = 'provider-credential:v1:obsolete'
+
+    await store.queueProvisionalSecretDelete(staged)
+    expect(store.pendingSecretDeletes()).toEqual([staged])
+    expect(store.snapshot()).not.toHaveProperty('pendingSecretDeletes')
+
+    await store.publishProviderSecretTransition(
+      provider,
+      staged,
+      [obsolete]
+    )
+    expect(store.pendingSecretDeletes()).toEqual([obsolete])
+
+    const persisted = JSON.parse(await readFile(filePath, 'utf8')) as {
+      pendingSecretDeletes?: string[]
+    }
+    expect(persisted.pendingSecretDeletes).toEqual([obsolete])
+
+    const reloaded = new StateStore(filePath)
+    await reloaded.load()
+    expect(reloaded.pendingSecretDeletes()).toEqual([obsolete])
+    await reloaded.acknowledgeSecretDeletes([obsolete])
+    expect(reloaded.pendingSecretDeletes()).toEqual([])
+
+    await reloaded.deleteProviderWithSecretTransition(provider.id, [staged])
+    expect(reloaded.pendingSecretDeletes()).toEqual([staged])
+    expect(() => reloaded.getProvider(provider.id)).toThrow(/not found/i)
   })
 
   it('persists tasks and recovers interrupted run status', async () => {
@@ -826,6 +882,8 @@ describe('StateStore', () => {
     expect(imported.modelSessions?.[exactProvider.id]).toMatchObject({
       adapterId: 'anthropic.messages',
       providerRevision: exactProvider.updatedAt,
+      providerFingerprint:
+        providerConfigurationFingerprint(exactProvider),
       model: exactProvider.model,
       includesImportedHistory: true,
       origin: 'imported'
@@ -1073,6 +1131,9 @@ describe('StateStore', () => {
         'ollama-local': {
           adapterId: 'openai.compatible',
           providerRevision: store.getProvider('ollama-local').updatedAt,
+          providerFingerprint: providerConfigurationFingerprint(
+            store.getProvider('ollama-local')
+          ),
           model: 'llama3.2',
           workspacePath: directory,
           mode: 'agent',
@@ -1181,6 +1242,9 @@ describe('StateStore', () => {
     const session = forked.modelSessions?.['ollama-local']
     expect(session).not.toHaveProperty('checkpoint')
     expect(session).toMatchObject({
+      providerFingerprint: providerConfigurationFingerprint(
+        store.getProvider('ollama-local')
+      ),
       includesImportedHistory: true,
       origin: 'ground'
     })
@@ -1384,6 +1448,57 @@ describe('StateStore', () => {
     expect(restored.snapshot().recoveryNotice).toBeUndefined()
   })
 
+  it('seals every later mutation after an ambiguous state publication', async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), 'ground-store-uncertain-')
+    )
+    const filePath = path.join(directory, 'state.json')
+    const bootstrap = new StateStore(filePath)
+    await bootstrap.load()
+    const task = await bootstrap.createTask()
+    const uncertainty = new StatePersistenceError(
+      Object.assign(new Error('directory sync failed'), { code: 'EIO' })
+    )
+    const persistStateDocument = vi.fn(
+      async (targetPath: string, payload: string) => {
+        // Model a successful primary rename followed by a late directory-fsync
+        // failure: disk has selected the candidate while memory must not.
+        await writeFile(targetPath, payload, { encoding: 'utf8', mode: 0o600 })
+        throw uncertainty
+      }
+    )
+    const onPersistenceUncertain = vi.fn()
+    const store = new StateStore(filePath, {
+      persistStateDocument,
+      onPersistenceUncertain
+    })
+    await store.load()
+
+    await expect(
+      store.mutateTask(task.id, (mutable) => {
+        mutable.title = 'Disk-selected candidate'
+      })
+    ).rejects.toBe(uncertainty)
+
+    expect(store.getTask(task.id).title).toBe('New task')
+    expect(onPersistenceUncertain).toHaveBeenCalledOnce()
+    expect(onPersistenceUncertain).toHaveBeenCalledWith(uncertainty)
+
+    const selectedDiskGeneration = new StateStore(filePath)
+    await selectedDiskGeneration.load()
+    expect(selectedDiskGeneration.getTask(task.id).title).toBe(
+      'Disk-selected candidate'
+    )
+
+    await expect(
+      store.mutateTask(task.id, (mutable) => {
+        mutable.title = 'Must never publish'
+      })
+    ).rejects.toBe(uncertainty)
+    expect(persistStateDocument).toHaveBeenCalledTimes(1)
+    expect(onPersistenceUncertain).toHaveBeenCalledTimes(1)
+  })
+
   it('propagates operational load errors without treating them as corruption', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-store-'))
     const blockingPath = path.join(directory, 'not-a-directory')
@@ -1441,6 +1556,331 @@ describe('StateStore', () => {
     expect(
       (await readdir(directory)).filter((name) => name.endsWith('.tmp'))
     ).toEqual([])
+  })
+
+  it('retains three generations of validated local state', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-store-'))
+    const filePath = path.join(directory, 'state.json')
+    const store = new StateStore(filePath)
+    await store.load()
+    const task = await store.createTask(directory)
+    for (const title of ['First', 'Second', 'Third']) {
+      await store.mutateTask(task.id, (mutable) => {
+        mutable.title = title
+      })
+    }
+
+    const titles = await Promise.all(
+      [
+        filePath,
+        `${filePath}.bak`,
+        `${filePath}.bak.2`,
+        `${filePath}.bak.3`
+      ].map(async (candidate) => {
+        const state = JSON.parse(await readFile(candidate, 'utf8')) as {
+          tasks: Array<{ title: string }>
+        }
+        return state.tasks[0]?.title
+      })
+    )
+    expect(titles).toEqual(['Third', 'Second', 'First', 'New task'])
+  })
+
+  it('lists current and retained snapshots with opaque bounded metadata', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-store-'))
+    const filePath = path.join(directory, 'state.json')
+    const store = new StateStore(filePath)
+    await store.load()
+    const task = await store.createTask(directory)
+    await store.mutateTask(task.id, (mutable) => {
+      mutable.title = 'First'
+    })
+
+    const snapshots = await store.listLocalStateSnapshots()
+
+    expect(snapshots).toHaveLength(4)
+    expect(snapshots.map((snapshot) => snapshot.generation)).toEqual([
+      0, 1, 2, 3
+    ])
+    expect(snapshots.map((snapshot) => snapshot.kind)).toEqual([
+      'current',
+      'retained',
+      'retained',
+      'retained'
+    ])
+    expect(snapshots[0]).toMatchObject({
+      status: 'valid',
+      taskCount: 1,
+      providerCount: 1
+    })
+    expect(snapshots[0]?.id).toMatch(
+      /^state_snapshot_[0-9a-f-]{36}$/u
+    )
+    expect(snapshots[0]).not.toHaveProperty('filePath')
+    expect(snapshots[3]).toMatchObject({ status: 'unavailable' })
+    expect(snapshots[3]).not.toHaveProperty('capturedAt')
+
+    snapshots[0]!.status = 'invalid'
+    const refreshed = await store.listLocalStateSnapshots()
+    expect(refreshed[0]?.status).toBe('valid')
+  })
+
+  it('exports the exact validated generation without credential material', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-store-'))
+    const filePath = path.join(directory, 'state.json')
+    const exportPath = path.join(directory, 'selected.ground-state.json')
+    const store = new StateStore(filePath)
+    await store.load()
+    const task = await store.createTask(directory)
+    for (const title of ['First', 'Second', 'Third']) {
+      await store.mutateTask(task.id, (mutable) => {
+        mutable.title = title
+      })
+    }
+    const snapshots = await store.listLocalStateSnapshots()
+    const selected = snapshots.find(
+      (snapshot) => snapshot.generation === 2
+    )
+    expect(selected?.status).toBe('valid')
+
+    await store.exportLocalStateSnapshot(selected!.id, exportPath)
+
+    const exportedText = await readFile(exportPath, 'utf8')
+    const exported = JSON.parse(exportedText) as {
+      version: number
+      tasks: Array<{ title: string }>
+    }
+    expect(exported.version).toBe(2)
+    expect(exported.tasks[0]?.title).toBe('First')
+    expect(exportedText).not.toContain('apiKey')
+    expect(exportedText).not.toContain('ground-secrets')
+    if (process.platform !== 'win32') {
+      expect((await stat(exportPath)).mode & 0o777).toBe(0o600)
+    }
+  })
+
+  it('rejects traversal, corrupt generations, and selections that changed', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-store-'))
+    const filePath = path.join(directory, 'state.json')
+    const targetPath = path.join(directory, 'should-not-exist.json')
+    const store = new StateStore(filePath)
+    await store.load()
+    const task = await store.createTask(directory)
+    await store.mutateTask(task.id, (mutable) => {
+      mutable.title = 'First'
+    })
+
+    await expect(
+      store.exportLocalStateSnapshot('../../state.json', targetPath)
+    ).rejects.toThrow('identifier')
+    await writeFile(`${filePath}.bak`, '{"version":2,"tasks":', 'utf8')
+    const withCorruption = await store.listLocalStateSnapshots()
+    const corrupt = withCorruption.find(
+      (snapshot) => snapshot.generation === 1
+    )
+    expect(corrupt).toEqual(
+      expect.objectContaining({
+        status: 'invalid',
+        capturedAt: expect.any(String),
+        sizeBytes: expect.any(Number)
+      })
+    )
+    expect(corrupt).not.toHaveProperty('detail')
+    await expect(
+      store.exportLocalStateSnapshot(corrupt!.id, targetPath)
+    ).rejects.toThrow('not available')
+
+    const validCurrent = withCorruption[0]!
+    await store.mutateTask(task.id, (mutable) => {
+      mutable.title = 'Changed after selection'
+    })
+    await expect(
+      store.exportLocalStateSnapshot(validCurrent.id, targetPath)
+    ).rejects.toThrow('changed or became unavailable')
+    await expect(stat(targetPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it.runIf(process.platform !== 'win32')(
+    'does not follow a retained-snapshot symlink during listing or export',
+    async () => {
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-store-'))
+      const filePath = path.join(directory, 'state.json')
+      const targetPath = path.join(directory, 'export.json')
+      const store = new StateStore(filePath)
+      await store.load()
+      await store.createTask(directory)
+
+      const outsidePath = path.join(directory, 'outside.json')
+      const outsideStore = new StateStore(outsidePath)
+      await outsideStore.load()
+      const outsideTask = await outsideStore.createTask(directory)
+      await outsideStore.mutateTask(outsideTask.id, (mutable) => {
+        mutable.title = 'Must never be selected'
+      })
+      const outsideContents = await readFile(outsidePath, 'utf8')
+
+      await unlink(`${filePath}.bak`)
+      await symlink(outsidePath, `${filePath}.bak`)
+      const snapshots = await store.listLocalStateSnapshots()
+      const linked = snapshots.find(
+        (snapshot) => snapshot.generation === 1
+      )!
+
+      expect(linked.status).toBe('invalid')
+      expect(linked).not.toHaveProperty('taskCount')
+      await expect(
+        store.exportLocalStateSnapshot(linked.id, targetPath)
+      ).rejects.toThrow('not available')
+      expect(await readFile(outsidePath, 'utf8')).toBe(outsideContents)
+      await expect(stat(targetPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+  )
+
+  it('migrates a validated version-1 retained snapshot during restore', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-store-'))
+    const filePath = path.join(directory, 'state.json')
+    const store = new StateStore(filePath)
+    await store.load()
+    await store.createTask(directory)
+    const retainedPath = `${filePath}.bak`
+    const retained = JSON.parse(await readFile(retainedPath, 'utf8')) as {
+      version: number
+    }
+    retained.version = 1
+    await writeFile(retainedPath, JSON.stringify(retained), {
+      encoding: 'utf8',
+      mode: 0o600
+    })
+    const snapshots = await store.listLocalStateSnapshots()
+    const versionOne = snapshots.find(
+      (snapshot) => snapshot.generation === 1
+    )!
+
+    expect(versionOne.status).toBe('valid')
+    await store.restoreLocalStateSnapshot(versionOne.id)
+
+    const restored = JSON.parse(await readFile(filePath, 'utf8')) as {
+      version: number
+    }
+    expect(restored.version).toBe(2)
+  })
+
+  it('restores only the selected retained snapshot and rotates current state', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-store-'))
+    const filePath = path.join(directory, 'state.json')
+    const store = new StateStore(filePath)
+    await store.load()
+    const task = await store.createTask(directory)
+    for (const title of ['First', 'Second', 'Third']) {
+      await store.mutateTask(task.id, (mutable) => {
+        mutable.title = title
+      })
+    }
+    const snapshots = await store.listLocalStateSnapshots()
+    const current = snapshots[0]!
+    const selected = snapshots.find(
+      (snapshot) => snapshot.generation === 2
+    )!
+
+    await expect(
+      store.restoreLocalStateSnapshot(current.id)
+    ).rejects.toThrow('retained')
+    await store.restoreLocalStateSnapshot(selected.id)
+
+    expect(store.getTask(task.id).title).toBe('First')
+    const titles = await Promise.all(
+      [
+        filePath,
+        `${filePath}.bak`,
+        `${filePath}.bak.2`,
+        `${filePath}.bak.3`
+      ].map(async (candidate) => {
+        const state = JSON.parse(await readFile(candidate, 'utf8')) as {
+          tasks: Array<{ title: string }>
+        }
+        return state.tasks[0]?.title
+      })
+    )
+    expect(titles).toEqual(['First', 'Third', 'Second', 'First'])
+    await expect(
+      store.restoreLocalStateSnapshot(selected.id)
+    ).rejects.toThrow('expired')
+  })
+
+  it('recovers interrupted markers while restoring a retained snapshot', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-store-'))
+    const filePath = path.join(directory, 'state.json')
+    const store = new StateStore(filePath)
+    await store.load()
+    const task = await store.createTask(directory)
+    await store.mutateTask(task.id, (mutable) => {
+      mutable.runStatus = 'running'
+      mutable.items.push({
+        id: 'pending-restored-approval',
+        kind: 'activity',
+        runId: 'restored-run',
+        activityType: 'approval',
+        title: 'Approve restored action',
+        status: 'pending',
+        approvalId: 'stale-restored-approval',
+        createdAt: '2026-07-28T12:00:00.000Z'
+      })
+    })
+    await store.mutateTask(task.id, (mutable) => {
+      mutable.runStatus = 'idle'
+      const activity = mutable.items[0]
+      if (activity?.kind === 'activity') {
+        activity.status = 'success'
+        delete activity.approvalId
+      }
+    })
+    const snapshots = await store.listLocalStateSnapshots()
+    const interrupted = snapshots.find(
+      (snapshot) => snapshot.generation === 1
+    )!
+
+    await store.restoreLocalStateSnapshot(interrupted.id)
+
+    const restored = store.getTask(task.id)
+    expect(restored.runStatus).toBe('failed')
+    expect(restored.items[0]).toMatchObject({
+      kind: 'activity',
+      status: 'error'
+    })
+    expect(restored.items[0]).not.toHaveProperty('approvalId')
+    expect(restored.items.at(-1)).toMatchObject({
+      kind: 'activity',
+      activityType: 'error',
+      title: 'Run interrupted'
+    })
+  })
+
+  it('falls back through corrupt retained backups to the oldest valid generation', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-store-'))
+    const filePath = path.join(directory, 'state.json')
+    const first = new StateStore(filePath)
+    await first.load()
+    const task = await first.createTask(directory)
+    for (const title of ['First', 'Second', 'Third']) {
+      await first.mutateTask(task.id, (mutable) => {
+        mutable.title = title
+      })
+    }
+    await Promise.all(
+      [filePath, `${filePath}.bak`, `${filePath}.bak.2`].map((candidate) =>
+        writeFile(candidate, '{"version":1,"tasks":', 'utf8')
+      )
+    )
+
+    const recovered = new StateStore(filePath)
+    await recovered.load()
+
+    expect(recovered.getTask(task.id).title).toBe('New task')
+    expect(recovered.snapshot().recoveryNotice?.kind).toBe('backup-restored')
+    const entries = await readdir(directory)
+    expect(
+      entries.filter((name) => name.includes('.unreadable-'))
+    ).toHaveLength(3)
   })
 
   it.runIf(process.platform !== 'win32')(
@@ -1509,6 +1949,14 @@ describe('StateStore', () => {
       kind: 'backup-restored',
       title: 'Recovered local history'
     })
+    expect(recovered.shouldDeferPendingSecretDeletes()).toBe(true)
+    recovered.addRecoveryNotice({
+      id: 'credential-warning:combined',
+      kind: 'credential-warning',
+      title: 'Saved credentials need attention',
+      detail: 'Credential warning'
+    })
+    expect(recovered.shouldDeferPendingSecretDeletes()).toBe(true)
     expect(
       (await readdir(directory)).some((name) =>
         name.startsWith('state.json.unreadable-')
@@ -1532,5 +1980,48 @@ describe('StateStore', () => {
 
     expect(recovered.getTask(task.id).title).toBe('New task')
     expect(recovered.snapshot().recoveryNotice?.kind).toBe('backup-restored')
+  })
+
+  it('merges recovery notices by severity without persisting or duplicating them', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-store-'))
+    const filePath = path.join(directory, 'state.json')
+    const store = new StateStore(filePath)
+    await store.load()
+    const credentialNotice: RecoveryNotice = {
+      id: 'credential-warning:test',
+      kind: 'credential-warning',
+      title: 'Saved credentials need attention',
+      detail: 'Re-enter affected credentials.'
+    }
+    store.addRecoveryNotice(credentialNotice)
+    store.addRecoveryNotice(credentialNotice)
+    await store.createTask(directory)
+    const stateNotice: RecoveryNotice = {
+      id: 'state-reset:test',
+      kind: 'state-reset',
+      title: 'Local state needs attention',
+      detail: 'State was reset.'
+    }
+    store.addRecoveryNotice(stateNotice)
+
+    const snapshot = store.snapshot()
+    expect(snapshot.recoveryNotice).toMatchObject({
+      kind: 'state-reset',
+      title: 'Local data needs attention'
+    })
+    expect(snapshot.recoveryNotice?.detail).toContain(
+      'Re-enter affected credentials.'
+    )
+    expect(snapshot.recoveryNotice?.detail).toContain('State was reset.')
+    expect(
+      snapshot.recoveryNotice?.detail.match(/Re-enter affected credentials\./gu)
+    ).toHaveLength(1)
+
+    if (snapshot.recoveryNotice) snapshot.recoveryNotice.detail = 'mutated'
+    expect(store.snapshot().recoveryNotice?.detail).not.toBe('mutated')
+
+    const reloaded = new StateStore(filePath)
+    await reloaded.load()
+    expect(reloaded.snapshot().recoveryNotice).toBeUndefined()
   })
 })

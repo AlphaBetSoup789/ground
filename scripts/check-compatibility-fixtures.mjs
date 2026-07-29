@@ -13,7 +13,7 @@ const PROVENANCE_VALUES = new Set([
   'synthetic-contract',
   'documented-example'
 ])
-const CLI_ADAPTERS = ['codex', 'claude', 'gemini']
+const CLI_ADAPTERS = ['codex', 'claude', 'gemini', 'antigravity']
 const API_PACKAGES = [
   'ai',
   '@ai-sdk/openai',
@@ -88,11 +88,23 @@ function assertArray(value, label, minimum = 0) {
   }
 }
 
-function assertEventArray(value, label, minimum) {
+function assertEventArray(
+  value,
+  label,
+  minimum,
+  discriminators = ['type']
+) {
   assertArray(value, label, minimum)
   value.forEach((event, index) => {
     assertRecord(event, `${label}[${index}]`)
-    assertNonEmptyString(event.type, `${label}[${index}].type`)
+    const discriminator = discriminators.find(
+      (field) => typeof event[field] === 'string' && event[field].length > 0
+    )
+    if (!discriminator) {
+      fail(
+        `${label}[${index}] must have a non-empty ${discriminators.join(' or ')} discriminator`
+      )
+    }
   })
 }
 
@@ -233,7 +245,12 @@ function validateCases(cases, kind, label) {
     caseIds.add(fixtureCase.id)
     assertNonEmptyString(fixtureCase.description, `${caseLabel}.description`)
     if (kind === 'api') assertRecord(fixtureCase.request, `${caseLabel}.request`)
-    assertEventArray(fixtureCase.inputEvents, `${caseLabel}.inputEvents`, 1)
+    assertEventArray(
+      fixtureCase.inputEvents,
+      `${caseLabel}.inputEvents`,
+      1,
+      kind === 'cli' ? ['type', 'event'] : ['type']
+    )
     assertEventArray(
       fixtureCase.expectedCanonicalEvents,
       `${caseLabel}.expectedCanonicalEvents`,

@@ -16,6 +16,14 @@ const listeners = new Set<(event: DesktopRunEventEnvelope) => void>()
 const terminalListeners = new Set<(event: TerminalEvent) => void>()
 const mockTerminals = new Map<string, TerminalSessionInfo>()
 const mockTerminalAttachments = new Map<string, string>()
+const mockRuns = new Map<
+  string,
+  {
+    taskId: string
+    runId: string
+    timers: Set<number>
+  }
+>()
 const timestamp = new Date().toISOString()
 const previewWorkspace = {
   id: 'workspace_00000000-0000-4000-8000-000000000001',
@@ -136,8 +144,41 @@ function emitTerminal(event: TerminalEvent): void {
   for (const listener of terminalListeners) listener(event)
 }
 
+function scheduleMockRun(
+  run: { taskId: string; runId: string; timers: Set<number> },
+  callback: () => void,
+  delayMs: number
+): void {
+  const timer = window.setTimeout(() => {
+    run.timers.delete(timer)
+    if (mockRuns.get(run.taskId) !== run) return
+    callback()
+  }, delayMs)
+  run.timers.add(timer)
+}
+
 const mockApi: DesktopApi = {
   getSnapshot: async () => clone(mockSnapshot),
+  listStateSnapshots: async () => [
+    {
+      id: 'state_snapshot_00000000-0000-4000-8000-000000000001',
+      kind: 'current',
+      generation: 0,
+      status: 'valid',
+      capturedAt: timestamp,
+      sizeBytes: 24_640,
+      taskCount: mockSnapshot.tasks.length,
+      providerCount: mockSnapshot.providers.length
+    },
+    ...[1, 2, 3].map((generation) => ({
+      id: `state_snapshot_00000000-0000-4000-8000-00000000000${generation + 1}`,
+      kind: 'retained' as const,
+      generation,
+      status: 'unavailable' as const
+    }))
+  ],
+  exportStateSnapshot: async () => false,
+  restoreStateSnapshot: async () => false,
   createTask: async (workspaceGrantId) => {
     const provider =
       mockSnapshot.providers.find(
@@ -454,10 +495,14 @@ const mockApi: DesktopApi = {
       }
     }
   ],
+  chooseCliExecutable: async () => '/usr/local/bin/ground-agent',
   startRun: async ({ taskId, prompt }) => {
     const task = mockSnapshot.tasks.find((candidate) => candidate.id === taskId)
     if (!task) throw new Error('Task not found')
+    if (mockRuns.has(taskId)) throw new Error('Task already running')
     const runId = crypto.randomUUID()
+    const run = { taskId, runId, timers: new Set<number>() }
+    mockRuns.set(taskId, run)
     const userItem = {
       id: crypto.randomUUID(),
       kind: 'message' as const,
@@ -480,11 +525,16 @@ const mockApi: DesktopApi = {
       createdAt: new Date().toISOString()
     }
     task.items.push(assistant)
-    setTimeout(() => emit({ type: 'item-added', taskId, runId, item: assistant }), 250)
+    scheduleMockRun(
+      run,
+      () => emit({ type: 'item-added', taskId, runId, item: assistant }),
+      250
+    )
     const response =
       'I’m connected. This browser preview is using the deterministic mock runtime; the desktop build streams from your configured API or CLI.'
-    response.split(' ').forEach((word, index) => {
-      setTimeout(() => {
+    const words = response.split(' ')
+    words.forEach((word, index) => {
+      scheduleMockRun(run, () => {
         const delta = `${index ? ' ' : ''}${word}`
         const offset = assistant.content.length
         assistant.content += delta
@@ -496,7 +546,8 @@ const mockApi: DesktopApi = {
           delta,
           offset
         })
-        if (index === response.split(' ').length - 1) {
+        if (index === words.length - 1) {
+          mockRuns.delete(taskId)
           task.runStatus = 'idle'
           emit({ type: 'run-completed', taskId, runId })
         }
@@ -504,7 +555,16 @@ const mockApi: DesktopApi = {
     })
     return { runId }
   },
-  stopRun: async () => undefined,
+  stopRun: async (taskId) => {
+    const run = mockRuns.get(taskId)
+    if (!run) return
+    mockRuns.delete(taskId)
+    for (const timer of run.timers) window.clearTimeout(timer)
+    run.timers.clear()
+    const task = mockSnapshot.tasks.find((candidate) => candidate.id === taskId)
+    if (task) task.runStatus = 'idle'
+    emit({ type: 'run-stopped', taskId, runId: run.runId })
+  },
   resolveApproval: async () => undefined,
   onRunEvent: (listener) => {
     listeners.add(listener)
@@ -636,6 +696,17 @@ const mockApi: DesktopApi = {
       }
     ],
     historyTruncated: false,
+    recoveries: [
+      {
+        id: '12345678-1234-4123-8123-123456789abc',
+        createdAt: timestamp,
+        status: 'applied',
+        trackedPaths: ['src/renderer/src/App.tsx'],
+        untrackedPaths: [],
+        canUndo: true
+      }
+    ],
+    recoveriesTruncated: false,
     worktrees: [
       {
         relativePath: '.',
@@ -648,6 +719,7 @@ const mockApi: DesktopApi = {
       }
     ]
   }),
+  chooseGitExecutable: async () => true,
   createGitWorktree: async (taskId, input) => {
     const source = mockSnapshot.tasks.find((candidate) => candidate.id === taskId)
     if (!source) throw new Error('Task not found')
@@ -670,6 +742,22 @@ const mockApi: DesktopApi = {
   },
   stageGitPaths: async () => true,
   unstageGitPaths: async () => true,
+  revertGitPaths: async (_taskId, paths) => ({
+    id: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+    status: 'applied',
+    trackedPaths: clone(paths),
+    untrackedPaths: [],
+    canUndo: true
+  }),
+  undoGitRecovery: async (_taskId, recoveryId) => ({
+    id: recoveryId,
+    createdAt: new Date().toISOString(),
+    status: 'restored',
+    trackedPaths: [],
+    untrackedPaths: [],
+    canUndo: false
+  }),
   commitGitChanges: async (_taskId, input) => ({
     hash: '9b83f89ea4c0bed1169830f1f3c2c9fc8339a2fd',
     shortHash: '9b83f89',

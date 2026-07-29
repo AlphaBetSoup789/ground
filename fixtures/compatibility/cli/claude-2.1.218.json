@@ -8,7 +8,7 @@
     "version": "2.1.218",
     "fixtureDate": "2026-07-29",
     "provenance": "synthetic-contract",
-    "provenanceNote": "Hand-authored from Ground's reviewed parser contract for the locally observed help surface; not captured from a live or authenticated Claude Code run.",
+    "provenanceNote": "Hand-authored from Ground's reviewed parser contract for the locally observed help and embedded event-construction surfaces; not captured from a live or authenticated Claude Code run.",
     "liveCapture": false
   },
   "cases": [
@@ -106,6 +106,71 @@
             "outputTokens": 7,
             "cachedInputTokens": 4,
             "costUsd": 0.0025
+          }
+        }
+      ]
+    },
+    {
+      "id": "top-level-tool-lifecycle",
+      "description": "Normalize complete tool inputs and results from Claude's top-level assistant and user messages.",
+      "inputEvents": [
+        {
+          "type": "assistant",
+          "session_id": "claude-session-1",
+          "message": {
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_2",
+                "name": "Read",
+                "input": {
+                  "file_path": "package.json"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "session_id": "claude-session-1",
+          "message": {
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_2",
+                "content": "read complete"
+              }
+            ]
+          }
+        }
+      ],
+      "expectedCanonicalEvents": [
+        {
+          "type": "session",
+          "sessionId": "claude-session-1"
+        },
+        {
+          "type": "activity",
+          "activity": {
+            "runtimeId": "claude:toolu_2",
+            "activityType": "tool",
+            "title": "Read",
+            "detail": "{\"file_path\":\"package.json\"}",
+            "status": "running"
+          }
+        },
+        {
+          "type": "session",
+          "sessionId": "claude-session-1"
+        },
+        {
+          "type": "activity",
+          "activity": {
+            "runtimeId": "claude:toolu_2",
+            "activityType": "tool",
+            "title": "Claude tool result",
+            "detail": "\"read complete\"",
+            "status": "success"
           }
         }
       ]

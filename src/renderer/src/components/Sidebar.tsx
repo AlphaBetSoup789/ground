@@ -4,6 +4,7 @@ import {
   Archive,
   ChevronDown,
   CircleDot,
+  Command,
   FileUp,
   FolderOpen,
   Inbox,
@@ -23,12 +24,14 @@ import { timeAgo } from '../lib/format'
 
 interface SidebarProps {
   open: boolean
+  backgroundInert?: boolean
   snapshot: AppSnapshot
   selectedTaskId?: string
   onSelectTask: (taskId: string) => void
   onCreateTask: () => void
   onChooseWorkspace: () => void
   onImportTask: () => void
+  onOpenCommands: () => void
   onOpenSettings: () => void
   onClose: () => void
 }
@@ -100,8 +103,8 @@ export function Sidebar(props: SidebarProps): React.JSX.Element {
     <aside
       className={`sidebar ${props.open ? 'sidebar-open' : 'sidebar-closed'}`}
       aria-label="Task navigation"
-      aria-hidden={!props.open}
-      inert={!props.open}
+      aria-hidden={!props.open || props.backgroundInert}
+      inert={!props.open || props.backgroundInert}
     >
       <div className="sidebar-drag-region">
         <div className="sidebar-brand">
@@ -283,6 +286,17 @@ export function Sidebar(props: SidebarProps): React.JSX.Element {
       </div>
 
       <div className="sidebar-footer">
+        <button
+          type="button"
+          onClick={props.onOpenCommands}
+          aria-keyshortcuts="Meta+Shift+P Control+Shift+P F1"
+        >
+          <span className="footer-icon">
+            <Command size={15} />
+          </span>
+          Commands
+          <kbd>⇧⌘P / Ctrl⇧P</kbd>
+        </button>
         <button type="button" onClick={props.onOpenSettings}>
           <span className="footer-icon">
             <Settings2 size={15} />

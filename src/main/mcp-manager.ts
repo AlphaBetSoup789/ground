@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type {
   AppSnapshot,
@@ -6,8 +7,10 @@ import type {
   McpServerStatus
 } from '../shared/types'
 import { createId, nowIso } from './lib/ids'
+import { StatePersistenceError } from './store'
 import {
   McpService,
+  McpServiceError,
   validateRemoteMcpUrl,
   type ConfirmMcpStdioLaunch,
   type McpConnectOptions,
@@ -117,7 +120,8 @@ export interface McpServiceCoordinator {
   executeTool(
     namespacedName: string,
     input: unknown,
-    options?: McpExecuteOptions
+    options?: McpExecuteOptions,
+    assertDispatchAuthorized?: () => void
   ): Promise<McpToolExecutionResult>
   disconnect(serverId: string): Promise<void>
   close(): Promise<void>
@@ -237,6 +241,42 @@ function cloneFingerprints(
   return Object.fromEntries(Object.entries(fingerprints))
 }
 
+/**
+ * Binds a live connection to the exact persisted profile that authorized it.
+ * Timestamps are included so disabling and later recreating an otherwise
+ * byte-identical profile cannot silently revive an old process connection.
+ */
+function profileRuntimeIdentity(profile: McpServerProfile): string {
+  const common = {
+    id: profile.id,
+    name: profile.name,
+    namespace: profile.namespace,
+    enabled: profile.enabled,
+    trustedFingerprints: Object.entries(profile.trustedFingerprints).sort(
+      ([left], [right]) => left.localeCompare(right)
+    ),
+    createdAt: profile.createdAt,
+    updatedAt: profile.updatedAt
+  }
+  const identity =
+    profile.transport === 'streamable-http'
+      ? {
+          ...common,
+          transport: profile.transport,
+          url: profile.url
+        }
+      : {
+          ...common,
+          transport: profile.transport,
+          command: profile.command,
+          args: [...profile.args]
+        }
+  return createHash('sha256')
+    .update('ground:mcp:persisted-profile:v1\0')
+    .update(JSON.stringify(identity))
+    .digest('hex')
+}
+
 async function settleManagerOperationsBounded(
   operations: ReadonlyArray<Promise<void>>
 ): Promise<void> {
@@ -282,6 +322,7 @@ export class McpManager {
   private readonly clock: () => string
   private readonly createServerId: () => string
   private readonly runtime = new Map<string, RuntimeStatus>()
+  private readonly connectedProfileIdentities = new Map<string, string>()
   private readonly operations = new Map<string, Promise<void>>()
   private initialization?: Promise<McpServerStatus[]>
   private closed = false
@@ -321,25 +362,72 @@ export class McpManager {
       }
     }
     const enabled = profiles.filter((profile) => profile.enabled)
+    const remote = enabled.filter(
+      (profile) => profile.transport === 'streamable-http'
+    )
+    const local = enabled.filter((profile) => profile.transport === 'stdio')
+    await Promise.all([
+      this.connectStartupProfiles(remote, this.startupConcurrency),
+      // A local server launch can require a main-owned native confirmation.
+      // Keep those dialogs strictly sequential even while remote connections
+      // initialize in parallel.
+      this.connectStartupProfiles(local, 1)
+    ])
+    return this.getStatuses()
+  }
+
+  private async connectStartupProfiles(
+    profiles: readonly McpServerProfile[],
+    concurrency: number
+  ): Promise<void> {
     let cursor = 0
     const workers = Array.from(
-      { length: Math.min(this.startupConcurrency, enabled.length) },
+      { length: Math.min(concurrency, profiles.length) },
       async () => {
         while (true) {
           if (this.closed) return
           const index = cursor
           cursor += 1
-          const profile = enabled[index]
+          const profile = profiles[index]
           if (!profile) return
           await this.enqueue(profile.id, () => {
             this.requireOpen()
-            return this.connectProfile(profile)
+            const current = this.currentProfile(profile.id)
+            if (!current) {
+              this.connectedProfileIdentities.delete(profile.id)
+              this.runtime.delete(profile.id)
+              return Promise.resolve(this.statusFor(profile.id))
+            }
+            if (!current.enabled) {
+              this.connectedProfileIdentities.delete(profile.id)
+              this.runtime.set(profile.id, { connection: 'disconnected' })
+              return Promise.resolve(this.statusFor(profile.id))
+            }
+            if (
+              profileRuntimeIdentity(current) !== profileRuntimeIdentity(profile)
+            ) {
+              // A save may have connected the replacement profile before this
+              // captured startup turn was enqueued. Preserve that current
+              // connection; otherwise fail closed without launching stale data.
+              if (this.isCurrentConnectedProfile(current.id)) {
+                return Promise.resolve(this.statusFor(current.id))
+              }
+              this.runtime.set(profile.id, { connection: 'disconnected' })
+              return Promise.resolve(this.statusFor(profile.id))
+            }
+            if (this.isCurrentConnectedProfile(current.id)) {
+              return Promise.resolve(this.statusFor(current.id))
+            }
+            return this.connectProfile(current)
           })
         }
       }
     )
     await Promise.all(workers)
-    return this.getStatuses()
+  }
+
+  async ready(): Promise<void> {
+    await this.initialize()
   }
 
   async save(value: unknown): Promise<McpServerProfile> {
@@ -384,6 +472,10 @@ export class McpManager {
         existing !== undefined &&
         trustSensitiveConfigurationChanged(existing, next)
       if (resetTrust) next.trustedFingerprints = {}
+      const connectionMatchedExisting =
+        existing !== undefined &&
+        this.connectedProfileIdentities.get(serverId) ===
+          profileRuntimeIdentity(existing)
       const saved = await this.store.saveMcpServer(next)
 
       if (resetTrust) this.service.forgetTrust(serverId)
@@ -392,10 +484,19 @@ export class McpManager {
       } else if (
         !existing ||
         runtimeConfigurationChanged(existing, saved) ||
-        this.runtime.get(serverId)?.connection !== 'connected'
+        this.runtime.get(serverId)?.connection !== 'connected' ||
+        !connectionMatchedExisting
       ) {
         if (existing) await this.reconnectProfile(saved)
         else await this.connectProfile(saved)
+      } else if (existing && connectionMatchedExisting) {
+        // Saving an otherwise unchanged connected profile advances updatedAt.
+        // Carry that exact persisted identity forward without blessing a stale
+        // or untracked service connection.
+        this.connectedProfileIdentities.set(
+          serverId,
+          profileRuntimeIdentity(saved)
+        )
       }
       return saved
     })
@@ -406,10 +507,21 @@ export class McpManager {
     return this.enqueue(serverId, async () => {
       this.requireOpen()
       const current = this.runtime.get(serverId)
-      if (current?.connection === 'connected' && current.snapshot) {
+      const profile = this.store.getMcpServer(serverId)
+      if (!profile.enabled) {
+        return this.disconnectProfile(serverId)
+      }
+      if (
+        current?.connection === 'connected' &&
+        current.snapshot &&
+        this.isCurrentConnectedProfile(serverId)
+      ) {
         return this.statusFor(serverId)
       }
-      return this.connectProfile(this.store.getMcpServer(serverId))
+      if (current?.connection === 'connected') {
+        return this.reconnectProfile(profile)
+      }
+      return this.connectProfile(profile)
     })
   }
 
@@ -417,7 +529,9 @@ export class McpManager {
     this.requireOpen()
     return this.enqueue(serverId, async () => {
       this.requireOpen()
-      return this.reconnectProfile(this.store.getMcpServer(serverId))
+      const profile = this.store.getMcpServer(serverId)
+      if (!profile.enabled) return this.disconnectProfile(serverId)
+      return this.reconnectProfile(profile)
     })
   }
 
@@ -435,10 +549,14 @@ export class McpManager {
     await this.enqueue(serverId, async () => {
       this.requireOpen()
       this.store.getMcpServer(serverId)
+      // Publish the durable deletion before tearing down the live connection.
+      // If persistence fails, the still-saved profile and its runtime/trust
+      // state remain coherent and can be retried.
+      await this.store.deleteMcpServer(serverId)
+      this.connectedProfileIdentities.delete(serverId)
+      this.runtime.delete(serverId)
       await this.service.disconnect(serverId).catch(() => undefined)
       this.service.forgetTrust(serverId)
-      await this.store.deleteMcpServer(serverId)
-      this.runtime.delete(serverId)
     })
   }
 
@@ -458,6 +576,7 @@ export class McpManager {
     return this.enqueue(serverId, async () => {
       this.requireOpen()
       const profile = this.store.getMcpServer(serverId)
+      this.assertCurrentEnabledConnection(serverId)
       try {
         const snapshot = await this.service.trustToolDefinitions(
           serverId,
@@ -472,6 +591,7 @@ export class McpManager {
         try {
           await this.store.saveMcpServer(updated)
         } catch (error) {
+          if (error instanceof StatePersistenceError) throw error
           this.service.forgetTrust(serverId)
           this.runtime.set(serverId, {
             connection: 'connected',
@@ -480,11 +600,16 @@ export class McpManager {
           })
           return this.statusFor(serverId)
         }
+        this.connectedProfileIdentities.set(
+          serverId,
+          profileRuntimeIdentity(updated)
+        )
         this.runtime.set(serverId, {
           connection: 'connected',
           snapshot
         })
       } catch (error) {
+        if (error instanceof StatePersistenceError) throw error
         const snapshot = this.safeInspect(serverId)
         this.runtime.set(serverId, {
           connection: snapshot ? 'connected' : 'error',
@@ -503,7 +628,11 @@ export class McpManager {
 
   listApprovedTools(): McpExposedTool[] {
     this.requireOpen()
-    return this.service.listTools()
+    return this.service
+      .listTools()
+      .filter((tool) =>
+        this.isCurrentConnectedProfile(tool.metadata.serverId)
+      )
   }
 
   async executeTool(
@@ -516,7 +645,20 @@ export class McpManager {
       this.requireOpen()
       let executionError: string | undefined
       try {
-        return await this.service.executeTool(namespacedName, input, options)
+        if (options?.approvalGranted === true) {
+          this.assertCurrentEnabledConnection(options.expectedServerId)
+        }
+        return await this.service.executeTool(
+          namespacedName,
+          input,
+          options,
+          options?.approvalGranted === true
+            ? () =>
+                this.assertCurrentEnabledConnection(
+                  options.expectedServerId
+                )
+            : undefined
+        )
       } catch (error) {
         executionError = parseError(error)
         throw error
@@ -544,19 +686,40 @@ export class McpManager {
     for (const serverId of this.runtime.keys()) {
       this.runtime.set(serverId, { connection: 'disconnected' })
     }
+    this.connectedProfileIdentities.clear()
   }
 
   private async connectProfile(profile: McpServerProfile): Promise<McpServerStatus> {
+    if (!profile.enabled) {
+      this.connectedProfileIdentities.delete(profile.id)
+      this.runtime.set(profile.id, { connection: 'disconnected' })
+      return this.statusFor(profile.id)
+    }
+    const expectedIdentity = profileRuntimeIdentity(profile)
     this.runtime.set(profile.id, { connection: 'connecting' })
     try {
       const snapshot = await this.service.connect(profileToConfig(profile), {
         trustedFingerprints: cloneFingerprints(profile.trustedFingerprints)
       })
+      const current = this.currentProfile(profile.id)
+      if (
+        !current ||
+        !current.enabled ||
+        profileRuntimeIdentity(current) !== expectedIdentity
+      ) {
+        await this.service.disconnect(profile.id).catch(() => undefined)
+        this.connectedProfileIdentities.delete(profile.id)
+        if (!current) this.runtime.delete(profile.id)
+        else this.runtime.set(profile.id, { connection: 'disconnected' })
+        return this.statusFor(profile.id)
+      }
+      this.connectedProfileIdentities.set(profile.id, expectedIdentity)
       this.runtime.set(profile.id, {
         connection: 'connected',
         snapshot
       })
     } catch (error) {
+      this.connectedProfileIdentities.delete(profile.id)
       this.runtime.set(profile.id, {
         connection: 'error',
         error: parseError(error)
@@ -566,6 +729,7 @@ export class McpManager {
   }
 
   private async reconnectProfile(profile: McpServerProfile): Promise<McpServerStatus> {
+    this.connectedProfileIdentities.delete(profile.id)
     try {
       await this.service.disconnect(profile.id)
     } catch (error) {
@@ -579,6 +743,7 @@ export class McpManager {
   }
 
   private async disconnectProfile(serverId: string): Promise<McpServerStatus> {
+    this.connectedProfileIdentities.delete(serverId)
     try {
       await this.service.disconnect(serverId)
       this.runtime.set(serverId, { connection: 'disconnected' })
@@ -592,9 +757,14 @@ export class McpManager {
   }
 
   private statusFor(serverId: string): McpServerStatus {
-    const runtime = this.runtime.get(serverId) ?? {
+    const observedRuntime = this.runtime.get(serverId) ?? {
       connection: 'disconnected' as const
     }
+    const runtime =
+      observedRuntime.connection === 'connected' &&
+      !this.isCurrentConnectedProfile(serverId)
+        ? { connection: 'disconnected' as const }
+        : observedRuntime
     const snapshot = runtime.snapshot
     return structuredClone({
       id: serverId,
@@ -644,6 +814,13 @@ export class McpManager {
       return
     }
     for (const snapshot of snapshots) {
+      if (!this.isCurrentConnectedProfile(snapshot.id)) {
+        this.runtime.set(snapshot.id, {
+          connection: 'disconnected',
+          ...(error ? { error } : {})
+        })
+        continue
+      }
       const previous = this.runtime.get(snapshot.id)
       const ownsTool =
         toolName === undefined ||
@@ -662,6 +839,37 @@ export class McpManager {
 
   private requireOpen(): void {
     if (this.closed) throw new Error('MCP manager is closed')
+  }
+
+  private currentProfile(serverId: string): McpServerProfile | undefined {
+    try {
+      const profile = this.store.getMcpServer(serverId)
+      return profile.id === serverId ? profile : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  private isCurrentConnectedProfile(serverId: string): boolean {
+    const current = this.currentProfile(serverId)
+    const connectedIdentity = this.connectedProfileIdentities.get(serverId)
+    const matches =
+      current?.enabled === true &&
+      connectedIdentity !== undefined &&
+      connectedIdentity === profileRuntimeIdentity(current)
+    if (!matches && connectedIdentity !== undefined) {
+      this.connectedProfileIdentities.delete(serverId)
+    }
+    return matches
+  }
+
+  private assertCurrentEnabledConnection(serverId: string): void {
+    if (this.isCurrentConnectedProfile(serverId)) return
+    this.connectedProfileIdentities.delete(serverId)
+    throw new McpServiceError(
+      'tool-drift',
+      'The approved MCP server profile was disabled, deleted, or changed'
+    )
   }
 
   private enqueue<T>(serverId: string, operation: () => Promise<T>): Promise<T> {

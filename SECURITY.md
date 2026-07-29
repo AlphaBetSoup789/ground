@@ -1,20 +1,21 @@
 # Security Policy
 
 Ground is a privileged local desktop application: it can read a selected workspace,
-write files after approval, and start approved processes. Treat the current
-developer preview as experimental and do not use it on sensitive repositories or
-machines without reviewing the limitations below.
+write files after approval, and start approved processes. Treat the current source
+project and any unsigned preview as experimental, and do not use either on sensitive
+repositories or machines without reviewing the limitations below.
 
 ## Supported versions
 
-Ground has not made a supported public release.
+Ground is an open-source project but has not published a supported binary release.
 
 | Version | Security updates |
 | --- | --- |
-| `main` / developer preview | Best effort |
-| Packaged preview artifacts | Unsupported |
+| `main` source project | Best effort |
+| Unsigned/unnotarized preview artifacts | Unsupported |
 
-This table will change when the first signed public alpha is published.
+This table will change only after a reviewed signed release establishes an explicit
+support window.
 
 ## Reporting a vulnerability
 
@@ -39,10 +40,10 @@ Include only the minimum information needed to reproduce the issue:
 - redacted reproduction steps; and
 - a suggested mitigation, if known.
 
-There is no response-time guarantee during the developer preview. Ground cannot
-offer independent escalation while it has one maintainer. Maintainers will publish
-acknowledgement and disclosure targets, and add an independent security recipient,
-before the first supported release.
+There is no response-time guarantee for the source project or unsigned previews.
+Ground cannot offer independent escalation while it has one maintainer. Maintainers
+will publish acknowledgement and disclosure targets, and add an independent
+security recipient, before the first supported release.
 
 ## Implemented controls
 
@@ -55,6 +56,11 @@ before the first supported release.
 - Browser demo data is compiled only into the explicitly flagged static preview.
   An Electron renderer without its preload bridge fails closed with a fatal screen
   instead of silently selecting mock tasks or actions.
+- The Playwright-over-Electron renderer suite deliberately loads that flagged
+  preview build and deterministic desktop mock. It exercises the real React DOM,
+  keyboard/focus, native HTML validation, cancellation presentation, task
+  lifecycle, responsive layout, and reduced-motion CSS, but does not exercise
+  production main/preload authority or native confirmations.
 - Dependency install scripts are recorded in a pinned allowlist after review.
   Ground also verifies the compatibility bridge that lets Electron's older build
   tooling consume the security-fixed bounded `brace-expansion` implementation.
@@ -87,19 +93,66 @@ before the first supported release.
 - Stored credentials are available only in the main process and are encrypted with
   Electron `safeStorage`. The vault is schema/size-bounded, refuses symlink and
   non-regular files where no-follow opens are available, uses private exclusive
-  atomic replacement, and quarantines structurally unreadable data.
+  atomic replacement, and quarantines structurally unreadable data. Each UTF-8
+  plaintext is capped at 768 KiB and each encrypted binary value at 1 MiB; persisted
+  values must also be canonical base64 whose decoded bytes remain within that
+  binary cap. Steady state is capped at 1,000 records / 8 MiB of serialized JSON. A
+  distinct 2,000-record / 16 MiB hard bound permits a staged generation. Removing
+  its explicitly obsolete references must normally project back within the steady
+  bound; recovery from an already-transitional vault permits only a strict
+  non-growing improvement toward that bound.
 - Saving fails if secure storage is unavailable. On Linux, Electron’s unencrypted
   `basic_text` fallback is treated as unavailable.
 - A saved credential is bound to its provider kind and canonical endpoint. Changing
-  either boundary requires the key to be entered again. The ciphertext is stored
-  under a boundary-specific opaque reference, so an interrupted provider update
-  cannot make the previously persisted endpoint resolve the new endpoint’s key.
+  either boundary requires the key to be entered again. Replacement uses a
+  state-coupled, main-only `pendingSecretDeletes` journal: Ground durably queues the
+  new unique reference as provisional, stages the encrypted value, atomically
+  publishes the provider pointer while removing that provisional intent and adding
+  only the exact obsolete references, deletes those exact vault records, and
+  acknowledges the journal only after deletion succeeds. Clear and provider-delete
+  operations atomically publish their provider-state change and exact delete intents
+  before vault cleanup. Ground never enumerates the vault and sweeps everything
+  outside current provider state.
+- Cleanup re-derives the exact live references from the loaded provider state. An
+  intent that is live is retired without deleting its record. If startup restored
+  an older retained state generation or reset state, the entire journal is deferred
+  for that process, no queued ciphertext is deleted, and a notice asks for review
+  and another launch. If an atomic state or vault write reports a late error after
+  rename may have succeeded, startup aborts before exposing writable services. The
+  same ambiguity during an already-running state publication—or a provider-vault
+  mutation—seals the store and new renderer mutations, then relaunches; the
+  provisional-or-obsolete journal in the disk generation that won is reconciled.
+- A pre-versioned API profile with `hasApiKey` may read its unchanged provider-ID
+  legacy key only when its exact boundary-scoped record is absent. Test and runtime
+  resolution make that fallback read-only: they do not migrate, overwrite, or
+  delete it. An explicit same-boundary save can stage a versioned replacement.
+  Profiles with a credential revision never fall back, profiles with no key do not
+  consult the vault, and a blank same-boundary edit is refused if the applicable
+  saved key cannot be decrypted.
 - Connection-test bodies and error diagnostics are streamed within fixed limits;
   known submitted keys are redacted if an endpoint reflects them.
+- Every save resets provider readiness to unverified. Only a Test result for the
+  exact still-saved provider-configuration fingerprint can persist a pass/fail
+  record, and run startup requires `passed`. OpenAI-compatible tests prefer bounded `/models`
+  discovery and, only when that cannot prove success, issue a separate
+  non-streaming four-token generation probe to the canonical
+  `/chat/completions` route. Both paths reject redirects and validate bounded JSON
+  shapes.
+- Run startup reserves the exact task revision, provider revision and configuration
+  fingerprint, and credential boundary before native CLI authorization or
+  workspace access. Provider saves, deletes, and verification writes are excluded
+  while that reservation or an active run exists, and startup revalidates the
+  binding again before its first durable task mutation.
 - Run failures are bounded before persistence or renderer delivery. Exact API
   credential values resolved for the active run are held only in main-process
   memory, scrubbed from failure text, and cleared when the run ends.
 - Ground does not include a hosted provider relay.
+- A malformed credential-vault document is quarantined and produces a visible
+  recovery notice. Provider metadata is reconciled against decryptable
+  endpoint-scoped references, legacy API references only for pre-versioned
+  profiles, and exact CLI environment envelopes, so missing values continue to
+  warn on later starts. A temporary secure-storage outage makes valid ciphertext
+  unavailable but does not quarantine it as structurally corrupt.
 
 ### Ground-managed tools
 
@@ -144,16 +197,21 @@ before the first supported release.
 
 ### External CLI runtimes
 
+- Recognized CLI discovery considers a bounded, non-recursive set of conventional
+  system, app-PATH, and user tool-manager locations. It validates candidates
+  passively and rejects lexical or canonical paths controlled by a configured
+  workspace. The main-owned native picker applies the same passive launch-envelope
+  and workspace checks; choosing a file is not a trust grant.
 - Saving a CLI profile natively confirms its resolved, content-hashed launch
   identity and argument template. That configuration grant cannot authorize a run.
 - Immediately before every spawn, a separate native authorization binds the
   content-hashed launch identity, fully expanded raw argv, canonical working
   directory, parser dialect, actual source-registered runtime adapter ID, prompt
-  transport, profile environment-key set, and opaque environment revision. The
+  transport, profile environment-key set, and opaque environment fingerprint. The
   immutable launch envelope is revalidated again before process creation. A
   custom reviewed adapter delegating to the same dialect receives a distinct
   grant; built-in IDs cannot be paired with another dialect. Changing an encrypted
-  environment name or value changes the revision and invalidates both
+  environment name or value changes the fingerprint and invalidates both
   configuration and invocation grants. An exact fingerprint can be reused only
   within the current app session. Launch files larger than 512 MB are rejected
   instead of receiving a metadata-only grant.
@@ -166,16 +224,28 @@ before the first supported release.
   npm-installed Node `.cmd`/`.bat` shims are parsed and bound to their canonical
   script and Node interpreter, then Node is spawned directly; generic batch and
   PowerShell launchers are refused. The child runtime may still start a shell.
-- Recognized Codex, Claude, and Gemini profiles strip known permission-bypass flags
-  and select the runtime’s supported Ask/Agent permission mode.
+- Recognized Codex, Claude, Gemini, and Antigravity profiles strip known
+  permission-bypass flags and select the runtime’s supported Ask/Agent permission
+  mode. Antigravity structured output requires 1.1.8 or newer; its bounded,
+  shell-free `--version` probe runs only after native save confirmation and
+  executable revalidation. Antigravity headless command actions remain
+  runtime-owned and are soft-denied unless its own scoped configuration pre-allows
+  them.
 - The child receives a reduced environment and runs with the selected workspace as
   its working directory. Windows retains the system, temporary-directory, profile,
   app-data, `ComSpec`, and `PATHEXT` variables required by Node/npm
   subprocess behavior; unrelated environment variables remain filtered. Optional
-  profile variables are encrypted as one fingerprinted vault record; only names
-  and the opaque revision enter persisted provider metadata. Values never enter
-  renderer snapshots or native dialogs. The launcher redacts them from parsed
-  text, diagnostics, activities, and errors if the child echoes them. The
+  profile variables are encrypted as one fingerprinted vault record. Persisted
+  provider metadata contains the names, a random 32-byte-hex environment fingerprint
+  copied into the encrypted envelope as a profile/record match check, and a separate
+  random 32-byte-hex record revision used to derive the versioned vault reference.
+  Neither identifier is derived from the secret values. The complete provider and
+  continuation fingerprint includes both; native configuration and invocation
+  authorization bind only the names plus environment fingerprint. The record
+  revision selects the exact vault record and does not enter the native dialog.
+  Values never enter renderer snapshots or native dialogs. The launcher redacts
+  them from parsed text, diagnostics, activities, and errors if the child echoes
+  them. The
   main-process runtime projection independently stream-redacts raw and JSON-escaped
   configured values across assistant deltas, redacts activity/notice text,
   replaces provider activity IDs with opaque IDs, and fails closed on a
@@ -184,10 +254,13 @@ before the first supported release.
   user/config-root, or temporary-root controls. Examples include `PATH`,
   `NODE_OPTIONS`, `LD_*`, `DYLD_*`, `HOME`, `USERPROFILE`, `XDG_*`, and
   `TMP`/`TEMP`/`TMPDIR`. Native CLI credential/config stores remain the default.
-- A profile environment change updates the vault and provider metadata with
-  rollback on an ordinary write failure. A missing or mismatched encrypted record
-  fails closed before launch; an operating-system crash between the two separate
-  files can require the user to re-enter the values.
+- A profile environment replacement stages a unique versioned record before
+  atomically publishing its exact opaque record revision and exact cleanup intents,
+  then uses the shared journal to delete and acknowledge the obsolete exact and
+  legacy references. Versioned profiles never fall back to the legacy slot. A full
+  re-entry or explicit clear does not require decrypting the old record; a partial
+  edit with blank retained values does. A missing or mismatched encrypted record
+  fails closed before launch.
 - Runtime text, total stdout/stderr, event count, event fields, notices, and session
   identifiers are bounded before and after credential redaction. Built-in and
   canonical CLI session IDs use the same restricted 1–200 character form and
@@ -237,6 +310,22 @@ before the first supported release.
 - MCP results are converted to bounded JSON-safe values. MCP Apps/UI metadata and
   payloads are not exposed.
 - Client elicitation capabilities are not advertised or handled.
+- Enabled remote startup connections are bounded and concurrent; local stdio
+  startup is serialized so native launch dialogs cannot overlap. `RunManager`
+  awaits that initialization before building the first managed API tool set, and
+  rechecks cancellation on either side of the wait. Each queued startup turn
+  re-reads the saved profile, and listing or dispatching a tool requires the exact
+  connected profile identity—including enabled and definition-trust state—to
+  remain current. Final dispatch checks that identity immediately before
+  `client.callTool`.
+- Closing MCP is terminal and bounded. Ground stops admitting work, aborts pending
+  connections and connected-client lifecycles, and attempts all client closes in
+  parallel. Each client close and pending-connection settlement is capped at 2
+  seconds; the manager caps its aggregate wait for service cleanup and queued
+  operations at 2.5 seconds before marking runtime state disconnected. Stdio
+  transport termination also has bounded TERM/KILL waits. Timeout means Ground
+  stops waiting, not that a non-cooperative transport or escaped descendant is
+  proven dead.
 
 ### Terminal and Git
 
@@ -249,10 +338,23 @@ before the first supported release.
   killing the PTY, and a later attachment invalidates the stale one.
 - The terminal inherits only a filtered environment, but the shell retains the
   current user’s operating-system permissions.
-- Git is resolved from conventional system locations and invoked directly with
-  fixed argv and no shell. Global/system configuration, hooks, pagers, prompts,
-  external diff/text conversion, and LFS smudge are disabled for Ground’s Git
-  inspection path.
+- Git discovery passively checks fixed conventional locations and absolute
+  app-PATH entries without recursively enumerating directories or executing a
+  candidate. Lexical and canonical paths controlled by any current workspace are
+  excluded. Native selection validates only a direct executable (Windows requires
+  `.exe`) and shows canonical path, SHA-256, size, and identity fingerprint in a
+  default-cancel dialog. Only after approval does Ground run a bounded
+  `git --version` probe and require 2.23 or newer.
+- The selected path/fingerprint preference is schema/size-bounded, private,
+  no-follow where available, quarantined when malformed, and written with
+  exclusive temporary file + fsync + atomic rename. It is not a persisted trust
+  grant. A process-local binding covers canonical path, hash, device/inode, size,
+  mode, and timestamps; Ground recreates it at startup and revalidates it before
+  every Git process launch. Changed/stale paths are revoked and excluded for that
+  process.
+- The validated Git executable is invoked directly with fixed argv and no shell.
+  Global/system configuration, hooks, pagers, prompts, external diff/text
+  conversion, and LFS smudge are disabled for Ground’s Git inspection path.
 - Before status, working-tree diff, or worktree checkout, Ground enumerates every
   effective repository `filter.*.{clean,smudge,process,required}` driver (including
   local includes) with a non-executing config query and adds exact command-line
@@ -263,14 +365,29 @@ before the first supported release.
 - Staging and unstaging accept selected literal paths only, reject repository-wide
   and VCS-metadata mutations, recheck eligibility after a native default-cancel
   confirmation, and never overwrite working-tree files.
-- Commits bind the exact prepared index tree and expected `HEAD`, use
-  compare-and-swap reference movement, and disable hooks and signing. Concurrent
-  index and working-tree edits are preserved outside the approved commit.
+- Commits bind the exact prepared index tree, repository/worktree identities,
+  expected parent, and exact checked-out symbolic local ref. Detached-HEAD commits
+  are refused. They use a non-dereferencing compare-and-swap update, and disable
+  hooks and signing. Concurrent index and working-tree edits are preserved outside
+  the approved commit.
 - Worktree removal is limited to a clean registered non-main descendant of
   Ground’s managed root and is revalidated after native confirmation.
+- Selected-file restore rejects conflicts, submodules, directories, links, unsafe
+  path states, stale previews, and oversized files/sets. Its default-cancel native
+  review includes the complete preview plus content-bound action fingerprints.
+  Before mutation Ground fsyncs a private manifest and exact payloads under its
+  managed root: tracked contents are copied, untracked files are renamed there
+  rather than deleted, and `git restore --worktree` preserves the index. Undo
+  revalidates every manifest, payload, parent, and post-restore path and refuses to
+  overwrite later edits. Destructive restore/undo is refused while a Ground run or
+  Ground-managed terminal is active in that workspace. Partial failure remains
+  visible as recovery-required.
 
 ### Persistence and portable tasks
 
+- Persisted state is schema version 2. A pure one-version-at-a-time dispatcher
+  migrates version 1 before current-schema validation; newer versions, missing
+  migration steps, and migrations that skip a version fail closed.
 - The persisted state is bounded to 128 MiB and normalized through its strict
   runtime schema before it replaces the current file. Reads require a regular file,
   use no-follow opens where available, reject malformed UTF-8, and tighten legacy
@@ -278,11 +395,29 @@ before the first supported release.
 - Candidate mutations are serialized with their durable write and become visible
   only after success. Writes use private unpredictable exclusive temporary files,
   file fsync, atomic rename, and directory sync where supported.
-- Each successful replacement rotates only a schema-valid previous primary file to
-  one local `.bak` snapshot. At startup, Ground can restore a valid backup,
+- Provider pointer transitions and their exact vault-delete intents are one state
+  mutation. The bounded `pendingSecretDeletes` field is never projected through the
+  ordinary renderer snapshot, but it is part of persisted state and therefore can
+  appear as opaque reference strings in a raw local-state generation export. Such
+  an export never contains the separate encrypted vault or plaintext credentials.
+- Each successful replacement rotates schema-valid prior generations through
+  three local retained snapshots. At startup, Ground can restore a valid generation,
   quarantine structurally unreadable files, and display a dismissible recovery
   banner. Operational I/O failures are propagated rather than mislabeled as
   corruption.
+- Recovery IPC exposes short-lived opaque IDs and bounded status/count metadata,
+  never application-data paths or raw parser errors. IDs bind an exact slot and
+  source digest; a changed generation fails closed. Main owns the native export
+  path and default-cancel restore confirmation, which shows the main-derived
+  generation, capture time, counts, size, and digest prefix. Restore requests are
+  single-flight, accept only a validated retained generation, and reject active
+  runs. After confirmation Ground seals the process-wide renderer operation
+  boundary, drains already-entered operations, revalidates the exact generation,
+  initiates MCP manager shutdown with its 2.5-second aggregate bound, rotates the
+  current primary, recovers interrupted markers, and keeps the boundary sealed
+  through relaunch, including after a late persistence failure. The MCP bound is
+  best effort and does not prove external-process termination. The credential vault
+  is separate and is never written to a state export.
 - Managed writes, commands, and MCP calls persist an exact started claim before
   the side effect and a completed claim afterward. If startup finds a started
   claim, it preserves both hashes, marks the operation uncertain with an explicit
@@ -301,6 +436,15 @@ before the first supported release.
 - Task bundle exports omit credentials, runtime sessions, provider-owned state,
   absolute workspace authority, and original internal IDs. They redact the
   selected workspace path and secret-shaped JSON fields.
+- A portable API provider descriptor contains exactly its `model-api` type,
+  protocol kind, sanitized name, model, and `supportsTools`; a CLI descriptor
+  contains exactly its `agent-cli` type, `cli` kind, sanitized name, model, and
+  normalized adapter. Endpoint, provider ID, credential/key state, CLI launch
+  configuration/environment, verification, and continuation state are absent.
+  Import matching compares only that exact portable field set. Consequently an API
+  descriptor match is not endpoint or credential identity; imported history remains
+  excluded by default and the user must review the locally selected provider before
+  opting in and starting a request.
 
 ## Important limitations
 
@@ -340,6 +484,11 @@ before the first supported release.
   latest content at execution is staged. The later commit confirmation does bind an
   exact tree. A same-user process can also race a newly introduced Git filter
   driver between configuration discovery and process spawn.
+- Ground can detect its own open task terminals before Git restore/undo, but not
+  arbitrary editors or external processes. Moving an untracked file into private
+  recovery also requires the workspace and Ground recovery root to support an
+  atomic rename (normally the same filesystem); a cross-volume `EXDEV` failure is
+  preserved as recovery-required rather than falling back to copy-and-delete.
 - Approval requests and terminal input arrive through the trusted renderer bridge.
   Frame/origin checks reject an unexpected renderer. A positive write, command, or
   MCP-call decision cannot resolve until a main-process-owned native dialog shows
@@ -357,14 +506,16 @@ before the first supported release.
   canonical workspace prefix with `<workspace>` while retaining the full exact
   path only in the native approval envelope.
 - Task history uses a JSON snapshot rather than a transactional, append-only event
-  store and has a 128 MiB ceiling. The single rotating backup is not a versioned
-  backup system or a user-selectable restore UI.
+  store and has a 128 MiB ceiling per generation. Three rotating retained
+  snapshots and their user-selectable recovery UI are bounded crash recovery, not
+  durable version history, sync, or an arbitrary snapshot-import system.
 - No-follow file opens are used where the host exposes `O_NOFOLLOW`. Windows
   reparse-point handling does not yet provide an equivalent race-free guarantee
   against a hostile same-user process.
-- Deletion is not secure erasure. A just-deleted task can remain in the rotating
-  backup until a later successful state write replaces it, and quarantine files,
-  filesystem snapshots, and user-created exports can retain content.
+- Deletion is not secure erasure. A just-deleted task can remain in rotating
+  retained snapshots until later successful state writes replace it, and quarantine
+  files, filesystem snapshots, Git recovery payloads, and user-created exports can
+  retain content.
 - Export filtering is structural, not a general secret scanner. Plain-text prompts,
   pasted credentials, file contents, command output, and tool results can remain in
   a task bundle or Markdown export; users must review exports before sharing.
@@ -373,24 +524,43 @@ before the first supported release.
   request only after the user enables the per-task control through a native warning
   and starts a run. It can still carry prompt-injection text even though it carries
   no workspace or execution authority.
-- Cloud-provider adapters are covered by mocked protocol and application tests;
-  CI does not contain paid-provider credentials or certify live service versions.
+- Provider adapters are covered by mocked protocol/application tests, pinned
+  synthetic or documented fixtures, and a credential-free loopback SSE wire test
+  through the production OpenAI-compatible HTTP adapter. CI does not contain paid
+  provider credentials, contact a real cloud/Ollama/LM Studio deployment, launch
+  an authenticated coding CLI, or certify upstream service/runtime versions.
 - Dependency installation fails closed on unreviewed lifecycle scripts; release
   jobs use the pinned Node/npm toolchain, commit-pinned Actions, non-persistent
   checkout credentials, least-privilege job permissions, and the protected
   `release` environment.
-- The repository contains macOS, Windows, and Linux preview packaging plus a
-  tag-driven checksum/SBOM/attestation workflow, but no official artifacts have
-  been certified or published. Builds are not reproducible and there is no signed
-  updater; Windows and Linux signing policy is not defined.
+- The repository contains four native package targets—macOS arm64/x64, Windows
+  x64, and Linux x64—plus a tag-driven checksum/SBOM/attestation workflow, but no
+  official artifacts have been certified or published. Unsigned-preview workflow
+  artifacts are unsupported (and macOS previews unnotarized), builds are not
+  reproducible, there is no signed updater, and Windows/Linux signing policy is not
+  defined.
 - Package workflows launch the unpacked app through an internal smoke handshake.
   It accepts only a randomized token plus `launch`/`native` scope, constrains its
   result and fresh user-data directory to the matching OS-temporary child, rejects
   extra smoke-control environment, and never accepts a caller-selected executable.
   The driver strips process-loader/Node injection variables before launch. Native
-  scope performs only fixed operations there. Its MCP fixture is an exact in-memory
-  `-e` program bound to Ground's own packaged executable; the one-shot auto-approval
-  cannot authorize a caller-supplied server.
+  scope performs only fixed operations there: packaged identity, an encrypted
+  `SecretVault` set/reload/get/delete round trip, a real production native approval
+  dialog aborted to its Cancel result, PTY, Git, an exact local MCP launch/call, and
+  process-tree cleanup. Its MCP fixture is an exact in-memory `-e` program bound to
+  Ground's own packaged executable; the one-shot auto-approval cannot authorize a
+  caller-supplied server.
+- A second driver runs native scope against an extracted macOS ZIP, a temporarily
+  installed Windows NSIS package (then invokes its uninstaller), or an extracted
+  Linux AppImage. Runtime-evidence records bind the package version,
+  platform/architecture, fixed checks, security evidence, installation source, and
+  exact distributable SHA-256; release aggregation requires all four target
+  records. The driver does not install DMG/DEB packages, operate arbitrary
+  installers, drive renderer controls, or certify accessibility or live models.
+- Linux native evidence requires an encrypted Secret Service backend. Hosted jobs
+  supply D-Bus, GNOME keyring, and libsecret; Ground refuses Electron’s
+  `basic_text` fallback. That controlled round trip is evidence for the specific
+  runner session, not a guarantee about every user keyring configuration.
 - Ground has no support-bundle export yet. Redaction must be complete before one is
   added.
 
@@ -407,8 +577,10 @@ A public artifact is not an official Ground release until maintainers have:
 - reviewed third-party licenses and generated notices;
 - built from a tagged commit in a protected release environment;
 - signed and notarized the macOS app;
-- inspected native-platform packages, including packaged PTY and process cleanup;
-- verified every package identity extracted from each shipped `app.asar`, then
-  published checksums, the runtime-inclusive CycloneDX release SBOM, and build/SBOM
-  attestations; and
+- inspected native-platform packages, including distributable-bound evidence for
+  macOS arm64/x64, Windows x64, and Linux x64, packaged credential-vault and
+  native-dialog checks, PTY, Git, MCP, and process cleanup;
+- reviewed each target build’s unpacked `app.asar` inventory together with exact
+  distributable hashes, then published checksums, the runtime-inclusive CycloneDX
+  release SBOM, and build/SBOM attestations; and
 - documented update-signing and rollback behavior.

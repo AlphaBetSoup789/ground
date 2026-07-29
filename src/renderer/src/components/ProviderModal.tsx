@@ -4,6 +4,8 @@ import {
   ChevronRight,
   CircleAlert,
   Cloud,
+  DatabaseBackup,
+  FolderOpen,
   KeyRound,
   LoaderCircle,
   Plus,
@@ -22,7 +24,9 @@ import type {
   ProviderTestResult
 } from '../../../shared/types'
 import { desktop } from '../lib/desktop'
+import { providerReadiness } from '../lib/provider-readiness'
 import { McpSettingsPane } from './McpSettingsPane'
+import { RecoverySettingsPane } from './RecoverySettingsPane'
 
 type ApiProviderKind = Exclude<ProviderDraft['kind'], 'cli'>
 
@@ -78,7 +82,8 @@ const CLI_ADAPTER_LABELS = {
   generic: 'Default model',
   codex: 'Codex CLI',
   claude: 'Claude Code',
-  gemini: 'Gemini CLI'
+  gemini: 'Gemini CLI',
+  antigravity: 'Antigravity CLI'
 } as const
 
 interface ProviderModalProps {
@@ -104,17 +109,17 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
   const [saving, setSaving] = useState(false)
   const [testResult, setTestResult] = useState<ProviderTestResult>()
   const [confirmDelete, setConfirmDelete] = useState(false)
-  const [settingsSection, setSettingsSection] = useState<'providers' | 'mcp'>(
-    'providers'
-  )
+  const [settingsSection, setSettingsSection] = useState<
+    'providers' | 'mcp' | 'recovery'
+  >('providers')
 
   const selectedProvider = useMemo(
     () => props.providers.find((provider) => provider.id === selectedId),
     [props.providers, selectedId]
   )
   const mobileSectionValue =
-    settingsSection === 'mcp'
-      ? 'mcp'
+    settingsSection !== 'providers'
+      ? settingsSection
       : selectedId
         ? `provider:${selectedId}`
         : draft.kind === 'cli'
@@ -200,6 +205,11 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
       setConfirmDelete(false)
       return
     }
+    if (value === 'recovery') {
+      setSettingsSection('recovery')
+      setConfirmDelete(false)
+      return
+    }
     if (value === 'new:api') {
       beginNew('openai')
       return
@@ -219,7 +229,9 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
     setTesting(true)
     setTestResult(undefined)
     try {
-      setTestResult(await desktop.testProvider(draft))
+      const result = await desktop.testProvider(draft)
+      setTestResult(result)
+      if (result.persisted) await props.onSaved()
     } catch (error) {
       props.onError(error)
     } finally {
@@ -236,8 +248,9 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
       await props.onSaved()
       setTestResult({
         ok: true,
-        title: 'Provider saved',
-        detail: `${provider.name} is ready for new runs.`
+        title: 'Saved, not tested',
+        detail: `Run Test to check ${provider.name} before its first run.`,
+        persisted: true
       })
     } catch (error) {
       props.onError(error)
@@ -278,12 +291,12 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
           <div className="settings-nav-header">
             <div>
               <span className="settings-eyebrow">Ground</span>
-              <h2>Providers</h2>
+              <h2>Settings</h2>
             </div>
           </div>
 
           <div className="provider-list">
-            <p className="nav-section-label">Connected</p>
+            <p className="nav-section-label">Providers</p>
             {props.providers.map((provider) => (
               <button
                 key={provider.id}
@@ -306,7 +319,11 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
                 </span>
                 <span>
                   <strong>{provider.name}</strong>
-                  <small>{provider.model || providerKindLabel(provider)}</small>
+                  <small>
+                    {provider.model || providerKindLabel(provider)}
+                    {' · '}
+                    {providerReadiness(provider).shortLabel}
+                  </small>
                 </span>
                 <ChevronRight size={13} />
               </button>
@@ -342,6 +359,28 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
                     ? `${props.mcpServers.length} configured`
                     : 'Connect external tools'}
                 </small>
+              </span>
+              <ChevronRight size={13} />
+            </button>
+            <p className="nav-section-label settings-data-label">
+              Local data
+            </p>
+            <button
+              type="button"
+              className={`provider-nav-row ${
+                settingsSection === 'recovery' ? 'selected' : ''
+              }`}
+              aria-current={
+                settingsSection === 'recovery' ? 'page' : undefined
+              }
+              onClick={() => setSettingsSection('recovery')}
+            >
+              <span className="provider-nav-icon recovery">
+                <DatabaseBackup size={14} />
+              </span>
+              <span>
+                <strong>Recovery</strong>
+                <small>Export or restore local state</small>
               </span>
               <ChevronRight size={13} />
             </button>
@@ -405,6 +444,30 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
                 onError={props.onError}
               />
             </>
+          ) : settingsSection === 'recovery' ? (
+            <>
+              <div className="settings-content-header recovery-settings-shell-header">
+                <MobileSettingsSwitcher
+                  value={mobileSectionValue}
+                  providers={props.providers}
+                  onChange={selectMobileSection}
+                />
+                <div>
+                  <div className="settings-content-kind">Local data</div>
+                  <h3 id="settings-dialog-title">Recovery</h3>
+                </div>
+                <button
+                  ref={closeButtonRef}
+                  className="icon-button"
+                  type="button"
+                  onClick={props.onClose}
+                  aria-label="Close settings"
+                >
+                  <X size={17} />
+                </button>
+              </div>
+              <RecoverySettingsPane onError={props.onError} />
+            </>
           ) : (
             <>
           <div className="settings-content-header">
@@ -432,126 +495,148 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
             </button>
           </div>
 
-          {draft.kind !== 'cli' ? (
-            <ApiProviderForm
-              draft={draft}
-              setDraft={setDraft}
-              selected={selectedProvider}
-              onChanged={() => setTestResult(undefined)}
-            />
-          ) : (
-            <CliProviderForm
-              draft={draft}
-              setDraft={setDraft}
-              onChanged={() => setTestResult(undefined)}
-            />
-          )}
+          <form
+            className="settings-provider-form"
+            aria-busy={saving || testing}
+            onSubmit={(event) => {
+              event.preventDefault()
+              if (!saving && !testing) void save()
+            }}
+          >
+            {draft.kind !== 'cli' ? (
+              <ApiProviderForm
+                draft={draft}
+                setDraft={setDraft}
+                selected={selectedProvider}
+                onChanged={() => setTestResult(undefined)}
+              />
+            ) : (
+              <CliProviderForm
+                draft={draft}
+                setDraft={setDraft}
+                selected={selectedProvider}
+                onChanged={() => setTestResult(undefined)}
+                onError={props.onError}
+              />
+            )}
 
-          {testResult && (
-            <div
-              className={`test-result ${testResult.ok ? 'success' : 'error'}`}
-              role={testResult.ok ? 'status' : 'alert'}
-              aria-live={testResult.ok ? 'polite' : 'assertive'}
-            >
-              <span className="test-result-icon">
-                {testResult.ok ? (
-                  <Check size={14} aria-hidden="true" />
-                ) : (
-                  <CircleAlert size={14} aria-hidden="true" />
-                )}
-              </span>
-              <div>
-                <strong>{testResult.title}</strong>
-                <p>{testResult.detail}</p>
-                {testResult.models && testResult.models.length > 0 && (
-                  <div className="model-suggestions">
-                    {testResult.models.slice(0, 8).map((model) => (
-                      <button
-                        type="button"
-                        key={model}
-                        onClick={() => setDraft((current) => ({ ...current, model }))}
-                      >
-                        {model}
-                      </button>
-                    ))}
-                  </div>
-                )}
+            {testResult && (
+              <div
+                className={`test-result ${testResult.ok ? 'success' : 'error'}`}
+                role={testResult.ok ? 'status' : 'alert'}
+                aria-live={testResult.ok ? 'polite' : 'assertive'}
+              >
+                <span className="test-result-icon">
+                  {testResult.ok ? (
+                    <Check size={14} aria-hidden="true" />
+                  ) : (
+                    <CircleAlert size={14} aria-hidden="true" />
+                  )}
+                </span>
+                <div>
+                  <strong>{testResult.title}</strong>
+                  <p>{testResult.detail}</p>
+                  {testResult.persisted === false && (
+                    <p className="test-result-retention">
+                      Draft-only check. Save these settings, then test the saved
+                      profile to retain its status.
+                    </p>
+                  )}
+                  {testResult.models && testResult.models.length > 0 && (
+                    <div className="model-suggestions">
+                      {testResult.models.slice(0, 8).map((model) => (
+                        <button
+                          type="button"
+                          key={model}
+                          onClick={() => {
+                            setTestResult(undefined)
+                            setDraft((current) => ({ ...current, model }))
+                          }}
+                        >
+                          {model}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          )}
+            )}
 
-          <div className="settings-actions">
-            <div>
-              {selectedId &&
-                (confirmDelete ? (
-                  <div
-                    className="provider-delete-confirmation"
-                    role="alert"
-                    aria-live="assertive"
-                  >
-                    <span>Remove {selectedProvider?.name ?? 'this provider'}?</span>
-                    <button
-                      ref={deleteCancelRef}
-                      type="button"
-                      onClick={() => {
-                        setConfirmDelete(false)
-                        window.requestAnimationFrame(() =>
-                          deleteTriggerRef.current?.focus()
-                        )
-                      }}
+            <div className="settings-actions">
+              <div>
+                {selectedId &&
+                  (confirmDelete ? (
+                    <div
+                      className="provider-delete-confirmation"
+                      role="alert"
+                      aria-live="assertive"
                     >
-                      Cancel
-                    </button>
+                      <span>Remove {selectedProvider?.name ?? 'this provider'}?</span>
+                      <button
+                        ref={deleteCancelRef}
+                        type="button"
+                        onClick={() => {
+                          setConfirmDelete(false)
+                          window.requestAnimationFrame(() =>
+                            deleteTriggerRef.current?.focus()
+                          )
+                        }}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="delete-provider confirm"
+                        type="button"
+                        onClick={() => void remove()}
+                      >
+                        <Trash2 size={13} aria-hidden="true" />
+                        Remove
+                      </button>
+                    </div>
+                  ) : (
                     <button
-                      className="delete-provider confirm"
+                      ref={deleteTriggerRef}
+                      className="delete-provider"
                       type="button"
-                      onClick={() => void remove()}
+                      onClick={() => setConfirmDelete(true)}
                     >
                       <Trash2 size={13} aria-hidden="true" />
                       Remove
                     </button>
-                  </div>
-                ) : (
-                  <button
-                    ref={deleteTriggerRef}
-                    className="delete-provider"
-                    type="button"
-                    onClick={() => setConfirmDelete(true)}
-                  >
-                    <Trash2 size={13} aria-hidden="true" />
-                    Remove
-                  </button>
-                ))}
+                  ))}
+              </div>
+              <div className="settings-primary-actions">
+                <button
+                  className="test-button"
+                  type="button"
+                  onClick={(event) => {
+                    if (!event.currentTarget.form?.reportValidity()) return
+                    void test()
+                  }}
+                  disabled={testing || saving}
+                  aria-busy={testing}
+                >
+                  {testing ? (
+                    <LoaderCircle className="status-spin" size={13} aria-hidden="true" />
+                  ) : (
+                    <Sparkles size={13} aria-hidden="true" />
+                  )}
+                  {testing ? 'Testing…' : 'Test'}
+                </button>
+                <button
+                  className="primary-button save-provider"
+                  type="submit"
+                  disabled={saving || testing}
+                  aria-busy={saving}
+                >
+                  {saving && (
+                    <LoaderCircle className="status-spin" size={13} aria-hidden="true" />
+                  )}
+                  {saving ? 'Saving…' : 'Save provider'}
+                </button>
+              </div>
             </div>
-            <div className="settings-primary-actions">
-              <button
-                className="test-button"
-                type="button"
-                onClick={() => void test()}
-                disabled={testing || saving}
-                aria-busy={testing}
-              >
-                {testing ? (
-                  <LoaderCircle className="status-spin" size={13} aria-hidden="true" />
-                ) : (
-                  <Sparkles size={13} aria-hidden="true" />
-                )}
-                {testing ? 'Testing…' : 'Test'}
-              </button>
-              <button
-                className="primary-button save-provider"
-                type="button"
-                onClick={() => void save()}
-                disabled={saving || testing}
-                aria-busy={saving}
-              >
-                {saving && (
-                  <LoaderCircle className="status-spin" size={13} aria-hidden="true" />
-                )}
-                {saving ? 'Saving…' : 'Save provider'}
-              </button>
-            </div>
-          </div>
+          </form>
             </>
           )}
         </section>
@@ -584,6 +669,9 @@ function MobileSettingsSwitcher(props: {
         </optgroup>
         <optgroup label="Agent tools">
           <option value="mcp">MCP servers</option>
+        </optgroup>
+        <optgroup label="Local data">
+          <option value="recovery">Recovery</option>
         </optgroup>
       </select>
     </label>
@@ -628,6 +716,9 @@ function ApiProviderForm(props: {
 
   return (
     <div className="provider-form">
+      {props.selected && props.selected.kind !== 'cli' && (
+        <ProviderVerificationSummary provider={props.selected} />
+      )}
       <fieldset className="api-kind-picker">
         <legend>API protocol</legend>
         <div className="api-kind-options">
@@ -722,6 +813,7 @@ function ApiProviderForm(props: {
         <div className="input-with-icon">
           <Cloud size={14} />
           <input
+            type="url"
             value={props.draft.baseUrl ?? ''}
             onChange={(event) => set({ baseUrl: event.target.value })}
             placeholder={selectedOption.defaultBaseUrl}
@@ -751,6 +843,9 @@ function ApiProviderForm(props: {
             autoComplete="new-password"
             spellCheck={false}
             maxLength={20_000}
+            required={
+              !hasStoredKey && props.draft.kind !== 'openai-compatible'
+            }
           />
         </div>
         <small>{selectedOption.keyHint}</small>
@@ -853,11 +948,29 @@ function ApiProviderForm(props: {
 function CliProviderForm(props: {
   draft: ProviderDraft
   setDraft: React.Dispatch<React.SetStateAction<ProviderDraft>>
+  selected?: ProviderProfile
   onChanged: () => void
+  onError: (error: unknown) => void
 }): React.JSX.Element {
+  const [choosingExecutable, setChoosingExecutable] = useState(false)
   const set = (patch: Partial<ProviderDraft>): void => {
     props.onChanged()
     props.setDraft((current) => ({ ...current, ...patch }))
+  }
+  const chooseExecutable = async (): Promise<void> => {
+    setChoosingExecutable(true)
+    try {
+      const selected = await desktop.chooseCliExecutable()
+      if (!selected) return
+      props.onChanged()
+      props.setDraft((current) =>
+        cliDraftWithChosenExecutable(current, selected)
+      )
+    } catch (error) {
+      props.onError(error)
+    } finally {
+      setChoosingExecutable(false)
+    }
   }
   const environment = props.draft.cliEnvironment ?? []
   const updateEnvironment = (
@@ -873,6 +986,9 @@ function CliProviderForm(props: {
 
   return (
     <div className="provider-form">
+      {props.selected?.kind === 'cli' && (
+        <ProviderVerificationSummary provider={props.selected} />
+      )}
       <div className="cli-warning">
         <ShieldAlert size={16} />
         <div>
@@ -907,22 +1023,55 @@ function CliProviderForm(props: {
         </label>
       </div>
 
-      <label>
-        <span>Executable</span>
-        <div className="input-with-icon mono-input">
-          <TerminalSquare size={14} />
-          <input
-            value={props.draft.command ?? ''}
-            onChange={(event) => set({ command: event.target.value })}
-            placeholder="/absolute/path/to/agent"
-            spellCheck={false}
-            autoCapitalize="none"
-            autoComplete="off"
-            maxLength={2_000}
-            required
-          />
+      <div className="cli-executable-field">
+        <label htmlFor="cli-executable-path">Executable</label>
+        <div className="cli-executable-controls">
+          <div className="input-with-icon mono-input">
+            <TerminalSquare size={14} />
+            <input
+              id="cli-executable-path"
+              value={props.draft.command ?? ''}
+              onChange={(event) =>
+                set({
+                  command: event.target.value,
+                  ...((props.draft.command ?? '') !== event.target.value
+                    ? { trustConfirmed: false }
+                    : {})
+                })
+              }
+              placeholder="/absolute/path/to/agent"
+              spellCheck={false}
+              autoCapitalize="none"
+              autoComplete="off"
+              maxLength={2_000}
+              aria-describedby="cli-executable-help"
+              required
+            />
+          </div>
+          <button
+            type="button"
+            className="secondary-button cli-executable-choose"
+            onClick={() => void chooseExecutable()}
+            disabled={choosingExecutable}
+            aria-busy={choosingExecutable}
+          >
+            {choosingExecutable ? (
+              <LoaderCircle
+                className="status-spin"
+                size={13}
+                aria-hidden="true"
+              />
+            ) : (
+              <FolderOpen size={13} aria-hidden="true" />
+            )}
+            {choosingExecutable ? 'Choosing…' : 'Choose executable…'}
+          </button>
         </div>
-      </label>
+        <small id="cli-executable-help">
+          The native picker validates the executable without running it. Saving
+          and each invocation still require their own native confirmation.
+        </small>
+      </div>
 
       <label>
         <span>Arguments · one argument per line</span>
@@ -930,14 +1079,15 @@ function CliProviderForm(props: {
           className="args-input"
           value={(props.draft.args ?? []).join('\n')}
           onChange={(event) => set({ args: event.target.value.split('\n') })}
-          placeholder={'run\n--json\n{prompt}'}
+          placeholder={'run\n--json'}
           rows={6}
           spellCheck={false}
           maxLength={32_000}
         />
         <small>
-          Tokens: <code>{'{prompt}'}</code> <code>{'{model}'}</code> <code>{'{cwd}'}</code>. No shell
-          interpolation is used.
+          Tokens: <code>{'{model}'}</code> <code>{'{cwd}'}</code>. Use{' '}
+          <code>{'{prompt}'}</code> only with Argument transport; Standard input
+          keeps the prompt out of argv. No shell interpolation is used.
         </small>
       </label>
 
@@ -956,6 +1106,7 @@ function CliProviderForm(props: {
             <option value="codex">Codex CLI</option>
             <option value="claude">Claude Code</option>
             <option value="gemini">Gemini CLI</option>
+            <option value="antigravity">Antigravity CLI</option>
           </select>
         </label>
         <label>
@@ -1088,6 +1239,7 @@ function CliProviderForm(props: {
           checked={props.draft.trustConfirmed ?? false}
           onChange={(event) => set({ trustConfirmed: event.target.checked })}
           aria-describedby="cli-trust-note"
+          required
         />
         <span id="cli-trust-note">
           I understand this executable receives my prompts and can access whatever my user account
@@ -1095,6 +1247,36 @@ function CliProviderForm(props: {
           arguments; this acknowledgement does not grant permission.
         </span>
       </label>
+    </div>
+  )
+}
+
+export function cliDraftWithChosenExecutable(
+  draft: ProviderDraft,
+  selected: string | undefined
+): ProviderDraft {
+  if (!selected) return draft
+  return {
+    ...draft,
+    command: selected,
+    ...(draft.command === selected ? {} : { trustConfirmed: false })
+  }
+}
+
+function ProviderVerificationSummary(props: {
+  provider: ProviderProfile
+}): React.JSX.Element {
+  const readiness = providerReadiness(props.provider)
+  return (
+    <div
+      className={`provider-verification-summary ${readiness.tone}`}
+      role={readiness.tone === 'error' ? 'alert' : 'status'}
+    >
+      <span className="provider-verification-led" aria-hidden="true" />
+      <div>
+        <strong>{readiness.title}</strong>
+        <p>{readiness.detail}</p>
+      </div>
     </div>
   )
 }

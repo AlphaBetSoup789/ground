@@ -1,4 +1,4 @@
-import { writeFile } from 'node:fs/promises'
+import { readdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import {
@@ -18,11 +18,26 @@ const artifactDirectory = path.resolve(
 )
 const artifactNames = await releaseArtifactNames(artifactDirectory)
 const inventoryNames = await packagedInventoryNames(artifactDirectory)
+const runtimeEvidenceNames = (await readdir(artifactDirectory))
+  .filter((name) =>
+    /^ground-package-runtime-evidence-[a-z0-9._-]+\.json$/u.test(name)
+  )
+  .sort()
 const sbomName = 'ground-release-sbom.cdx.json'
-const names = [...artifactNames, ...inventoryNames, sbomName].sort()
+const names = [
+  ...artifactNames,
+  ...inventoryNames,
+  ...runtimeEvidenceNames,
+  sbomName
+].sort()
 
 if (!artifactNames.length) {
   throw new Error(`No Ground release artifacts found in ${artifactDirectory}`)
+}
+if (!runtimeEvidenceNames.length) {
+  throw new Error(
+    `No Ground package runtime evidence found in ${artifactDirectory}`
+  )
 }
 
 const lines = []

@@ -1,5 +1,12 @@
 import { spawn } from 'node:child_process'
+import { createHash, randomBytes } from 'node:crypto'
 import { createMCPClient } from '@ai-sdk/mcp'
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  safeStorage
+} from 'electron'
 import { lstatSync, mkdirSync, realpathSync } from 'node:fs'
 import {
   mkdir,
@@ -14,6 +21,7 @@ import {
   type PackagedSmokeScope
 } from '../shared/packaged-smoke'
 import { prepareMcpExecutionCall } from './execution-binding'
+import { agentApprovalDialogOptions } from './native-agent-approval'
 import {
   GitWorkspaceService,
   resolveGitExecutable
@@ -21,17 +29,23 @@ import {
 import {
   McpService,
   SecureStdioMcpTransport,
-  type McpClientFactory
+  normalizeMcpServerConfig,
+  type McpClientFactory,
+  type McpStdioLaunchTrustRequest,
+  type NormalizedLocalStdioMcpServerConfig
 } from './mcp-service'
 import { terminateProcessTree } from './process-tree'
+import { SecretVault } from './secrets'
 import {
   resolveDefaultTerminalShell,
   TerminalService,
   type TerminalPtyFactory
 } from './terminal-service'
+import { prepareCliEnvironmentPlan } from './cli-environment'
 
 const SMOKE_DIRECTORY_PREFIX = 'ground-packaged-smoke-'
 const RESULT_FILENAME = 'result.json'
+const NATIVE_EVIDENCE_FILENAME = 'native-evidence.json'
 const MAX_DIAGNOSTIC_LENGTH = 4_000
 
 export interface PackagedSmokeConfig {
@@ -53,6 +67,29 @@ export interface PackagedSmokeResult {
   error?: {
     name: string
     message: string
+  }
+}
+
+interface PackagedNativeEvidence {
+  version: 1
+  app: {
+    name: string
+    version: string
+    packaged: true
+    platform: NodeJS.Platform
+    architecture: string
+    configuredAppId: 'app.ground.desktop'
+  }
+  credentialStorage: {
+    encryptionAvailable: true
+    backend?: string
+    roundTrip: true
+  }
+  nativeApproval: {
+    cancelled: true
+  }
+  mcpLaunchApproval: {
+    exactEnvelopeValidated: true
   }
 }
 
@@ -313,6 +350,186 @@ async function waitFor<T>(
     ])
   } finally {
     if (timer) clearTimeout(timer)
+  }
+}
+
+function expectedMcpInvocationFingerprint(
+  config: NormalizedLocalStdioMcpServerConfig
+): string {
+  return createHash('sha256')
+    .update('ground:mcp:stdio-invocation:v1\0')
+    .update(
+      JSON.stringify({
+        executableIdentity: config.executableIdentity.fingerprint,
+        args: config.args,
+        cwd: config.cwd,
+        environment: Object.entries(config.env).sort(([left], [right]) =>
+          left < right ? -1 : left > right ? 1 : 0
+        )
+      })
+    )
+    .digest('hex')
+}
+
+function sameStringList(
+  left: readonly string[],
+  right: readonly string[]
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  )
+}
+
+function exactMcpLaunchApproval(
+  request: Readonly<McpStdioLaunchTrustRequest>,
+  expected: NormalizedLocalStdioMcpServerConfig
+): boolean {
+  return (
+    request.serverId === expected.id &&
+    request.serverName === expected.name &&
+    samePath(request.executable, expected.command) &&
+    request.executableIdentity.fingerprint ===
+      expected.executableIdentity.fingerprint &&
+    request.executableIdentity.canonicalPath ===
+      expected.executableIdentity.canonicalPath &&
+    sameStringList(request.args, expected.args) &&
+    samePath(request.cwd, expected.cwd) &&
+    sameStringList(
+      request.environmentKeys,
+      Object.keys(expected.env).sort()
+    ) &&
+    request.invocationFingerprint ===
+      expectedMcpInvocationFingerprint(expected)
+  )
+}
+
+async function smokeAppIdentity(): Promise<PackagedNativeEvidence['app']> {
+  if (!app.isPackaged) {
+    throw new Error('Packaged identity smoke is not running from a packaged app')
+  }
+  if (app.getName() !== 'Ground') {
+    throw new Error(`Unexpected packaged application name: ${app.getName()}`)
+  }
+  const version = app.getVersion()
+  if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.test(version)) {
+    throw new Error(`Unexpected packaged application version: ${version}`)
+  }
+  return {
+    name: app.getName(),
+    version,
+    packaged: true,
+    platform: process.platform,
+    architecture: process.arch,
+    configuredAppId: 'app.ground.desktop'
+  }
+}
+
+async function smokeCredentialStorage(
+  config: PackagedSmokeConfig
+): Promise<PackagedNativeEvidence['credentialStorage']> {
+  const backend =
+    process.platform === 'linux'
+      ? safeStorage.getSelectedStorageBackend()
+      : undefined
+  if (
+    !safeStorage.isEncryptionAvailable() ||
+    backend === 'basic_text'
+  ) {
+    throw new Error(
+      'The packaged operating-system credential store is unavailable'
+    )
+  }
+  const filePath = path.join(config.directory, 'credential-smoke.json')
+  const reference = `packaged-smoke:${config.token}`
+  const names = [
+    ...Array.from({ length: 26 }, (_, index) =>
+      String.fromCharCode(65 + index)
+    ),
+    '_'
+  ]
+  let remaining = 128_000 - names.length
+  const maximumEnvironment = names.map((name, index) => {
+    const valueBytes = Math.floor(
+      remaining / (names.length - index)
+    )
+    remaining -= valueBytes
+    return { name, value: '\u0001'.repeat(valueBytes) }
+  })
+  const plan = prepareCliEnvironmentPlan(
+    `packaged-smoke-${randomBytes(16).toString('hex')}`,
+    maximumEnvironment,
+    undefined,
+    undefined
+  )
+  const secret = plan.desiredSerializedSecret
+  if (
+    !secret ||
+    remaining !== 0 ||
+    Buffer.byteLength(secret, 'utf8') !== 768_132
+  ) {
+    throw new Error('Maximum CLI environment smoke fixture is invalid')
+  }
+  const vault = new SecretVault(filePath)
+  if (await vault.load()) {
+    throw new Error('Fresh packaged credential smoke opened with a warning')
+  }
+  await vault.set(reference, secret)
+  const reloaded = new SecretVault(filePath)
+  if (await reloaded.load()) {
+    throw new Error('Reloaded packaged credential smoke opened with a warning')
+  }
+  if (reloaded.get(reference) !== secret) {
+    throw new Error('Packaged credential round trip did not preserve its value')
+  }
+  await reloaded.delete(reference)
+  const cleared = new SecretVault(filePath)
+  await cleared.load()
+  if (cleared.has(reference)) {
+    throw new Error('Packaged credential smoke did not delete its value')
+  }
+  return {
+    encryptionAvailable: true,
+    ...(backend ? { backend } : {}),
+    roundTrip: true
+  }
+}
+
+async function smokeNativeApprovalDialog(
+  config: PackagedSmokeConfig
+): Promise<PackagedNativeEvidence['nativeApproval']> {
+  const controller = new AbortController()
+  const options = {
+    ...agentApprovalDialogOptions({
+      runId: `smoke-run-${config.token}`,
+      taskId: `smoke-task-${config.token}`,
+      approvalId: `smoke-approval-${config.token}`,
+      title: 'Packaged approval smoke',
+      detail: 'No side effect will run. This dialog must close as Cancel.',
+      toolName: 'write_file',
+      provider: {
+        id: 'packaged-smoke',
+        name: 'Packaged smoke',
+        kind: 'openai-compatible',
+        model: 'smoke'
+      }
+    }),
+    signal: controller.signal
+  }
+  const timer = setTimeout(() => controller.abort(), 350)
+  try {
+    const owner = BrowserWindow.getAllWindows().find(
+      (candidate) => !candidate.isDestroyed()
+    )
+    const result = owner
+      ? await dialog.showMessageBox(owner, options)
+      : await dialog.showMessageBox(options)
+    if (result.response !== 0) {
+      throw new Error('Aborted native approval dialog did not fail closed')
+    }
+    return { cancelled: true }
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -722,10 +939,29 @@ async function waitForProcessesToExit(pids: number[]): Promise<void> {
 
 async function smokeMcpAndCancellation(
   config: PackagedSmokeConfig
-): Promise<void> {
+): Promise<true> {
   const pidPath = path.join(config.directory, 'mcp-smoke-pids.json')
   const fixture = mcpFixtureSource()
   const packagedExecutable = await realpath(process.execPath)
+  const serverConfig = {
+    id: 'packaged-smoke',
+    name: 'Packaged smoke',
+    namespace: 'packaged_smoke',
+    transport: 'stdio' as const,
+    command: packagedExecutable,
+    args: ['-e', fixture],
+    cwd: config.directory,
+    env: {
+      GROUND_SMOKE_PID_FILE: pidPath
+    },
+    connectTimeoutMs: 10_000,
+    requestTimeoutMs: 10_000,
+    maxResultBytes: 32_000
+  }
+  const normalized = await normalizeMcpServerConfig(serverConfig)
+  if (normalized.transport !== 'stdio') {
+    throw new Error('Packaged MCP smoke normalization changed transport')
+  }
   const clientFactory: McpClientFactory = async ({
     transport,
     lifecycleSignal
@@ -757,24 +993,14 @@ async function smokeMcpAndCancellation(
       maxRetries: 0
     })
   }
-  const service = new McpService(clientFactory, async () => true)
+  let launchApprovalValidated = false
+  const service = new McpService(clientFactory, async (request) => {
+    launchApprovalValidated = exactMcpLaunchApproval(request, normalized)
+    return launchApprovalValidated
+  })
   let pids: { server: number; descendant: number } | undefined
   try {
-    const connected = await service.connect({
-      id: 'packaged-smoke',
-      name: 'Packaged smoke',
-      namespace: 'packaged_smoke',
-      transport: 'stdio',
-      command: packagedExecutable,
-      args: ['-e', fixture],
-      cwd: config.directory,
-      env: {
-        GROUND_SMOKE_PID_FILE: pidPath
-      },
-      connectTimeoutMs: 10_000,
-      requestTimeoutMs: 10_000,
-      maxResultBytes: 32_000
-    })
+    const connected = await service.connect(serverConfig)
     pids = await waitForPidFile(pidPath)
     const trusted = await service.trustToolDefinitions(
       connected.id,
@@ -804,10 +1030,14 @@ async function smokeMcpAndCancellation(
   }
   if (!pids) throw new Error('Packaged MCP fixture did not record process IDs')
   await waitForProcessesToExit([pids.server, pids.descendant])
+  if (!launchApprovalValidated) {
+    throw new Error('Packaged MCP launch approval envelope was not validated')
+  }
+  return true
 }
 
 function reportNativeSmokeProgress(
-  check: 'pty' | 'git' | 'mcp',
+  check: 'identity' | 'credentials' | 'approval' | 'pty' | 'git' | 'mcp',
   state: 'starting' | 'passed'
 ): void {
   process.stderr.write(`ground-packaged-smoke-${check}-${state}\n`)
@@ -823,6 +1053,18 @@ export async function runPackagedNativeSmoke(
     mkdir(worktreeRoot, { mode: 0o700 })
   ])
   const checks: Record<string, boolean> = {}
+  const evidence: PackagedNativeEvidence = {
+    version: 1,
+    app: await smokeAppIdentity(),
+    credentialStorage: await smokeCredentialStorage(config),
+    nativeApproval: await smokeNativeApprovalDialog(config),
+    mcpLaunchApproval: {
+      exactEnvelopeValidated: true
+    }
+  }
+  checks.appIdentity = true
+  checks.safeStorage = true
+  checks.nativeApprovalDialog = true
 
   reportNativeSmokeProgress('pty', 'starting')
   await smokeTerminal(config, workspace)
@@ -835,10 +1077,21 @@ export async function runPackagedNativeSmoke(
   reportNativeSmokeProgress('git', 'passed')
 
   reportNativeSmokeProgress('mcp', 'starting')
-  await smokeMcpAndCancellation(config)
+  evidence.mcpLaunchApproval.exactEnvelopeValidated =
+    await smokeMcpAndCancellation(config)
   checks.mcp = true
+  checks.mcpLaunchApproval = true
   checks.processTreeCancellation = true
   reportNativeSmokeProgress('mcp', 'passed')
 
+  await writeFile(
+    path.join(config.directory, NATIVE_EVIDENCE_FILENAME),
+    `${JSON.stringify(evidence, null, 2)}\n`,
+    {
+      encoding: 'utf8',
+      flag: 'wx',
+      mode: 0o600
+    }
+  )
   return checks
 }

@@ -32,7 +32,7 @@ interface CliFixtureManifest {
   schemaVersion: 1
   suite: FixtureSuiteBase & {
     kind: 'cli'
-    adapter: 'codex' | 'claude' | 'gemini'
+    adapter: 'codex' | 'claude' | 'gemini' | 'antigravity'
     runtime: string
     version: string
     fixtureDate: string
@@ -78,7 +78,8 @@ const FIXTURE_ROOT = path.join(PROJECT_ROOT, 'fixtures', 'compatibility')
 const CLI_MANIFEST_PATHS = [
   'cli/codex-0.144.1.json',
   'cli/claude-2.1.218.json',
-  'cli/gemini-0.47.0.json'
+  'cli/gemini-0.47.0.json',
+  'cli/antigravity-1.1.8.json'
 ]
 
 async function readFixture<T>(relativePath: string): Promise<T> {
@@ -109,7 +110,7 @@ describe('version-pinned compatibility fixtures', () => {
         encoding: 'utf8'
       }
     )
-    expect(output).toMatch(/pinned and valid \(4 manifests\)/u)
+    expect(output).toMatch(/pinned and valid \(5 manifests\)/u)
   })
 
   it('rejects corrupted published schema constraints and references', async () => {

@@ -55,9 +55,12 @@ const CLI_PROVIDER_SCHEMA = z
     ).max(64),
     promptMode: z.enum(['stdin', 'argument']),
     outputMode: z.enum(['plain', 'ndjson']),
-    cliAdapter: z.enum(['generic', 'codex', 'claude', 'gemini']).optional(),
+    cliAdapter: z
+      .enum(['generic', 'codex', 'claude', 'gemini', 'antigravity'])
+      .optional(),
     environmentVariables: z.array(z.string().min(1).max(128)).max(32).optional(),
     environmentFingerprint: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+    environmentRevision: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
     trustConfirmed: z.literal(true),
     createdAt: z.string().min(1).max(100),
     updatedAt: z.string().min(1).max(100)
@@ -99,6 +102,13 @@ const CLI_PROVIDER_SCHEMA = z
             ? error.message
             : 'CLI environment variables are invalid',
         path: ['environmentVariables']
+      })
+    }
+    if (!hasVariables && provider.environmentRevision !== undefined) {
+      context.addIssue({
+        code: 'custom',
+        message: 'CLI environment revision requires environment variables',
+        path: ['environmentRevision']
       })
     }
   })
@@ -418,7 +428,12 @@ export class CliRuntimeAdapter implements AgentRuntimeAdapter<CliProvider> {
         commandActivities: recognized ? 'native' : 'unsupported',
         fileActivities: 'unknown',
         usageReporting: recognized ? 'native' : 'unsupported',
-        interactiveApprovals: recognized ? 'native' : 'unknown',
+        interactiveApprovals:
+          this.dialect === 'antigravity'
+            ? 'unsupported'
+            : recognized
+              ? 'native'
+              : 'unknown',
         cancellation: 'process-signal',
         permissionOwner: 'runtime'
       })

@@ -25,6 +25,7 @@ import type {
   TaskExportFormat,
   TaskPatch
 } from '../../../shared/types'
+import { providerReadiness } from '../lib/provider-readiness'
 import { Composer } from './Composer'
 import { GitPanel } from './GitPanel'
 import { TerminalPanel } from './TerminalPanel'
@@ -35,6 +36,8 @@ type WorkspacePanel = 'git' | 'terminal'
 interface TaskViewProps {
   task: DesktopTask
   providers: ProviderProfile[]
+  draft: string
+  onDraftChange: (value: string) => void
   sidebarOpen: boolean
   onCloseSidebar: () => void
   onUpdateTask: (patch: TaskPatch) => void
@@ -58,16 +61,15 @@ interface TaskViewProps {
 }
 
 export function TaskView(props: TaskViewProps): React.JSX.Element {
-  const [draft, setDraft] = useState('')
   const [title, setTitle] = useState(props.task.title)
   const [workspacePanel, setWorkspacePanel] = useState<WorkspacePanel>()
   const [taskMenuOpen, setTaskMenuOpen] = useState(false)
   const taskMenuRef = useRef<HTMLDivElement>(null)
   const taskMenuTriggerRef = useRef<HTMLButtonElement>(null)
   const provider = props.providers.find((candidate) => candidate.id === props.task.providerId)
+  const readiness = provider ? providerReadiness(provider) : undefined
 
   useEffect(() => {
-    setDraft('')
     setTaskMenuOpen(false)
   }, [props.task.id])
 
@@ -77,7 +79,7 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
 
   useEffect(() => {
     setTitle(props.task.title)
-  }, [props.task.title])
+  }, [props.task.id, props.task.title])
 
   useEffect(() => {
     if (!taskMenuOpen) return
@@ -155,7 +157,7 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
     <div
       className={`task-view${workspacePanel ? ' workspace-panel-open' : ''}${
         isArchived ? ' archived-task-view' : ''
-      }`}
+      }${provider?.verification?.status !== 'passed' ? ' provider-needs-test' : ''}`}
     >
       <header className="task-header">
         <div className="task-header-left">
@@ -170,6 +172,7 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
             </button>
           )}
           <div className="task-heading">
+            <h1 className="visually-hidden">{title}</h1>
             <input
               className="task-title-input"
               value={title}
@@ -237,6 +240,7 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
                 <option key={candidate.id} value={candidate.id}>
                   {candidate.name}
                   {candidate.model ? ` · ${candidate.model}` : ''}
+                  {` — ${providerReadiness(candidate).shortLabel}`}
                 </option>
               ))}
             </select>
@@ -428,6 +432,21 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
         </div>
       </header>
 
+      {provider && provider.verification?.status !== 'passed' && readiness && (
+        <div
+          className={`provider-readiness-banner ${readiness.tone}`}
+          role={readiness.tone === 'error' ? 'alert' : 'status'}
+        >
+          <div>
+            <strong>{readiness.title}</strong>
+            <span>{readiness.detail}</span>
+          </div>
+          <button type="button" onClick={props.onOpenSettings}>
+            {readiness.tone === 'error' ? 'Review and retest' : 'Test provider'}
+          </button>
+        </div>
+      )}
+
       {isArchived && (
         <div className="archived-task-banner" role="status">
           <Archive size={14} aria-hidden="true" />
@@ -448,7 +467,7 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
         provider={provider}
         suggestions={isArchived ? [] : suggestions}
         onSuggestion={(prompt) => {
-          setDraft(prompt)
+          props.onDraftChange(prompt)
           window.requestAnimationFrame(() => {
             document
               .querySelector<HTMLTextAreaElement>('#task-message-composer')
@@ -462,8 +481,8 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
       />
 
       <Composer
-        draft={draft}
-        onDraftChange={setDraft}
+        draft={props.draft}
+        onDraftChange={props.onDraftChange}
         task={props.task}
         provider={provider}
         disabled={isArchived}

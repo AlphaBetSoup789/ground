@@ -1,5 +1,7 @@
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { MockLanguageModelV4, simulateReadableStream } from 'ai/test'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   AiSdkModelAdapter,
   limitProviderResponse,
@@ -8,6 +10,22 @@ import {
 } from './ai-sdk-adapter'
 import { consumeModelEventStream } from './event-stream'
 import type { ModelRequest } from './types'
+
+const wireServers: Array<ReturnType<typeof createServer>> = []
+
+afterEach(async () => {
+  await Promise.all(
+    wireServers.splice(0).map(
+      (server) =>
+        new Promise<void>((resolve, reject) => {
+          server.close((error) => {
+            if (error) reject(error)
+            else resolve()
+          })
+        })
+    )
+  )
+})
 
 function request(): ModelRequest {
   return {
@@ -216,6 +234,151 @@ describe('AI SDK model adapter', () => {
       {
         role: 'user',
         content: [{ type: 'text', text: 'Read the README.' }]
+      }
+    ])
+  })
+
+  it('streams through the production OpenAI-compatible HTTP wire path', async () => {
+    let observedRequest:
+      | {
+          method: string | undefined
+          url: string | undefined
+          contentType: string | undefined
+          body: Record<string, unknown>
+        }
+      | undefined
+    const server = createServer((incoming, response) => {
+      const chunks: Buffer[] = []
+      incoming.on('data', (chunk: Buffer) => chunks.push(chunk))
+      incoming.on('end', () => {
+        observedRequest = {
+          method: incoming.method,
+          url: incoming.url,
+          contentType: incoming.headers['content-type'],
+          body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<
+            string,
+            unknown
+          >
+        }
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive'
+        })
+        const event = (value: unknown): void => {
+          response.write(`data: ${JSON.stringify(value)}\n\n`)
+        }
+        event({
+          id: 'chatcmpl-ground-wire',
+          object: 'chat.completion.chunk',
+          created: 1_785_283_200,
+          model: 'local-wire-model',
+          choices: [
+            {
+              index: 0,
+              delta: { role: 'assistant', content: 'Ground' },
+              finish_reason: null
+            }
+          ]
+        })
+        event({
+          id: 'chatcmpl-ground-wire',
+          object: 'chat.completion.chunk',
+          created: 1_785_283_200,
+          model: 'local-wire-model',
+          choices: [
+            {
+              index: 0,
+              delta: { content: ' wire path' },
+              finish_reason: null
+            }
+          ]
+        })
+        event({
+          id: 'chatcmpl-ground-wire',
+          object: 'chat.completion.chunk',
+          created: 1_785_283_200,
+          model: 'local-wire-model',
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason: 'stop'
+            }
+          ]
+        })
+        response.end('data: [DONE]\n\n')
+      })
+    })
+    wireServers.push(server)
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => {
+        server.off('error', reject)
+        resolve()
+      })
+    })
+    const address = server.address() as AddressInfo
+    const adapter = new AiSdkModelAdapter('openai-compatible')
+
+    const reduced = await consumeModelEventStream(
+      adapter.stream(request(), {
+        config: {
+          protocol: 'openai-compatible',
+          baseUrl: `http://127.0.0.1:${address.port}/v1`,
+          providerName: 'ground-wire-test'
+        },
+        signal: new AbortController().signal,
+        secrets: {
+          resolve: async () => {
+            throw new Error('No secret expected')
+          }
+        }
+      })
+    )
+
+    expect(reduced).toMatchObject({
+      servingModel: 'test-model',
+      stopReason: 'complete',
+      output: {
+        role: 'assistant',
+        parts: [{ kind: 'text', text: 'Ground wire path' }]
+      }
+    })
+    expect(observedRequest).toMatchObject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      contentType: expect.stringContaining('application/json'),
+      body: {
+        model: 'test-model',
+        stream: true
+      }
+    })
+    expect(observedRequest?.body.messages).toEqual([
+      {
+        role: 'system',
+        content: 'Work inside the logical workspace root.'
+      },
+      {
+        role: 'user',
+        content: 'Read the README.'
+      }
+    ])
+    expect(observedRequest?.body.tools).toEqual([
+      {
+        type: 'function',
+        function: {
+          name: 'read_file',
+          description: 'Read a workspace-relative file.',
+          parameters: {
+            type: 'object',
+            properties: {
+              path: { type: 'string' }
+            },
+            required: ['path'],
+            additionalProperties: false
+          }
+        }
       }
     ])
   })

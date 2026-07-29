@@ -3,11 +3,14 @@ import {
   access,
   appendFile,
   chmod,
+  cp,
   mkdir,
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
+  symlink,
   writeFile
 } from 'node:fs/promises'
 import os from 'node:os'
@@ -15,14 +18,47 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
+  gitSupportsRequiredFeatures,
   GitServiceError,
   GitWorkspaceService,
-  resolveGitExecutable
+  resolveGitExecutable,
+  verifyGitExecutableVersion
 } from './git-service'
 
 const execFileAsync = promisify(execFile)
 const gitExecutable = await resolveGitExecutable()
 const temporaryRoots: string[] = []
+const commitOptions = (message: string) => ({
+  message,
+  authorName: 'Ground Author',
+  authorEmail: 'author@example.test'
+})
+
+it('accepts only Git versions with recoverable restore support', () => {
+  expect(gitSupportsRequiredFeatures('git version 2.23.0')).toBe(true)
+  expect(
+    gitSupportsRequiredFeatures('git version 2.39.5 (Apple Git-154)')
+  ).toBe(true)
+  expect(gitSupportsRequiredFeatures('git version 2.50.1.windows.1')).toBe(
+    true
+  )
+  expect(gitSupportsRequiredFeatures('git version 2.22.9')).toBe(false)
+  expect(gitSupportsRequiredFeatures('not git 2.50.0')).toBe(false)
+})
+
+it.skipIf(!gitExecutable)(
+  'probes the selected absolute executable in a pinned directory',
+  async () => {
+    if (!gitExecutable) throw new Error('Git is unavailable')
+    const version = await verifyGitExecutableVersion(gitExecutable, {
+      cwd: os.tmpdir()
+    })
+    expect(gitSupportsRequiredFeatures(version)).toBe(true)
+    await expect(
+      verifyGitExecutableVersion('git', { cwd: os.tmpdir() })
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' })
+  }
+)
 
 interface Fixture {
   root: string
@@ -59,7 +95,11 @@ async function git(
   }
 }
 
-async function createFixture(): Promise<Fixture> {
+async function createFixture(
+  options: {
+    revalidateGitExecutable?: () => Promise<string>
+  } = {}
+): Promise<Fixture> {
   const created = await mkdtemp(path.join(os.tmpdir(), 'ground-git-service-'))
   const root = await realpath(created)
   temporaryRoots.push(root)
@@ -77,7 +117,8 @@ async function createFixture(): Promise<Fixture> {
   const service = await GitWorkspaceService.open({
     workspacePath: workspace,
     worktreeRoot,
-    gitExecutable
+    gitExecutable,
+    ...options
   })
   return { root, workspace, worktreeRoot, service }
 }
@@ -106,6 +147,27 @@ describe.skipIf(!gitExecutable)('GitWorkspaceService', () => {
         gitExecutable
       })
     ).rejects.toMatchObject({ code: 'NOT_A_REPOSITORY' })
+  })
+
+  it('revalidates a trusted Git identity before use and fails closed on drift', async () => {
+    if (!gitExecutable) throw new Error('Git is unavailable')
+    let currentExecutable = gitExecutable
+    let validations = 0
+    const fixture = await createFixture({
+      revalidateGitExecutable: async () => {
+        validations += 1
+        return currentExecutable
+      }
+    })
+    const validationsAfterOpen = validations
+
+    await fixture.service.status()
+    expect(validations).toBeGreaterThan(validationsAfterOpen)
+
+    currentExecutable = path.join(fixture.root, 'replacement-git')
+    await expect(fixture.service.status()).rejects.toMatchObject({
+      code: 'UNSAFE_CONFIGURATION'
+    })
   })
 
   it('summarizes branch state and staged, unstaged, and untracked paths', async () => {
@@ -291,6 +353,303 @@ describe.skipIf(!gitExecutable)('GitWorkspaceService', () => {
     })
   })
 
+  it('restores only selected working paths, quarantines untracked files, and undoes without losing staged content', async () => {
+    const { service, workspace } = await createFixture()
+    await writeFile(path.join(workspace, 'tracked.txt'), 'approved index version\n')
+    await git(workspace, ['add', '--', 'tracked.txt'])
+    await writeFile(path.join(workspace, 'tracked.txt'), 'later working version\n')
+    await writeFile(path.join(workspace, 'staged.txt'), 'unselected working edit\n')
+    await writeFile(path.join(workspace, 'quarantine me.txt'), 'recoverable untracked\n')
+    await writeFile(path.join(workspace, 'keep me.txt'), 'unselected untracked\n')
+
+    const prepared = await service.preparePathRevert([
+      'tracked.txt',
+      'quarantine me.txt'
+    ])
+    expect(Object.isFrozen(prepared)).toBe(true)
+    expect(prepared).toMatchObject({
+      version: 1,
+      trackedPaths: ['tracked.txt'],
+      untrackedPaths: ['quarantine me.txt']
+    })
+    expect(prepared.preview).toContain('-approved index version')
+    expect(prepared.preview).toContain('+later working version')
+    expect(prepared.preview).toContain(
+      'Untracked files that will be moved into Ground recovery'
+    )
+    expect(prepared.preview).toContain('quarantine me.txt')
+    expect(prepared.previewSha256).toMatch(/^[0-9a-f]{64}$/u)
+    expect(prepared.actionSha256).toMatch(/^[0-9a-f]{64}$/u)
+
+    const applied = await service.executePreparedPathRevert(prepared)
+    expect(applied.recovery).toMatchObject({
+      status: 'applied',
+      trackedPaths: ['tracked.txt'],
+      untrackedPaths: ['quarantine me.txt'],
+      canUndo: true
+    })
+    expect(await readFile(path.join(workspace, 'tracked.txt'), 'utf8')).toBe(
+      'approved index version\n'
+    )
+    expect(await readFile(path.join(workspace, 'staged.txt'), 'utf8')).toBe(
+      'unselected working edit\n'
+    )
+    expect(await readFile(path.join(workspace, 'keep me.txt'), 'utf8')).toBe(
+      'unselected untracked\n'
+    )
+    await expect(
+      access(path.join(workspace, 'quarantine me.txt'))
+    ).rejects.toThrow()
+    expect(await service.status()).toMatchObject({
+      staged: ['tracked.txt'],
+      unstaged: ['staged.txt'],
+      untracked: ['keep me.txt']
+    })
+
+    const listed = await service.listRecoveries()
+    expect(listed).toEqual([applied.recovery])
+    expect(JSON.stringify(listed)).not.toContain(workspace)
+
+    const undo = await service.prepareRecoveryUndo(applied.recovery.id)
+    expect(Object.isFrozen(undo)).toBe(true)
+    expect(undo.preview).toContain('tracked.txt')
+    expect(undo.preview).toContain('quarantine me.txt')
+    const restored = await service.executePreparedRecoveryUndo(undo)
+    expect(restored).toMatchObject({
+      id: applied.recovery.id,
+      status: 'restored',
+      canUndo: false
+    })
+    expect(await readFile(path.join(workspace, 'tracked.txt'), 'utf8')).toBe(
+      'later working version\n'
+    )
+    expect(
+      await readFile(path.join(workspace, 'quarantine me.txt'), 'utf8')
+    ).toBe('recoverable untracked\n')
+    expect(await service.status()).toMatchObject({
+      staged: ['tracked.txt'],
+      unstaged: ['staged.txt', 'tracked.txt'],
+      untracked: ['keep me.txt', 'quarantine me.txt']
+    })
+    await expect(
+      service.executePreparedPathRevert(prepared)
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+    await expect(
+      service.executePreparedRecoveryUndo(undo)
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+  })
+
+  it('restores a selected tracked deletion and undo returns it to the missing state without deleting the recovery copy', async () => {
+    const { service, workspace, worktreeRoot } = await createFixture()
+    await rm(path.join(workspace, 'tracked.txt'))
+
+    const prepared = await service.preparePathRevert(['tracked.txt'])
+    expect(prepared.preview).toContain('deleted file mode')
+    const applied = await service.executePreparedPathRevert(prepared)
+    expect(await readFile(path.join(workspace, 'tracked.txt'), 'utf8')).toBe(
+      'original\n'
+    )
+
+    const undo = await service.prepareRecoveryUndo(applied.recovery.id)
+    await service.executePreparedRecoveryUndo(undo)
+    await expect(access(path.join(workspace, 'tracked.txt'))).rejects.toThrow()
+    const displaced = path.join(
+      worktreeRoot,
+      '.ground-recovery',
+      applied.recovery.id,
+      'undo-current-000000.bin'
+    )
+    expect(await readFile(displaced, 'utf8')).toBe('original\n')
+  })
+
+  it('rejects content, index, and parent swaps after a complete restore review', async () => {
+    const first = await createFixture()
+    await writeFile(path.join(first.workspace, 'tracked.txt'), 'reviewed change\n')
+    const contentPrepared = await first.service.preparePathRevert(['tracked.txt'])
+    await writeFile(path.join(first.workspace, 'tracked.txt'), 'later change\n')
+    await expect(
+      first.service.executePreparedPathRevert(contentPrepared)
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+    expect(await first.service.listRecoveries()).toEqual([])
+
+    const second = await createFixture()
+    await writeFile(path.join(second.workspace, 'tracked.txt'), 'reviewed working\n')
+    const indexPrepared = await second.service.preparePathRevert(['tracked.txt'])
+    await writeFile(path.join(second.workspace, 'tracked.txt'), 'new index\n')
+    await git(second.workspace, ['add', '--', 'tracked.txt'])
+    await writeFile(path.join(second.workspace, 'tracked.txt'), 'new working\n')
+    await expect(
+      second.service.executePreparedPathRevert(indexPrepared)
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+
+    if (process.platform !== 'win32') {
+      const third = await createFixture()
+      const nested = path.join(third.workspace, 'nested')
+      const parked = path.join(third.workspace, 'nested-parked')
+      const outside = path.join(third.root, 'outside')
+      await mkdir(nested)
+      await mkdir(outside)
+      await writeFile(path.join(nested, 'safe.txt'), 'base\n')
+      await git(third.workspace, ['add', '--', 'nested/safe.txt'])
+      await git(third.workspace, ['commit', '--quiet', '-m', 'Nested base'])
+      await writeFile(path.join(nested, 'safe.txt'), 'reviewed\n')
+      const parentPrepared = await third.service.preparePathRevert([
+        'nested/safe.txt'
+      ])
+      await rename(nested, parked)
+      await writeFile(path.join(outside, 'safe.txt'), 'outside must stay\n')
+      await symlink(outside, nested)
+
+      await expect(
+        third.service.executePreparedPathRevert(parentPrepared)
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' })
+      expect(await readFile(path.join(outside, 'safe.txt'), 'utf8')).toBe(
+        'outside must stay\n'
+      )
+    }
+  })
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects final symlinks and conflicted paths instead of restoring ambiguous filesystem objects',
+    async () => {
+      const { root, service, workspace } = await createFixture()
+      const outside = path.join(root, 'outside.txt')
+      await writeFile(outside, 'outside\n')
+      await symlink(outside, path.join(workspace, 'linked.txt'))
+      await expect(
+        service.preparePathRevert(['linked.txt'])
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' })
+
+      await writeFile(path.join(workspace, 'conflict.txt'), 'base\n')
+      await git(workspace, ['add', '--', 'conflict.txt'])
+      await git(workspace, ['commit', '--quiet', '-m', 'Conflict base'])
+      await git(workspace, ['checkout', '--quiet', '-b', 'restore-topic'])
+      await writeFile(path.join(workspace, 'conflict.txt'), 'topic\n')
+      await git(workspace, ['commit', '--quiet', '--all', '-m', 'Topic'])
+      await git(workspace, ['checkout', '--quiet', 'main'])
+      await writeFile(path.join(workspace, 'conflict.txt'), 'main\n')
+      await git(workspace, ['commit', '--quiet', '--all', '-m', 'Main'])
+      await git(workspace, ['merge', '--no-edit', 'restore-topic'], {
+        reject: false
+      })
+
+      await expect(
+        service.preparePathRevert(['conflict.txt'])
+      ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+
+      const recoveryFixture = await createFixture()
+      await writeFile(
+        path.join(recoveryFixture.workspace, 'tracked.txt'),
+        'reviewed change\n'
+      )
+      const recoveryPrepared =
+        await recoveryFixture.service.preparePathRevert(['tracked.txt'])
+      const redirectedRecovery = path.join(
+        recoveryFixture.root,
+        'redirected-recovery'
+      )
+      await mkdir(redirectedRecovery)
+      await writeFile(
+        path.join(redirectedRecovery, 'sentinel.txt'),
+        'must remain untouched\n'
+      )
+      await symlink(
+        redirectedRecovery,
+        path.join(
+          recoveryFixture.worktreeRoot,
+          '.ground-recovery'
+        )
+      )
+      await expect(
+        recoveryFixture.service.executePreparedPathRevert(
+          recoveryPrepared
+        )
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' })
+      expect(
+        await readFile(
+          path.join(redirectedRecovery, 'sentinel.txt'),
+          'utf8'
+        )
+      ).toBe('must remain untouched\n')
+      expect(
+        await readFile(
+          path.join(recoveryFixture.workspace, 'tracked.txt'),
+          'utf8'
+        )
+      ).toBe('reviewed change\n')
+    }
+  )
+
+  it('refuses undo when a path changed or reappeared and preserves the completed recovery', async () => {
+    const { service, workspace } = await createFixture()
+    await writeFile(path.join(workspace, 'tracked.txt'), 'working change\n')
+    await writeFile(path.join(workspace, 'recover.txt'), 'untracked before\n')
+    const applied = await service.executePreparedPathRevert(
+      await service.preparePathRevert(['tracked.txt', 'recover.txt'])
+    )
+
+    await writeFile(path.join(workspace, 'recover.txt'), 'new occupant\n')
+    await expect(
+      service.prepareRecoveryUndo(applied.recovery.id)
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+    expect(await readFile(path.join(workspace, 'recover.txt'), 'utf8')).toBe(
+      'new occupant\n'
+    )
+    expect(await service.listRecoveries()).toMatchObject([
+      {
+        id: applied.recovery.id,
+        status: 'applied',
+        canUndo: true
+      }
+    ])
+  })
+
+  it('treats recovery manifests as untrusted and refuses traversal after tampering', async () => {
+    const { service, workspace, worktreeRoot } = await createFixture()
+    await writeFile(path.join(workspace, 'recover.txt'), 'untracked\n')
+    const applied = await service.executePreparedPathRevert(
+      await service.preparePathRevert(['recover.txt'])
+    )
+    const manifestPath = path.join(
+      worktreeRoot,
+      '.ground-recovery',
+      applied.recovery.id,
+      'manifest.json'
+    )
+    const manifest = JSON.parse(
+      await readFile(manifestPath, 'utf8')
+    ) as {
+      untracked: Array<{ relativePath: string; before: { relativePath: string } }>
+    }
+    const first = manifest.untracked[0]
+    if (!first) throw new Error('Expected an untracked recovery entry')
+    first.relativePath = '../outside.txt'
+    first.before.relativePath = '../outside.txt'
+    await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`)
+
+    expect(await service.listRecoveries()).toEqual([])
+    await expect(
+      service.prepareRecoveryUndo(applied.recovery.id)
+    ).rejects.toMatchObject({ code: 'UNSAFE_PATH' })
+    await expect(access(path.join(workspace, '..', 'outside.txt'))).rejects.toThrow()
+  })
+
+  it('fails closed when the complete selected restore preview exceeds its bound', async () => {
+    const { service, workspace } = await createFixture()
+    await writeFile(
+      path.join(workspace, 'tracked.txt'),
+      `${'changed'.repeat(650_000)}\n`
+    )
+
+    await expect(
+      service.preparePathRevert(['tracked.txt'])
+    ).rejects.toMatchObject({ code: 'OUTPUT_LIMIT' })
+    expect(await readFile(path.join(workspace, 'tracked.txt'), 'utf8')).toContain(
+      'changed'
+    )
+    expect(await service.listRecoveries()).toEqual([])
+  })
+
   it.runIf(process.platform !== 'win32')(
     'commits the exact prepared index while preserving concurrent index and working-tree edits',
     async () => {
@@ -308,17 +667,41 @@ describe.skipIf(!gitExecutable)('GitWorkspaceService', () => {
       await writeFile(path.join(workspace, 'tracked.txt'), 'approved staged content\n')
       const stage = await service.preparePathMutation('stage', ['tracked.txt'])
       await service.executePreparedPathMutation(stage)
-      const prepared = await service.prepareCommit()
+      const prepared = await service.prepareCommit(
+        commitOptions('Commit approved tree')
+      )
+
+      expect(prepared).toMatchObject({
+        version: 1,
+        symbolicRef: 'refs/heads/main',
+        branch: 'main',
+        detached: false,
+        message: 'Commit approved tree',
+        authorName: 'Ground Author',
+        authorEmail: 'author@example.test'
+      })
+      expect(Object.isFrozen(prepared)).toBe(true)
+      expect(Object.isFrozen(prepared.stagedPaths)).toBe(true)
+      expect(prepared.preview).toContain(
+        'Exact approved ref: "refs/heads/main"'
+      )
+      expect(prepared.preview).toContain(
+        `Repository identity SHA-256: ${prepared.repositoryIdentitySha256}`
+      )
+      expect(prepared.preview).toContain(
+        `Worktree identity SHA-256: ${prepared.worktreeIdentitySha256}`
+      )
+      expect(prepared.previewSha256).toMatch(/^[0-9a-f]{64}$/u)
+      expect(prepared.actionSha256).toMatch(/^[0-9a-f]{64}$/u)
 
       await writeFile(path.join(workspace, 'tracked.txt'), 'later working edit\n')
       await writeFile(path.join(workspace, 'later.txt'), 'later staged edit\n')
       await git(workspace, ['add', '--', 'later.txt'])
 
-      const committed = await service.executePreparedCommit(prepared, {
-        message: 'Commit approved tree',
-        authorName: 'Ground Author',
-        authorEmail: 'author@example.test'
-      })
+      const committed = await service.executePreparedCommit(
+        prepared,
+        commitOptions('Commit approved tree')
+      )
       expect(committed.subject).toBe('Commit approved tree')
       expect(committed.authorName).toBe('Ground Author')
       expect(
@@ -338,11 +721,12 @@ describe.skipIf(!gitExecutable)('GitWorkspaceService', () => {
         unstaged: ['tracked.txt']
       })
       await expect(access(hookMarker)).rejects.toThrow()
-      await expect(service.executePreparedCommit(prepared, {
-        message: 'Cannot reuse',
-        authorName: 'Ground Author',
-        authorEmail: 'author@example.test'
-      })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+      await expect(
+        service.executePreparedCommit(
+          prepared,
+          commitOptions('Cannot reuse')
+        )
+      ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
     }
   )
 
@@ -350,7 +734,9 @@ describe.skipIf(!gitExecutable)('GitWorkspaceService', () => {
     const { service, workspace } = await createFixture()
     await writeFile(path.join(workspace, 'tracked.txt'), 'prepared\n')
     await git(workspace, ['add', '--', 'tracked.txt'])
-    const prepared = await service.prepareCommit()
+    const prepared = await service.prepareCommit(
+      commitOptions('Stale approval')
+    )
 
     await writeFile(path.join(workspace, 'other.txt'), 'external\n')
     await git(workspace, ['add', '--', 'other.txt'])
@@ -358,29 +744,119 @@ describe.skipIf(!gitExecutable)('GitWorkspaceService', () => {
     const externalHead = (await git(workspace, ['rev-parse', 'HEAD'])).stdout.trim()
 
     await expect(
-      service.executePreparedCommit(prepared, {
-        message: 'Stale approval',
-        authorName: 'Ground Author',
-        authorEmail: 'author@example.test'
-      })
-    ).rejects.toMatchObject({ code: 'COMMAND_FAILED' })
+      service.executePreparedCommit(
+        prepared,
+        commitOptions('Stale approval')
+      )
+    ).rejects.toMatchObject({ code: 'UNSAFE_CONFIGURATION' })
     expect((await git(workspace, ['rev-parse', 'HEAD'])).stdout.trim()).toBe(
       externalHead
     )
   })
 
+  it('does not commit a same-OID checkout race onto a different branch', async () => {
+    const { service, workspace } = await createFixture()
+    const originalHead = (
+      await git(workspace, ['rev-parse', 'HEAD'])
+    ).stdout.trim()
+    await writeFile(path.join(workspace, 'tracked.txt'), 'prepared\n')
+    await git(workspace, ['add', '--', 'tracked.txt'])
+    const prepared = await service.prepareCommit(
+      commitOptions('Bound to main')
+    )
+
+    await git(workspace, ['checkout', '--quiet', '-b', 'other'])
+    expect((await git(workspace, ['rev-parse', 'HEAD'])).stdout.trim()).toBe(
+      originalHead
+    )
+
+    await expect(
+      service.executePreparedCommit(
+        prepared,
+        commitOptions('Bound to main')
+      )
+    ).rejects.toMatchObject({ code: 'UNSAFE_CONFIGURATION' })
+    expect(
+      (await git(workspace, ['rev-parse', 'refs/heads/main'])).stdout.trim()
+    ).toBe(originalHead)
+    expect(
+      (await git(workspace, ['rev-parse', 'refs/heads/other'])).stdout.trim()
+    ).toBe(originalHead)
+  })
+
+  it('refuses to prepare a commit while HEAD is detached', async () => {
+    const { service, workspace } = await createFixture()
+    const originalHead = (
+      await git(workspace, ['rev-parse', 'HEAD'])
+    ).stdout.trim()
+    await git(workspace, ['checkout', '--quiet', '--detach'])
+    await writeFile(path.join(workspace, 'tracked.txt'), 'prepared detached\n')
+    await git(workspace, ['add', '--', 'tracked.txt'])
+    await expect(
+      service.prepareCommit(commitOptions('Detached approval'))
+    ).rejects.toMatchObject({ code: 'UNSAFE_CONFIGURATION' })
+    expect((await git(workspace, ['rev-parse', 'HEAD'])).stdout.trim()).toBe(
+      originalHead
+    )
+  })
+
+  it('rejects replacement repository metadata with the same approved ref and index', async () => {
+    const { service, workspace } = await createFixture()
+    await writeFile(path.join(workspace, 'tracked.txt'), 'prepared\n')
+    await git(workspace, ['add', '--', 'tracked.txt'])
+    const prepared = await service.prepareCommit(
+      commitOptions('Bound repository')
+    )
+    const originalMetadata = path.join(workspace, '.git-approved')
+    await rename(path.join(workspace, '.git'), originalMetadata)
+    await cp(originalMetadata, path.join(workspace, '.git'), {
+      recursive: true
+    })
+
+    await expect(
+      service.executePreparedCommit(
+        prepared,
+        commitOptions('Bound repository')
+      )
+    ).rejects.toMatchObject({ code: 'UNSAFE_CONFIGURATION' })
+  })
+
+  it('rejects replacement of the approved worktree directory identity', async () => {
+    const { root, service, workspace } = await createFixture()
+    await writeFile(path.join(workspace, 'tracked.txt'), 'prepared\n')
+    await git(workspace, ['add', '--', 'tracked.txt'])
+    const prepared = await service.prepareCommit(
+      commitOptions('Bound worktree')
+    )
+    const displacedWorkspace = path.join(root, 'workspace-approved')
+    await rename(workspace, displacedWorkspace)
+    await mkdir(workspace)
+    await rename(
+      path.join(displacedWorkspace, '.git'),
+      path.join(workspace, '.git')
+    )
+
+    await expect(
+      service.executePreparedCommit(
+        prepared,
+        commitOptions('Bound worktree')
+      )
+    ).rejects.toMatchObject({ code: 'UNSAFE_CONFIGURATION' })
+  })
+
   it('creates an exact initial commit on an unborn branch', async () => {
     const { service, workspace } = await createFixture()
     await git(workspace, ['update-ref', '-d', 'refs/heads/main'])
-    const prepared = await service.prepareCommit()
+    const prepared = await service.prepareCommit(
+      commitOptions('Initial prepared commit')
+    )
     expect(prepared.expectedHeadOid).toBeNull()
     expect(prepared.branch).toBe('main')
 
-    const committed = await service.executePreparedCommit(prepared, {
-      message: 'Initial prepared commit',
-      authorName: 'Ground Author',
-      authorEmail: 'author@example.test'
-    })
+    const committed = await service.executePreparedCommit(
+      prepared,
+      commitOptions('Initial prepared commit')
+    )
     expect(committed.subject).toBe('Initial prepared commit')
     expect(committed.parents).toEqual([])
     expect((await git(workspace, ['rev-parse', 'HEAD'])).stdout.trim()).toBe(

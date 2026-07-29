@@ -48,7 +48,7 @@ function inertRuntime(
 }
 
 describe('production adapter registry composition', () => {
-  it('registers four model and four CLI adapters deterministically', () => {
+  it('registers four model and five CLI adapters deterministically', () => {
     const registry = createBuiltinAdapterRegistry(async () => {
       throw new Error('The registry test must not authorize a process')
     })
@@ -61,7 +61,8 @@ describe('production adapter registry composition', () => {
       { id: 'ground.cli.generic', kind: 'agent-runtime' },
       { id: 'openai.codex-cli', kind: 'agent-runtime' },
       { id: 'anthropic.claude-code', kind: 'agent-runtime' },
-      { id: 'google.gemini-cli', kind: 'agent-runtime' }
+      { id: 'google.gemini-cli', kind: 'agent-runtime' },
+      { id: 'google.antigravity-cli', kind: 'agent-runtime' }
     ])
   })
 

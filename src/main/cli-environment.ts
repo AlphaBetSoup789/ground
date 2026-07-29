@@ -9,7 +9,7 @@ const CLI_ENVIRONMENT_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/u
 const CLI_ENVIRONMENT_FINGERPRINT_PATTERN = /^[a-f0-9]{64}$/u
 const MAX_CLI_ENVIRONMENT_VARIABLES = 32
 const MAX_CLI_ENVIRONMENT_VALUE_CHARACTERS = 20_000
-const MAX_CLI_ENVIRONMENT_TOTAL_BYTES = 128_000
+export const MAX_CLI_ENVIRONMENT_TOTAL_BYTES = 128_000
 
 const DENIED_CLI_ENVIRONMENT_NAMES = new Set([
   'BASH_ENV',
@@ -84,9 +84,10 @@ interface CliEnvironmentSecretEnvelope {
 export interface CliEnvironmentPlan {
   variables: readonly string[]
   fingerprint?: string
+  revision?: string
   secretReference: string
-  previousSerializedSecret?: string
   desiredSerializedSecret?: string
+  obsoleteSecretReferences: readonly string[]
   mutation: 'none' | 'set' | 'delete'
 }
 
@@ -146,8 +147,29 @@ export function normalizeCliEnvironmentVariableNames(
   return Object.freeze(normalized.sort())
 }
 
-export function cliEnvironmentSecretReference(providerId: string): string {
-  return `cli-env:${createHash('sha256').update(providerId).digest('hex')}`
+export function cliEnvironmentSecretReference(
+  providerId: string,
+  revision?: string
+): string {
+  const digest = createHash('sha256')
+    .update(
+      revision
+        ? JSON.stringify(['ground:cli-env:v2', providerId, assertFingerprint(revision)])
+        : providerId
+    )
+    .digest('hex')
+  return `${revision ? 'cli-env:v2:' : 'cli-env:'}${digest}`
+}
+
+export function cliEnvironmentSecretReferencesFor(
+  provider: Pick<CliProvider, 'id' | 'environmentRevision'>
+): readonly string[] {
+  const legacy = cliEnvironmentSecretReference(provider.id)
+  const exact = cliEnvironmentSecretReference(
+    provider.id,
+    provider.environmentRevision
+  )
+  return Object.freeze(exact === legacy ? [legacy] : [exact, legacy])
 }
 
 function parseSecretEnvelope(serialized: string): CliEnvironmentSecretEnvelope {
@@ -293,10 +315,13 @@ export function prepareCliEnvironmentPlan(
   existingProvider: CliProvider | undefined,
   previousSerializedSecret: string | undefined
 ): CliEnvironmentPlan {
-  const secretReference = cliEnvironmentSecretReference(providerId)
-  const existing = existingEnvironment(
-    existingProvider,
-    previousSerializedSecret
+  const legacyReference = cliEnvironmentSecretReference(providerId)
+  const existingReference = cliEnvironmentSecretReference(
+    providerId,
+    existingProvider?.environmentRevision
+  )
+  const obsoleteSecretReferences = Object.freeze(
+    [...new Set([existingReference, legacyReference])]
   )
 
   if (draftEntries === undefined) {
@@ -308,8 +333,11 @@ export function prepareCliEnvironmentPlan(
       ...(existingProvider?.environmentFingerprint
         ? { fingerprint: existingProvider.environmentFingerprint }
         : {}),
-      secretReference,
-      ...(previousSerializedSecret ? { previousSerializedSecret } : {}),
+      ...(existingProvider?.environmentRevision
+        ? { revision: existingProvider.environmentRevision }
+        : {}),
+      secretReference: existingReference,
+      obsoleteSecretReferences: Object.freeze([]),
       mutation: 'none'
     })
   }
@@ -318,12 +346,22 @@ export function prepareCliEnvironmentPlan(
   if (!entries.length) {
     return Object.freeze({
       variables: Object.freeze([]),
-      secretReference,
-      ...(previousSerializedSecret ? { previousSerializedSecret } : {}),
-      mutation: previousSerializedSecret ? 'delete' : 'none'
+      secretReference: existingReference,
+      obsoleteSecretReferences,
+      mutation:
+        existingProvider?.environmentVariables?.length ||
+        previousSerializedSecret
+          ? 'delete'
+          : 'none'
     })
   }
 
+  const needsExisting = entries.some(
+    (entry) => !entry.value || entry.value.length === 0
+  )
+  const existing = needsExisting
+    ? existingEnvironment(existingProvider, previousSerializedSecret)
+    : undefined
   const values = Object.create(null) as Record<string, string>
   let totalBytes = 0
   for (const entry of entries) {
@@ -352,19 +390,32 @@ export function prepareCliEnvironmentPlan(
     return Object.freeze({
       variables,
       fingerprint: existingProvider.environmentFingerprint,
-      secretReference,
-      ...(previousSerializedSecret ? { previousSerializedSecret } : {}),
+      ...(existingProvider.environmentRevision
+        ? { revision: existingProvider.environmentRevision }
+        : {}),
+      secretReference: existingReference,
+      obsoleteSecretReferences: Object.freeze([]),
       mutation: 'none'
     })
   }
 
   const fingerprint = randomBytes(32).toString('hex')
+  const revision = randomBytes(32).toString('hex')
+  const secretReference = cliEnvironmentSecretReference(
+    providerId,
+    revision
+  )
   return Object.freeze({
     variables,
     fingerprint,
+    revision,
     secretReference,
-    ...(previousSerializedSecret ? { previousSerializedSecret } : {}),
     desiredSerializedSecret: serializeSecretEnvelope(fingerprint, values),
+    obsoleteSecretReferences: Object.freeze(
+      obsoleteSecretReferences.filter(
+        (reference) => reference !== secretReference
+      )
+    ),
     mutation: 'set'
   })
 }
@@ -375,7 +426,12 @@ export function resolveCliEnvironment(
 ): Readonly<Record<string, string>> {
   return resolveCliEnvironmentSecret(
     provider,
-    vault.get(cliEnvironmentSecretReference(provider.id))
+    vault.get(
+      cliEnvironmentSecretReference(
+        provider.id,
+        provider.environmentRevision
+      )
+    )
   )
 }
 
@@ -410,7 +466,10 @@ export async function resolveCliEnvironmentWithSecretResolver(
   )
   if (!variables.length) return resolveCliEnvironmentSecret(provider, undefined)
   const serializedSecret = await resolver.resolve(
-    cliEnvironmentSecretReference(provider.id)
+    cliEnvironmentSecretReference(
+      provider.id,
+      provider.environmentRevision
+    )
   )
   return resolveCliEnvironmentSecret(provider, serializedSecret)
 }

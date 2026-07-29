@@ -9,7 +9,11 @@ import {
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import type { ModelApiProvider, RunEvent } from '../shared/types'
+import type {
+  ModelApiProvider,
+  ProviderProfile,
+  RunEvent
+} from '../shared/types'
 import type {
   AiSdkAdapterConfig,
   JsonObject,
@@ -31,8 +35,12 @@ import {
 } from './provider-credentials'
 import { agentApprovalFingerprint } from './native-agent-approval'
 import { ProviderOperationGate } from './provider-operation-gate'
+import { providerConfigurationFingerprint } from './provider-revision'
 import { SecretVault } from './secrets'
-import { StateStore } from './store'
+import {
+  StatePersistenceError,
+  StateStore
+} from './store'
 
 type ModelScript = (request: ModelRequest) => AsyncIterable<ModelEvent>
 
@@ -408,6 +416,9 @@ async function harness(
     runtimeFactory?: ModelRuntimeFactory
     providerOperations?: ProviderOperationGate
     authorizeWorkspace?: (storedPath: string) => Promise<string>
+    authorizeProviderStart?: (
+      provider: Readonly<ProviderProfile>
+    ) => Promise<void>
   }
 ): Promise<{
   directory: string
@@ -426,6 +437,16 @@ async function harness(
   const workspace = await realpath(workspaceCandidate)
   const store = new StateStore(path.join(directory, 'state.json'))
   await store.load()
+  const defaultProviderId = store.snapshot().settings.defaultProviderId
+  const defaultProvider = store.getProvider(defaultProviderId)
+  await store.upsertProvider({
+    ...defaultProvider,
+    verification: {
+      status: 'passed',
+      scope: 'connection',
+      checkedAt: '2026-07-29T12:00:00.000Z'
+    }
+  })
   const task = await store.createTask(workspace)
   const requests: ModelRequest[] = []
   const events: RunEvent[] = []
@@ -441,7 +462,9 @@ async function harness(
     mcp,
     undefined,
     options?.providerOperations,
-    options?.authorizeWorkspace ?? ((candidate) => realpath(candidate))
+    options?.authorizeWorkspace ?? ((candidate) => realpath(candidate)),
+    undefined,
+    options?.authorizeProviderStart
   )
   return {
     directory,
@@ -600,6 +623,76 @@ describe('RunManager model runtime', () => {
     })
   })
 
+  it('does not issue a compensating state mutation after publication becomes ambiguous', async () => {
+    const uncertainty = new StatePersistenceError(
+      Object.assign(new Error('directory sync failed'), { code: 'EIO' })
+    )
+    const run = await harness([
+      async function* () {
+        throw uncertainty
+      }
+    ])
+    const mutateTask = vi.spyOn(run.store, 'mutateTask')
+
+    await run.manager.start(run.taskId, 'Trigger ambiguous persistence')
+
+    expect(await run.terminal).toMatchObject({
+      type: 'run-error',
+      message: expect.stringMatching(/conclusively publish local state/i)
+    })
+    expect(mutateTask).toHaveBeenCalledTimes(1)
+  })
+
+  it('serializes run startup against a local state restore reservation', async () => {
+    const run = await harness([
+      (request) => textResponse(request, 'Started after state restore.')
+    ])
+    let releaseRestore = (): void => undefined
+    const restoreGate = new Promise<void>((resolve) => {
+      releaseRestore = resolve
+    })
+    const restoring = run.manager.withStateRestoreReservation(async () => {
+      await restoreGate
+    })
+
+    await expect(
+      run.manager.start(run.taskId, 'Must not be recorded')
+    ).rejects.toThrow(/state restore/i)
+    expect(run.store.getTask(run.taskId).items).toEqual([])
+
+    releaseRestore()
+    await restoring
+    await run.manager.start(run.taskId, 'Start after restore')
+    await expect(run.terminal).resolves.toMatchObject({
+      type: 'run-completed'
+    })
+  })
+
+  it('rejects a local state restore reservation while any run is active', async () => {
+    let releaseResponse = (): void => undefined
+    const responseGate = new Promise<void>((resolve) => {
+      releaseResponse = resolve
+    })
+    const run = await harness([
+      async function* (request) {
+        await responseGate
+        yield* textResponse(request, 'Finished.')
+      }
+    ])
+
+    await run.manager.start(run.taskId, 'Keep this run active')
+    expect(run.manager.hasActiveRuns()).toBe(true)
+    await expect(
+      run.manager.withStateRestoreReservation(async () => undefined)
+    ).rejects.toThrow(/stop active runs/i)
+
+    releaseResponse()
+    await expect(run.terminal).resolves.toMatchObject({
+      type: 'run-completed'
+    })
+    expect(run.manager.hasActiveRuns()).toBe(false)
+  })
+
   it('serializes provider mutations against run startup in both directions', async () => {
     const providerOperations = new ProviderOperationGate()
     let releaseResponse: () => void = () => undefined
@@ -642,6 +735,174 @@ describe('RunManager model runtime', () => {
     })
   })
 
+  it('reserves the provider before asynchronous start authorization', async () => {
+    const providerOperations = new ProviderOperationGate()
+    let releaseAuthorization: () => void = () => undefined
+    const authorizationGate = new Promise<void>((resolve) => {
+      releaseAuthorization = resolve
+    })
+    const authorizeProviderStart = vi.fn(
+      async (_provider: Readonly<ProviderProfile>) => {
+        await authorizationGate
+      }
+    )
+    const run = await harness(
+      [(request) => textResponse(request, 'Authorized safely.')],
+      undefined,
+      { providerOperations, authorizeProviderStart }
+    )
+    const providerId = run.store.getTask(run.taskId).providerId
+
+    const starting = run.manager.start(
+      run.taskId,
+      'Wait for native provider authorization'
+    )
+    await vi.waitFor(() =>
+      expect(authorizeProviderStart).toHaveBeenCalledTimes(1)
+    )
+
+    expect(run.manager.isTaskActive(run.taskId)).toBe(true)
+    expect(providerOperations.isStartReserved(providerId)).toBe(true)
+    expect(() =>
+      providerOperations.reserveMutation(providerId, () => false)
+    ).toThrow(/starting runs/i)
+
+    releaseAuthorization()
+    await expect(starting).resolves.toMatch(/^run_/u)
+    await expect(run.terminal).resolves.toMatchObject({
+      type: 'run-completed'
+    })
+    expect(providerOperations.isStartReserved(providerId)).toBe(false)
+  })
+
+  it('rejects fallback remapping while provider authorization is pending', async () => {
+    const providerOperations = new ProviderOperationGate()
+    let releaseAuthorization: () => void = () => undefined
+    const authorizationGate = new Promise<void>((resolve) => {
+      releaseAuthorization = resolve
+    })
+    const run = await harness(
+      [(request) => textResponse(request, 'Must not be requested.')],
+      undefined,
+      {
+        providerOperations,
+        authorizeProviderStart: async () => {
+          await authorizationGate
+        }
+      }
+    )
+    const original = run.store.getProvider(
+      run.store.getTask(run.taskId).providerId
+    )
+    await run.store.upsertProvider({
+      ...original,
+      id: 'fallback-provider',
+      name: 'Fallback provider',
+      createdAt: '2026-07-29T12:30:00.000Z',
+      updatedAt: '2026-07-29T12:30:00.000Z'
+    })
+
+    const starting = run.manager.start(
+      run.taskId,
+      'Do not switch providers during startup'
+    )
+    await vi.waitFor(() =>
+      expect(providerOperations.isStartReserved(original.id)).toBe(true)
+    )
+    await run.store.deleteProvider(original.id)
+    releaseAuthorization()
+
+    await expect(starting).rejects.toThrow(
+      /task or provider changed while the run was starting/i
+    )
+    expect(run.requests).toEqual([])
+    expect(run.store.getTask(run.taskId).items).toEqual([])
+    expect(providerOperations.isStartReserved(original.id)).toBe(false)
+  })
+
+  it('binds startup to the exact provider and credential revision', async () => {
+    const providerOperations = new ProviderOperationGate()
+    let releaseAuthorization: () => void = () => undefined
+    const authorizationGate = new Promise<void>((resolve) => {
+      releaseAuthorization = resolve
+    })
+    const run = await harness(
+      [(request) => textResponse(request, 'Must not use a replacement key.')],
+      undefined,
+      {
+        providerOperations,
+        authorizeProviderStart: async () => {
+          await authorizationGate
+        }
+      }
+    )
+    const original = run.store.getProvider(
+      run.store.getTask(run.taskId).providerId
+    )
+    if (original.kind === 'cli') throw new Error('Expected an API provider')
+
+    const starting = run.manager.start(
+      run.taskId,
+      'Keep the exact credential revision'
+    )
+    await vi.waitFor(() =>
+      expect(providerOperations.isStartReserved(original.id)).toBe(true)
+    )
+    await run.store.upsertProvider({
+      ...original,
+      hasApiKey: true,
+      credentialRevision: 'credential_replacement',
+      // Deliberately preserve updatedAt to prove the full profile and
+      // credential boundary are bound, not just the timestamp.
+      updatedAt: original.updatedAt
+    })
+    releaseAuthorization()
+
+    await expect(starting).rejects.toThrow(
+      /task or provider changed while the run was starting/i
+    )
+    expect(run.requests).toEqual([])
+    expect(run.store.getTask(run.taskId).items).toEqual([])
+  })
+
+  it('revalidates readiness after asynchronous start authorization', async () => {
+    const providerOperations = new ProviderOperationGate()
+    let releaseAuthorization: () => void = () => undefined
+    const authorizationGate = new Promise<void>((resolve) => {
+      releaseAuthorization = resolve
+    })
+    const run = await harness(
+      [(request) => textResponse(request, 'Must not use an unverified profile.')],
+      undefined,
+      {
+        providerOperations,
+        authorizeProviderStart: async () => {
+          await authorizationGate
+        }
+      }
+    )
+    const original = run.store.getProvider(
+      run.store.getTask(run.taskId).providerId
+    )
+
+    const starting = run.manager.start(
+      run.taskId,
+      'Require the saved connection test'
+    )
+    await vi.waitFor(() =>
+      expect(providerOperations.isStartReserved(original.id)).toBe(true)
+    )
+    await run.store.upsertProvider({
+      ...original,
+      verification: { status: 'unverified' }
+    })
+    releaseAuthorization()
+
+    await expect(starting).rejects.toThrow(/Test .* in Settings/i)
+    expect(run.requests).toEqual([])
+    expect(run.store.getTask(run.taskId).items).toEqual([])
+  })
+
   it('persists partial assistant text when a provider stream fails', async () => {
     const run = await harness([
       async function* () {
@@ -672,6 +933,8 @@ describe('RunManager model runtime', () => {
         [provider.id]: {
           adapterId: 'test.model',
           providerRevision: provider.updatedAt,
+          providerFingerprint:
+            providerConfigurationFingerprint(provider),
           model: provider.model,
           workspacePath: task.workspacePath,
           mode: task.mode,
@@ -1078,10 +1341,9 @@ describe('RunManager model runtime', () => {
     expect(vault.get).not.toHaveBeenCalled()
   })
 
-  it('keeps a legacy key usable when best-effort migration fails', async () => {
+  it('keeps a legacy key usable without mutating the vault at runtime', async () => {
     const observed: { secret?: string } = {}
     const vault = credentialVault()
-    vault.set.mockRejectedValueOnce(new Error('vault write unavailable'))
     const run = await harness([], undefined, {
       vault: vault.instance,
       runtimeFactory: credentialResolvingRuntime(
@@ -1100,10 +1362,7 @@ describe('RunManager model runtime', () => {
     expect((await run.terminal).type).toBe('run-completed')
 
     expect(observed.secret).toBe('legacy-secret')
-    expect(vault.set).toHaveBeenCalledWith(
-      providerCredentialReferenceFor(provider),
-      'legacy-secret'
-    )
+    expect(vault.set).not.toHaveBeenCalled()
     expect(vault.delete).not.toHaveBeenCalled()
     expect(vault.entries.get(provider.id)).toBe('legacy-secret')
   })
@@ -1214,15 +1473,11 @@ describe('RunManager model runtime', () => {
 
   it('rejects output that races a pending credential resolution', async () => {
     const secret = 'sk-ground-deferred-legacy-secret'
-    let releaseMigration: () => void = () => undefined
-    const migrationGate = new Promise<void>((resolve) => {
-      releaseMigration = resolve
+    let releaseCredential: (value: string) => void = () => undefined
+    const credentialGate = new Promise<string>((resolve) => {
+      releaseCredential = resolve
     })
     const vault = credentialVault()
-    vault.set.mockImplementation(async (reference: string, value: string) => {
-      await migrationGate
-      vault.entries.set(reference, value)
-    })
     const run = await harness([], undefined, {
       vault: vault.instance,
       runtimeFactory: credentialRacingRuntime()
@@ -1230,13 +1485,22 @@ describe('RunManager model runtime', () => {
     const task = run.store.getTask(run.taskId)
     const stored = run.store.getProvider(task.providerId)
     if (stored.kind === 'cli') throw new Error('Expected a model provider')
-    const provider = { ...stored, hasApiKey: true }
-    vault.entries.set(provider.id, secret)
+    const provider = {
+      ...stored,
+      hasApiKey: true,
+      credentialRevision: 'credential_deferred'
+    }
+    const exactReference = providerCredentialReferenceFor(provider)
+    vault.get.mockImplementation((reference: string) =>
+      reference === exactReference
+        ? (credentialGate as unknown as string)
+        : vault.entries.get(reference)
+    )
     await run.store.upsertProvider(provider)
 
     await run.manager.start(run.taskId, 'Reject credential resolution races.')
     const terminal = await run.terminal
-    releaseMigration()
+    releaseCredential(secret)
     expect(terminal).toMatchObject({
       type: 'run-error',
       message: expect.stringMatching(/credential resolution was pending/i)
@@ -1645,6 +1909,60 @@ describe('RunManager model runtime', () => {
     })
   })
 
+  it('invalidates model continuation after a same-timestamp provider configuration change', async () => {
+    const run = await harness([
+      (request) => textResponse(request, 'Fresh response.')
+    ])
+    const providerId = run.store.getTask(run.taskId).providerId
+    const original = run.store.getProvider(providerId)
+    if (original.kind === 'cli') throw new Error('Expected a model provider')
+    await run.store.mutateTask(run.taskId, (task) => {
+      task.modelSessions = {
+        [original.id]: {
+          adapterId: 'test.model',
+          providerRevision: original.updatedAt,
+          providerFingerprint:
+            providerConfigurationFingerprint(original),
+          model: original.model,
+          workspacePath: task.workspacePath,
+          mode: task.mode,
+          origin: 'ground',
+          conversation: [
+            {
+              kind: 'message',
+              id: 'stale-provider-conversation',
+              role: 'user',
+              parts: [
+                {
+                  kind: 'text',
+                  text: 'Must not survive a same-timestamp provider change'
+                }
+              ]
+            }
+          ],
+          updatedAt: task.createdAt
+        }
+      }
+    })
+    const replacement: ModelApiProvider = {
+      ...original,
+      supportsTools: !original.supportsTools,
+      updatedAt: original.updatedAt
+    }
+    await run.store.upsertProvider(replacement)
+
+    await run.manager.start(run.taskId, 'Fresh request')
+    await run.terminal
+
+    expect(JSON.stringify(run.requests[0]?.conversation)).not.toContain(
+      'Must not survive a same-timestamp provider change'
+    )
+    expect(
+      run.store.getTask(run.taskId).modelSessions?.[providerId]
+        ?.providerFingerprint
+    ).toBe(providerConfigurationFingerprint(replacement))
+  })
+
   it('invalidates an imported provider continuation while history stays excluded', async () => {
     const run = await harness([
       (request) => textResponse(request, 'Fresh response.')
@@ -1665,6 +1983,8 @@ describe('RunManager model runtime', () => {
         [provider.id]: {
           adapterId: 'test.model',
           providerRevision: provider.updatedAt,
+          providerFingerprint:
+            providerConfigurationFingerprint(provider),
           model: provider.model,
           workspacePath: task.workspacePath,
           mode: task.mode,
@@ -1720,6 +2040,8 @@ describe('RunManager model runtime', () => {
         [provider.id]: {
           adapterId: 'test.model',
           providerRevision: provider.updatedAt,
+          providerFingerprint:
+            providerConfigurationFingerprint(provider),
           model: provider.model,
           workspacePath: task.workspacePath,
           mode: task.mode,
@@ -1750,6 +2072,121 @@ describe('RunManager model runtime', () => {
     expect(conversation).toContain('Canonical imported provider conversation')
     expect(conversation).not.toContain('Visible projection of the imported turn')
     expect(conversation).toContain('Fresh request')
+  })
+
+  it('uses an exact imported API seed after the user attaches a workspace', async () => {
+    const observedRequests: ModelRequest[] = []
+    const adapter = {
+      id: 'openai.compatible',
+      stream(request: ModelRequest): AsyncIterable<ModelEvent> {
+        observedRequests.push(structuredClone(request))
+        return textResponse(request, 'Imported seed accepted.')
+      }
+    } as unknown as ModelAdapter<AiSdkAdapterConfig>
+    const run = await harness([], undefined, {
+      runtimeFactory: () => ({
+        adapter,
+        adapterId: adapter.id,
+        config: {
+          protocol: 'openai-compatible',
+          baseUrl: 'http://127.0.0.1:11434/v1'
+        }
+      })
+    })
+    const provider = run.store.getProvider(
+      run.store.snapshot().settings.defaultProviderId
+    )
+    if (provider.kind === 'cli') {
+      throw new Error('Expected the default API provider')
+    }
+    const imported = await run.store.importTask({
+      title: 'Imported canonical seed',
+      mode: 'agent',
+      provider: {
+        type: 'model-api',
+        kind: provider.kind,
+        name: provider.name,
+        model: provider.model,
+        supportsTools: provider.supportsTools
+      },
+      timeline: [
+        {
+          kind: 'message',
+          role: 'user',
+          content: 'Visible imported timeline projection'
+        }
+      ],
+      conversation: [
+        {
+          kind: 'message',
+          role: 'user',
+          parts: [
+            {
+              kind: 'text',
+              text: 'Canonical imported provider conversation'
+            }
+          ]
+        }
+      ],
+      source: {
+        formatVersion: 1,
+        exportedAt: '2026-07-28T12:00:00.000Z'
+      }
+    })
+    await run.store.mutateTask(imported.id, (task) => {
+      task.includeImportedHistory = true
+      task.workspacePath = run.workspace
+    })
+
+    await run.manager.start(imported.id, 'Fresh request')
+    await run.terminal
+
+    const conversation = JSON.stringify(
+      observedRequests[0]?.conversation
+    )
+    expect(conversation).toContain(
+      'Canonical imported provider conversation'
+    )
+    expect(conversation).not.toContain(
+      'Visible imported timeline projection'
+    )
+    expect(conversation).toContain('Fresh request')
+    expect(
+      run.store.getTask(imported.id).modelSessions?.[provider.id]
+    ).toMatchObject({
+      origin: 'ground',
+      workspacePath: run.workspace,
+      providerFingerprint:
+        providerConfigurationFingerprint(provider),
+      includesImportedHistory: true
+    })
+
+    const replacementWorkspaceCandidate = path.join(
+      run.directory,
+      'replacement-workspace'
+    )
+    await mkdir(replacementWorkspaceCandidate)
+    const replacementWorkspace = await realpath(
+      replacementWorkspaceCandidate
+    )
+    await run.store.mutateTask(imported.id, (task) => {
+      task.workspacePath = replacementWorkspace
+    })
+    await run.manager.start(imported.id, 'Request after workspace change')
+    await vi.waitFor(() => {
+      expect(observedRequests).toHaveLength(2)
+      expect(run.manager.isTaskActive(imported.id)).toBe(false)
+    })
+
+    const replacementConversation = JSON.stringify(
+      observedRequests[1]?.conversation
+    )
+    expect(replacementConversation).not.toContain(
+      'Canonical imported provider conversation'
+    )
+    expect(replacementConversation).toContain(
+      'Visible imported timeline projection'
+    )
   })
 
   it('feeds Ground-owned tool results back through the canonical conversation', async () => {
@@ -2495,5 +2932,34 @@ describe('RunManager model runtime', () => {
         actionSha256: expect.stringMatching(/^[a-f0-9]{64}$/)
       }
     })
+  })
+
+  it('waits for MCP startup before planning the first model request', async () => {
+    let releaseReady: () => void = () => undefined
+    const ready = new Promise<void>((resolve) => {
+      releaseReady = resolve
+    })
+    const listApprovedTools = vi.fn(() => [])
+    const mcp: McpRuntime = {
+      ready: () => ready,
+      listApprovedTools,
+      executeTool: vi.fn(async () => {
+        throw new Error('No MCP execution was expected')
+      })
+    }
+    const run = await harness(
+      [(request) => textResponse(request, 'Ready after MCP startup.')],
+      mcp
+    )
+
+    await run.manager.start(run.taskId, 'Wait for tools')
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(run.requests).toHaveLength(0)
+    expect(listApprovedTools).not.toHaveBeenCalled()
+
+    releaseReady()
+    expect((await run.terminal).type).toBe('run-completed')
+    expect(listApprovedTools).toHaveBeenCalled()
+    expect(run.requests).toHaveLength(1)
   })
 })

@@ -2073,7 +2073,8 @@ export class McpService {
   async executeTool(
     namespacedName: string,
     input: unknown,
-    options: McpExecuteOptions = {}
+    options: McpExecuteOptions = {},
+    assertDispatchAuthorized?: () => void
   ): Promise<McpToolExecutionResult> {
     const evidence = approvedExecutionEvidence(options)
     assertJsonObject(input, 'MCP tool arguments')
@@ -2122,6 +2123,11 @@ export class McpService {
           evidence,
           argumentsSha256
         )
+        // The manager owns the persisted enabled/profile state. Re-check it at
+        // the last synchronous boundary before the client can receive a call;
+        // an approval prepared from a now-disabled, deleted, or replaced
+        // profile must not survive an asynchronous refresh.
+        assertDispatchAuthorized?.()
         return connection.client.callTool({
           name: tool.originalName,
           arguments: safeInput,

@@ -8,16 +8,17 @@ The published set contains:
 
 - `api/ai-sdk-v4-locked.json`: synthetic AI SDK `LanguageModelV4` input events
   normalized by each of Ground's four production API adapter boundaries;
-- `cli/*.json`: synthetic runtime events normalized by the real Codex, Claude, or
-  Gemini CLI parser; and
-- `versions.json`: the exact package-lock and locally observed CLI versions to
-  which the manifests are pinned.
+- `cli/*.json`: synthetic or documented runtime events normalized by the real
+  Codex, Claude, Gemini, or Antigravity CLI parser; and
+- `versions.json`: the exact package-lock and reviewed CLI versions to which the
+  manifests are pinned.
 
 Every manifest declares one of two provenance values:
 
 - `synthetic-contract`: hand-authored input representing the reviewed adapter
   contract; or
-- `documented-example`: an input transcribed from a cited public protocol example.
+- `documented-example`: an input transcribed or structurally adapted from a cited
+  public protocol example, with any adaptation disclosed in `provenanceNote`.
 
 The credential-free published set also requires `liveCapture: false`. Do not
 describe a synthetic or documented fixture as a live capture. A future redacted
@@ -39,3 +40,10 @@ adapter boundary and compares its canonical events.
 Changing an input or expected output is a compatibility decision. Review the
 upstream version, provenance, and semantic difference instead of updating an
 expectation merely to make a failing test pass.
+
+A separate credential-free integration test starts a deterministic loopback SSE
+server and drives a real `POST /v1/chat/completions` through Ground’s production
+OpenAI-compatible AI SDK adapter. It covers the local HTTP wire path, system/user
+messages, tools, streaming, and normalization, but it is not part of this
+version-pinned manifest set and does not certify a real OpenAI, Ollama, LM Studio,
+or other deployment.

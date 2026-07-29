@@ -8,7 +8,7 @@
     "version": "0.144.1",
     "fixtureDate": "2026-07-29",
     "provenance": "synthetic-contract",
-    "provenanceNote": "Hand-authored from Ground's reviewed parser contract for the locally observed help surface; not captured from a live or authenticated Codex run.",
+    "provenanceNote": "Hand-authored from Ground's reviewed parser contract for the locally observed help and tagged 0.144.1 source surfaces; not captured from a live or authenticated Codex run.",
     "liveCapture": false
   },
   "cases": [
@@ -23,6 +23,7 @@
         {
           "type": "item.completed",
           "item": {
+            "id": "message-1",
             "type": "agent_message",
             "text": "Done"
           }
@@ -42,8 +43,19 @@
     },
     {
       "id": "command-and-usage",
-      "description": "Normalize a completed command and cumulative turn usage.",
+      "description": "Normalize command progress, completion, and cumulative turn usage.",
       "inputEvents": [
+        {
+          "type": "item.updated",
+          "item": {
+            "id": "command-1",
+            "type": "command_execution",
+            "command": "npm test",
+            "aggregated_output": "running",
+            "exit_code": null,
+            "status": "in_progress"
+          }
+        },
         {
           "type": "item.completed",
           "item": {
@@ -51,7 +63,8 @@
             "type": "command_execution",
             "command": "npm test",
             "aggregated_output": "passed",
-            "exit_code": 0
+            "exit_code": 0,
+            "status": "completed"
           }
         },
         {
@@ -59,12 +72,21 @@
           "usage": {
             "input_tokens": 120,
             "cached_input_tokens": 90,
-            "output_tokens": 12,
-            "reasoning_output_tokens": 5
+            "output_tokens": 12
           }
         }
       ],
       "expectedCanonicalEvents": [
+        {
+          "type": "activity",
+          "activity": {
+            "runtimeId": "codex:command-1",
+            "activityType": "command",
+            "title": "npm test",
+            "detail": "\"running\"",
+            "status": "running"
+          }
+        },
         {
           "type": "activity",
           "activity": {
@@ -89,8 +111,54 @@
           "usage": {
             "inputTokens": 120,
             "outputTokens": 12,
-            "cachedInputTokens": 90,
-            "reasoningTokens": 5
+            "cachedInputTokens": 90
+          }
+        }
+      ]
+    },
+    {
+      "id": "declined-command-and-nonfatal-error",
+      "description": "Treat declined commands and non-fatal error items as failed diagnostic activities.",
+      "inputEvents": [
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "command-2",
+            "type": "command_execution",
+            "command": "git push",
+            "aggregated_output": "",
+            "exit_code": null,
+            "status": "declined"
+          }
+        },
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "warning-1",
+            "type": "error",
+            "message": "An optional MCP server did not start"
+          }
+        }
+      ],
+      "expectedCanonicalEvents": [
+        {
+          "type": "activity",
+          "activity": {
+            "runtimeId": "codex:command-2",
+            "activityType": "command",
+            "title": "git push",
+            "detail": "\"\"",
+            "status": "error"
+          }
+        },
+        {
+          "type": "activity",
+          "activity": {
+            "runtimeId": "codex:warning-1",
+            "activityType": "error",
+            "title": "Codex reported an error",
+            "detail": "An optional MCP server did not start",
+            "status": "error"
           }
         }
       ]

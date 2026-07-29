@@ -87,18 +87,21 @@ describe('built-in CLI runtime bindings', () => {
       'ground.cli.generic',
       'openai.codex-cli',
       'anthropic.claude-code',
-      'google.gemini-cli'
+      'google.gemini-cli',
+      'google.antigravity-cli'
     ])
     expect(CLI_RUNTIME_ADAPTER_IDS).toEqual({
       generic: 'ground.cli.generic',
       codex: 'openai.codex-cli',
       claude: 'anthropic.claude-code',
-      gemini: 'google.gemini-cli'
+      gemini: 'google.gemini-cli',
+      antigravity: 'google.antigravity-cli'
     })
     expect(CLI_RUNTIME_SESSION_COMPATIBILITY_IDS).toEqual({
       codex: 'codex',
       claude: 'claude',
-      gemini: 'gemini'
+      gemini: 'gemini',
+      antigravity: 'antigravity'
     })
     expect(BUILT_IN_CLI_RUNTIME_BINDINGS.generic).not.toHaveProperty(
       'sessionCompatibilityId'
@@ -108,6 +111,26 @@ describe('built-in CLI runtime bindings', () => {
       Object.values(BUILT_IN_CLI_RUNTIME_BINDINGS).every(Object.isFrozen)
     ).toBe(true)
     expect(Object.isFrozen(adapters)).toBe(true)
+  })
+
+  it('reports Antigravity headless approvals as unsupported', async () => {
+    const adapter = new CliRuntimeAdapter(
+      'antigravity',
+      authorizeFixture
+    )
+    const inspection = await adapter.inspect(
+      adapterContext(provider('antigravity'))
+    )
+
+    expect(inspection.capabilities).toMatchObject({
+      structuredEvents: 'native',
+      sessionResume: 'native',
+      toolActivities: 'native',
+      commandActivities: 'native',
+      usageReporting: 'native',
+      interactiveApprovals: 'unsupported',
+      permissionOwner: 'runtime'
+    })
   })
 })
 

@@ -17,10 +17,17 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
 - Ground-managed file/search/full-write/localized-edit/command tools with inline
   approvals for side effects. Localized edits require an exact source match and are
   unique unless replacement of every match is requested explicitly.
-- Generic CLI execution plus Codex CLI, Claude Code, and Gemini CLI event parsers.
+- Generic CLI execution plus Codex CLI, Claude Code, Gemini CLI, and Antigravity
+  CLI 1.1.8+ event parsers, with a documented dependency-free Generic CLI bridge
+  example.
+- Passive bounded CLI discovery across conventional system and user tool-manager
+  paths plus a main-owned native executable picker. Discovery and selection
+  validate candidates without launching them; save and run keep distinct native
+  confirmations.
 - Optional provider-neutral CLI profile environments whose values stay in one
-  OS-encrypted, fingerprint-matched vault record while provider state exposes only
-  reviewed variable names and an opaque revision.
+  OS-encrypted, fingerprint-matched versioned vault record while provider state
+  exposes only reviewed variable names plus opaque fingerprint and record
+  revisions.
 - Provider-neutral `ModelAdapter` and `AgentRuntimeAdapter` contracts, capability
   descriptors, typed errors, registry, and strict canonical event reducer.
 - Source-trusted static model-adapter registration and an injectable runtime
@@ -29,22 +36,37 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
 - Direct OpenAI Responses, Anthropic Messages, Google Gemini, and
   OpenAI-compatible model adapters integrated with the desktop provider screen and
   managed run loop, with mocked contract tests.
+- Persisted provider readiness: every saved revision becomes unverified, exact
+  saved API/CLI tests record pass or failure, and run startup requires a passing
+  check. OpenAI-compatible tests fall back from an unavailable `/models` listing
+  to one bounded minimal generation probe.
 - Ask-mode list/read/search tools and advanced per-provider context-window,
   response-token, and optional reasoning-effort controls.
 - Per-message/activity provider attribution and normalized cross-provider
   tool-call/tool-result context.
 - Strict version 1 portable task bundles, Markdown transcript export, task import,
-  and native-confirmed task deletion.
+  and native-confirmed task deletion. Provider hints expose and match only public
+  descriptors: API type/kind, name, model, and tool-support flag, or CLI type/kind,
+  name, model, and adapter—not endpoint, provider ID, credentials, or revisions.
 - Safe task forks that rekey portable history and strip runtime/approval authority,
   reversible archive/restore, and bounded search across active or archived tasks.
-- One rotating state backup, automatic fallback from a corrupt or missing primary,
-  unreadable-file quarantine, and an in-app recovery notice.
+- Three rotating validated state snapshots, automatic fallback from a corrupt or
+  missing primary, unreadable-file quarantine, an in-app recovery browser,
+  credential-free native export, and native-confirmed retained-snapshot restore.
+- An explicit fail-closed persisted-state v1-to-v2 migration dispatcher.
 - Multi-session `node-pty` terminals with a session selector, native exact-launch
   confirmation, opaque sender-bound attachments, detach/reattach, restart, and
   termination.
 - Git status/diffs/history, selected-path staging/unstaging, exact-prepared-tree
   commits, and clean managed-worktree create/remove, with native confirmations and
   exact-invocation neutralization of repository clean/smudge/process filters.
+- Recoverable Git working-tree restore for selected unstaged tracked and untracked
+  regular files, including pre-mutation private recovery payloads, staged-content
+  preservation, conservative undo, and visible recovery-required state.
+- Passive workspace-excluding Git executable discovery plus a native picker and
+  default-cancel identity review. The private persisted path/fingerprint is only a
+  hint; Ground requires Git 2.23+ after approval and revalidates the exact
+  process-local binding before every Git launch.
 - Remote Streamable HTTP and local stdio MCP tools with namespaces, schema drift
   review, per-call approval, native local-launch confirmation, executable identity,
   and invocation-bound tool trust.
@@ -55,14 +77,22 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
   install-script approvals, packaged `app.asar` component inventories, verified
   shipped-content SBOM coverage, and deterministic release checksums.
 - Native-runner packaged startup and runtime smokes: a private
-  main/preload/document readiness handshake without browser automation, plus fixed
-  PTY, Git, local stdio MCP, and descendant-cleanup probes on macOS, Windows, and
-  Linux/Xvfb.
+  main/preload/document readiness handshake plus packaged identity, encrypted-vault
+  round trip, fail-closed native approval dialog, PTY, Git, local stdio MCP, and
+  descendant-cleanup probes. Distributable smoke extracts the macOS ZIP, temporarily
+  installs/uninstalls Windows NSIS, or extracts the Linux AppImage, then binds
+  runtime-evidence records to the exact artifact and architecture.
+- Four-target packaging evidence for macOS arm64, macOS x64, Windows x64, and Linux
+  x64, with release-time evidence inventory and SHA-256 verification.
 
 ### Changed
 
 - Recognized CLI runtimes now use mode-specific permission arguments, normalize
   activity and usage, capture native session IDs, and resume compatible sessions.
+- Enabled MCP startup now runs remote connections concurrently, serializes local
+  native launch dialogs, and completes before the first managed API model request
+  constructs its MCP tool set. Queued startup, tool listing, and final dispatch
+  now revalidate the exact current enabled persisted profile.
 - Interrupted runs and pending approvals recover into explicit interrupted/error
   timeline state.
 - Model-visible tool paths are workspace-relative and sensitive paths are filtered.
@@ -82,8 +112,16 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
 - The renderer now has a top-level recovery boundary, stronger keyboard/focus
   behavior, responsive provider/MCP/task controls, accessible approval state, and
   reduced-motion/terminal accommodations.
-- A dated credential-free CLI help-surface observation records the locally
-  inspected Codex, Claude Code, and Gemini CLI versions without claiming live
+- Add a keyboard command palette, task-local process-memory composer drafts,
+  near-bottom-only timeline following, and bounded batched screen-reader
+  announcements for streamed assistant text.
+- Add a six-scenario Playwright-over-Electron renderer interaction suite for
+  command-palette keyboard/focus behavior, accessible provider-form validation,
+  task-local drafts, deterministic send cancellation, archive/search, responsive
+  settings, and reduced-motion CSS. It uses the explicit browser-preview desktop
+  mock and is not production-main/native/provider certification.
+- A dated credential-free CLI help/source-surface observation records the reviewed
+  Codex, Claude Code, Gemini, and Antigravity versions without claiming live
   provider certification.
 
 ### Security
@@ -107,8 +145,40 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
 - Strictly validate and bound the encrypted credential map, refuse insecure Linux
   `basic_text` storage, reject vault symlinks, quarantine unreadable vaults, and
   serialize candidate mutations through private exclusive durable replacement.
+  Bound each plaintext to 768 KiB, decoded ciphertext to 1 MiB
+  (1,398,104 canonical-base64 characters), the steady vault to
+  1,000 entries / 8 MiB, and the transitional vault to 2,000 entries / 16 MiB.
+- Reconcile provider credential expectations after vault loading, preserve valid
+  ciphertext during a temporary keychain outage, and surface recurring recovery
+  guidance for missing or unreadable API/CLI secrets.
 - Store API keys under opaque provider/protocol/endpoint-bound references so a
   failed profile transition cannot redirect a replacement key to the old endpoint.
+- Add a bounded, main-only, state-coupled secret cleanup journal. Queue each unique
+  replacement reference before staging it, then atomically publish the provider
+  pointer while replacing that provisional intent with exact obsolete references;
+  batched deletion happens before journal acknowledgement.
+- Drain only journaled non-live references at startup—never an enumerated complement
+  of provider state or an inference from decryption failure. Retire queued live
+  references without deletion, preserve unknown unjournaled ciphertext, defer
+  cleanup after backup/reset recovery, and retain failed vault deletion for a later
+  start.
+- Treat state or vault persistence publication as ambiguous when its atomic rename
+  may have preceded a reported failure. Abort startup reconciliation before
+  exposing writable services. At runtime, seal the state store and application
+  mutation boundary before run, MCP, provider, or renderer error handling can issue
+  a compensating write, then relaunch rather than attempting an inverse cross-file
+  mutation; the selected state generation and cleanup journal resolve the
+  transition on restart.
+- Restrict provider-ID credential fallback to pre-versioned profiles, refuse blank
+  same-boundary saves when the exact saved key is unreadable, journal explicit
+  deletion cleanup failures, and reserve a complete second bounded vault generation
+  for concurrent staged replacements at the maximum provider count.
+- Reserve run startup against the exact task revision, provider revision and
+  fingerprint, and credential boundary before CLI authorization or workspace
+  access; provider save/delete/verification mutations cannot cross that boundary.
+- Bind Test publication plus API/CLI continuation to a complete provider
+  configuration fingerprint so timestamp reuse cannot validate or resume a changed
+  credential/environment.
 - Replace renderer-supplied CLI trust with native authorization tied to resolved
   executable metadata and exact configuration.
 - Require a second native authorization for each fully expanded CLI invocation,
@@ -125,10 +195,15 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
 - Restrict CLI inheritance to adapter-specific authentication/configuration plus
   reviewed proxy and CA variables, and redact inherited values across split text,
   diagnostics, and activity output.
-- Bind optional CLI environment names and their non-secret revision into native
-  configuration/invocation grants; deny process-loader and root/config/temp
-  controls, redact every custom value, bound post-redaction output, roll back
-  failed profile mutations, and fail closed on vault/profile mismatch.
+- Bind optional CLI environment names and their non-secret environment fingerprint
+  into native configuration/invocation grants; use a separate record revision only
+  to select the exact encrypted record. Deny process-loader and root/config/temp
+  controls, redact every custom value, bound post-redaction output, journal profile
+  transitions, and fail closed on vault/profile mismatch.
+- Store each CLI-environment replacement under a unique exact revision, never
+  fall back from a versioned profile to its legacy slot, permit full re-entry or
+  clear without decrypting unreadable old ciphertext, and journal exact plus legacy
+  deletion only in the same durable state mutation that publishes the profile.
 - Reject plaintext non-loopback provider endpoints, authenticated redirects,
   oversized responses, excessive stream events, and oversized or deeply nested
   provider-owned state.
@@ -154,11 +229,31 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
   attachment capability for subsequent terminal input, resize, detach, or close.
 - Neutralize repository-configured executable Git content filters for Ground’s
   working-tree inspection, staging, and managed-worktree paths.
-- Bound persisted state to 128 MiB, reject symlink/non-regular state files, rotate
-  only schema-valid backups, and use private unpredictable fsynced temporary files
-  for atomic replacement.
+- Bound each persisted state generation to 128 MiB, reject symlink/non-regular
+  state files, rotate only schema-valid generations, bind renderer selections to
+  opaque content identities, and use private unpredictable fsynced temporary files
+  for atomic replacement and export.
 - Serialize state mutations with their normalized durable snapshot, publish only
   successful candidates, and distinguish structural corruption from transient I/O.
 - Bind Git commits to the confirmed index tree and expected parent, disable hooks
-  and signing, and limit worktree removal to clean registered descendants of
-  Ground’s managed root.
+  and signing, bind symbolic checkouts to the exact approved local ref, refuse
+  detached-HEAD commits, use a non-dereferencing conditional ref update, and limit
+  worktree removal to clean registered descendants of Ground’s managed root.
+- Block recoverable Git restore/undo while a Ground run or Ground-managed terminal
+  is active in the same workspace.
+- Seal the application-wide renderer operation boundary during approved state
+  restore, make restore prompts single-flight and content-specific, drain
+  already-entered operations, abort MCP startup, wait through its bounded shutdown
+  drain, revalidate the opaque generation, and keep changes disabled through
+  relaunch or a late publication failure.
+- Require Git 2.23 or newer for the recoverable `git restore` surface.
+
+### Verification boundary
+
+- Compatibility and application suites use deterministic local fixtures, mocked
+  transports/processes, a credential-free loopback SSE integration through the
+  production OpenAI-compatible adapter, and fixed runtime/native package probes.
+- No CI check makes a paid live-provider request or certifies an authenticated
+  Codex, Claude, Gemini, Antigravity, or Generic CLI agent turn.
+- Unsigned preview packages and runtime-evidence records are not signing,
+  notarization, accessibility, provider, or distribution certification.
