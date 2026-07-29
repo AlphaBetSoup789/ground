@@ -90,6 +90,10 @@ export interface CliEnvironmentPlan {
   mutation: 'none' | 'set' | 'delete'
 }
 
+export interface CliEnvironmentSecretResolver {
+  resolve(ref: string): Promise<string>
+}
+
 function assertFingerprint(fingerprint: string): string {
   if (!CLI_ENVIRONMENT_FINGERPRINT_PATTERN.test(fingerprint)) {
     throw new Error('CLI environment fingerprint is invalid')
@@ -369,6 +373,16 @@ export function resolveCliEnvironment(
   vault: SecretVault,
   provider: CliProvider
 ): Readonly<Record<string, string>> {
+  return resolveCliEnvironmentSecret(
+    provider,
+    vault.get(cliEnvironmentSecretReference(provider.id))
+  )
+}
+
+export function resolveCliEnvironmentSecret(
+  provider: CliProvider,
+  serializedSecret: string | undefined
+): Readonly<Record<string, string>> {
   const variables = normalizeCliEnvironmentVariableNames(
     provider.environmentVariables ?? []
   )
@@ -378,12 +392,25 @@ export function resolveCliEnvironment(
     }
     return Object.freeze(Object.create(null) as Record<string, string>)
   }
-  const serialized = vault.get(cliEnvironmentSecretReference(provider.id))
-  const envelope = existingEnvironment(provider, serialized)
+  const envelope = existingEnvironment(provider, serializedSecret)
   if (!envelope) {
     throw new Error('Saved CLI environment credentials are unavailable')
   }
   const values = Object.create(null) as Record<string, string>
   for (const name of variables) values[name] = envelope.values[name] as string
   return Object.freeze(values)
+}
+
+export async function resolveCliEnvironmentWithSecretResolver(
+  resolver: CliEnvironmentSecretResolver,
+  provider: CliProvider
+): Promise<Readonly<Record<string, string>>> {
+  const variables = normalizeCliEnvironmentVariableNames(
+    provider.environmentVariables ?? []
+  )
+  if (!variables.length) return resolveCliEnvironmentSecret(provider, undefined)
+  const serializedSecret = await resolver.resolve(
+    cliEnvironmentSecretReference(provider.id)
+  )
+  return resolveCliEnvironmentSecret(provider, serializedSecret)
 }

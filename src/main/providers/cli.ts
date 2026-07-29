@@ -6,6 +6,9 @@ import { StringDecoder } from 'node:string_decoder'
 import type { CliAdapter, CliProvider, RunMode } from '../../shared/types'
 import { normalizeCliEnvironmentVariableNames } from '../cli-environment'
 import {
+  validateCliRuntimeAdapterBinding
+} from '../cli-runtime-bindings'
+import {
   executableCandidates,
   executableSearchPath,
   processLaunchArguments,
@@ -27,7 +30,7 @@ const MAX_CLI_ACTIVITY_TITLE_CHARACTERS = 500
 const MAX_CLI_ACTIVITY_DETAIL_CHARACTERS = 4_000
 const MAX_CLI_UNPARSED_DIAGNOSTIC_CHARACTERS = 500
 const TERMINATION_GRACE_MS = 3_000
-const CLI_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/
+const CLI_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/
 
 export interface CliUsage {
   inputTokens?: number
@@ -65,6 +68,14 @@ export interface CliInvocationOptions {
   sessionId?: string
 }
 
+export interface CliRunOptions extends CliInvocationOptions {
+  /**
+   * The exact source-registered runtime adapter delegating to this launcher.
+   * It is mandatory so a custom adapter cannot inherit a built-in trust grant.
+   */
+  runtimeAdapterId: string
+}
+
 export type CliPromptSummary =
   | { transport: 'stdin' }
   | { transport: 'argument'; byteLength: number; sha256: string }
@@ -77,6 +88,7 @@ export interface CliInvocationAuthorizationRequest {
   prompt: CliPromptSummary
   promptMode: 'stdin' | 'argument'
   outputMode: 'plain' | 'ndjson'
+  runtimeAdapterId: string
   cliAdapter: CliAdapter
   environmentVariables: readonly string[]
   environmentFingerprint?: string
@@ -103,7 +115,7 @@ function clean(value: string): string {
 export function assertValidCliSessionId(sessionId: string): void {
   if (!CLI_SESSION_ID_PATTERN.test(sessionId)) {
     throw new Error(
-      'CLI session identifier must be 1-256 ASCII letters, numbers, dots, underscores, colons, or hyphens'
+      'CLI session identifier must be 1-200 ASCII letters, numbers, dots, underscores, colons, or hyphens'
     )
   }
 }
@@ -761,15 +773,15 @@ function cliRedactionMarker(patterns: readonly string[]): string {
   for (const pattern of patterns) {
     for (const character of pattern) usedCharacters.add(character)
   }
-  if (!usedCharacters.has('█')) return '█'.repeat(5)
+  if (!usedCharacters.has('█')) return '█'.repeat(4)
   for (let codePoint = 0xe000; codePoint <= 0xf8ff; codePoint += 1) {
     const candidate = String.fromCharCode(codePoint)
-    if (!usedCharacters.has(candidate)) return candidate.repeat(5)
+    if (!usedCharacters.has(candidate)) return candidate.repeat(4)
   }
   // Environment values cannot contain NUL. It is an invisible last-resort
   // separator that still prevents two redaction boundaries from recreating a
   // configured value if every BMP private-use character was supplied.
-  return '\0'.repeat(5)
+  return '\0'.repeat(4)
 }
 
 function cliSecretRedactionPlan(
@@ -931,14 +943,26 @@ export async function runCli(
   workspacePath: string,
   signal: AbortSignal,
   callbacks: CliCallbacks,
-  options: CliInvocationOptions = {},
+  options: CliRunOptions,
   authorizeInvocation?: CliInvocationAuthorizer,
   customEnvironment: Readonly<Record<string, string>> = {}
 ): Promise<CliRunResult> {
   signal.throwIfAborted()
+  if (
+    !options ||
+    typeof options.runtimeAdapterId !== 'string' ||
+    !options.runtimeAdapterId.trim()
+  ) {
+    throw new Error('A source-registered CLI runtime adapter identity is required')
+  }
   if (!authorizeInvocation) {
     throw new Error('A main-process CLI invocation authorizer is required')
   }
+  const cliAdapter = provider.cliAdapter ?? 'generic'
+  const runtimeAdapterId = validateCliRuntimeAdapterBinding(
+    options.runtimeAdapterId,
+    cliAdapter
+  )
   if (options.sessionId) assertValidCliSessionId(options.sessionId)
   const environmentVariables = normalizeCliEnvironmentVariableNames(
     provider.environmentVariables ?? []
@@ -1016,7 +1040,8 @@ export async function runCli(
     prompt: promptDetails.summary,
     promptMode: provider.promptMode,
     outputMode: provider.outputMode,
-    cliAdapter: provider.cliAdapter ?? 'generic',
+    runtimeAdapterId,
+    cliAdapter,
     environmentVariables,
     ...(provider.environmentFingerprint
       ? { environmentFingerprint: provider.environmentFingerprint }

@@ -8,9 +8,8 @@ Summarize the implementation and important alternatives.
 
 ## Verification
 
-- [ ] `npm run typecheck`
-- [ ] `npm test`
-- [ ] `npm run build`
+- [ ] `npm run verify`
+- [ ] `npm audit --audit-level=high`
 
 Add focused test names, manual checks, screenshots, or fixture versions:
 

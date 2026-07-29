@@ -4,11 +4,16 @@ import { isIP } from 'node:net'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type {
+  CliAdapter,
   CliProvider,
   ProviderDraft,
   WorkspaceGrant
 } from '../shared/types'
 import { normalizeCliEnvironmentVariableNames } from './cli-environment'
+import {
+  CLI_RUNTIME_ADAPTER_IDS,
+  validateCliRuntimeAdapterBinding
+} from './cli-runtime-bindings'
 import { createId } from './lib/ids'
 import {
   createProcessLaunchEnvelope,
@@ -35,7 +40,8 @@ export interface CliTrustRequest {
   args: readonly string[]
   promptMode: 'stdin' | 'argument'
   outputMode: 'plain' | 'ndjson'
-  cliAdapter: 'generic' | 'codex' | 'claude' | 'gemini'
+  runtimeAdapterId: string
+  cliAdapter: CliAdapter
   environmentVariables: readonly string[]
   environmentFingerprint?: string
   cwd?: string
@@ -374,7 +380,8 @@ function cliConfigurationFingerprint(
   args: readonly string[],
   promptMode: 'stdin' | 'argument',
   outputMode: 'plain' | 'ndjson',
-  cliAdapter: 'generic' | 'codex' | 'claude' | 'gemini',
+  runtimeAdapterId: string,
+  cliAdapter: CliAdapter,
   environmentVariables: readonly string[],
   environmentFingerprint: string | undefined
 ): string {
@@ -386,6 +393,7 @@ function cliConfigurationFingerprint(
         args,
         promptMode,
         outputMode,
+        runtimeAdapterId,
         cliAdapter,
         environmentVariables,
         environmentFingerprint
@@ -413,12 +421,20 @@ function cliAuthorizedInvocationFingerprint(
         cwdInode: cwdDetails.ino,
         promptMode: input.promptMode,
         outputMode: input.outputMode,
+        runtimeAdapterId: input.runtimeAdapterId,
         cliAdapter: input.cliAdapter,
         environmentVariables,
         environmentFingerprint
       })
     )
     .digest('hex')
+}
+
+function canonicalCliRuntimeAdapterId(cliAdapter: CliAdapter): string {
+  if (!Object.prototype.hasOwnProperty.call(CLI_RUNTIME_ADAPTER_IDS, cliAdapter)) {
+    throw new Error('CLI dialect is invalid')
+  }
+  return CLI_RUNTIME_ADAPTER_IDS[cliAdapter]
 }
 
 export class CliTrustRegistry {
@@ -452,6 +468,7 @@ export class CliTrustRegistry {
     const promptMode = input.promptMode ?? 'stdin'
     const outputMode = input.outputMode ?? 'plain'
     const cliAdapter = input.cliAdapter ?? 'generic'
+    const runtimeAdapterId = canonicalCliRuntimeAdapterId(cliAdapter)
     const {
       variables: environmentVariables,
       fingerprint: environmentFingerprint
@@ -464,6 +481,7 @@ export class CliTrustRegistry {
       args,
       promptMode,
       outputMode,
+      runtimeAdapterId,
       cliAdapter,
       environmentVariables,
       environmentFingerprint
@@ -474,6 +492,7 @@ export class CliTrustRegistry {
       args,
       promptMode,
       outputMode,
+      runtimeAdapterId,
       cliAdapter,
       environmentVariables,
       ...(environmentFingerprint ? { environmentFingerprint } : {}),
@@ -499,6 +518,10 @@ export class CliTrustRegistry {
     ) {
       throw new Error('CLI display arguments are invalid')
     }
+    const runtimeAdapterId = validateCliRuntimeAdapterBinding(
+      input.runtimeAdapterId,
+      input.cliAdapter
+    )
     const {
       variables: environmentVariables,
       fingerprint: environmentFingerprint
@@ -528,6 +551,7 @@ export class CliTrustRegistry {
       args: Object.freeze([...input.displayArgs]),
       promptMode: input.promptMode,
       outputMode: input.outputMode,
+      runtimeAdapterId,
       cliAdapter: input.cliAdapter,
       environmentVariables,
       ...(environmentFingerprint ? { environmentFingerprint } : {}),

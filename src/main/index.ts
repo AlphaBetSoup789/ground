@@ -24,7 +24,14 @@ import { McpManager } from './mcp-manager'
 import type { McpStdioLaunchTrustRequest } from './mcp-service'
 import { ProviderService } from './provider-service'
 import { ProviderOperationGate } from './provider-operation-gate'
-import { RunManager } from './run-manager'
+import {
+  createBuiltinAdapterRegistry,
+  createRegisteredAgentRuntimeFactory,
+  createRegisteredModelRuntimeFactory,
+  resolveBuiltinAgentRuntimeBinding,
+  resolveBuiltinModelAdapterBinding,
+  RunManager
+} from './run-manager'
 import { SecretVault } from './secrets'
 import { StateStore } from './store'
 import {
@@ -76,6 +83,7 @@ import {
   resolveRendererTarget,
   WorkspaceGrantRegistry
 } from './trust-boundary'
+import { resolveWindowChromeOptions } from './window-chrome'
 import { WorkspaceLifecycleGate } from './workspace-lifecycle-gate'
 
 let mainWindow: BrowserWindow | undefined
@@ -271,7 +279,8 @@ async function confirmCliTrust(request: CliTrustRequest): Promise<boolean> {
       argumentsText,
       '',
       ...(request.cwd ? ['Working directory:', JSON.stringify(request.cwd), ''] : []),
-      `Runtime adapter: ${request.cliAdapter}`,
+      `Runtime adapter ID: ${request.runtimeAdapterId}`,
+      `CLI dialect: ${request.cliAdapter}`,
       `Prompt transport: ${request.promptMode}`,
       `Output parser: ${request.outputMode}`,
       `Environment keys: ${
@@ -367,8 +376,7 @@ async function createWindow(): Promise<void> {
     show: false,
     backgroundColor: '#171713',
     title: 'Ground',
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 18, y: 18 },
+    ...resolveWindowChromeOptions(process.platform),
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       ...(packagedSmokeConfig
@@ -1566,6 +1574,20 @@ if (!ownsInstance) {
     const workspaceGrants = new WorkspaceGrantRegistry()
     await workspaceGrants.restore(store.snapshot().tasks.map((task) => task.workspacePath))
     const cliTrust = new CliTrustRegistry(confirmCliTrust)
+    const authorizeCliInvocation = (
+      request: Parameters<CliTrustRegistry['authorizeInvocation']>[0]
+    ) => cliTrust.authorizeInvocation(request)
+    const adapterRegistry = createBuiltinAdapterRegistry(
+      authorizeCliInvocation
+    )
+    const modelRuntimeFactory = createRegisteredModelRuntimeFactory(
+      adapterRegistry,
+      resolveBuiltinModelAdapterBinding
+    )
+    const agentRuntimeFactory = createRegisteredAgentRuntimeFactory(
+      adapterRegistry,
+      resolveBuiltinAgentRuntimeBinding
+    )
     mcpManager = new McpManager(store, undefined, {
       confirmStdioLaunch: confirmMcpStdioLaunch
     })
@@ -1574,11 +1596,12 @@ if (!ownsInstance) {
       store,
       vault,
       emitRunEvent,
-      undefined,
+      modelRuntimeFactory,
       mcpManager,
-      (request) => cliTrust.authorizeInvocation(request),
+      authorizeCliInvocation,
       providerOperations,
-      (candidate) => workspaceGrants.requireStoredPath(candidate)
+      (candidate) => workspaceGrants.requireStoredPath(candidate),
+      agentRuntimeFactory
     )
     runManager = runs
     const providers = new ProviderService(

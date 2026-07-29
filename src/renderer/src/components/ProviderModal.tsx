@@ -293,6 +293,12 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
                     ? 'selected'
                     : ''
                 }`}
+                aria-current={
+                  settingsSection === 'providers' &&
+                  selectedId === provider.id
+                    ? 'page'
+                    : undefined
+                }
                 onClick={() => selectProvider(provider)}
               >
                 <span className={`provider-nav-icon ${provider.kind === 'cli' ? 'cli' : ''}`}>
@@ -323,6 +329,7 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
               className={`provider-nav-row ${
                 settingsSection === 'mcp' ? 'selected' : ''
               }`}
+              aria-current={settingsSection === 'mcp' ? 'page' : undefined}
               onClick={() => setSettingsSection('mcp')}
             >
               <span className="provider-nav-icon mcp">

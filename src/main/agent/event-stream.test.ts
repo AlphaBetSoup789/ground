@@ -462,17 +462,190 @@ describe('model stream protocol safeguards', () => {
     ).toThrow(/1 MB size limit/i)
   })
 
+  it('strips unknown fields and detaches every retained model-event object', () => {
+    const reducer = new ModelEventReducer()
+    const toolArguments: Record<string, unknown> = { path: 'README.md' }
+    const partStateData: Record<string, unknown> = {
+      opaqueItemId: 'item-1'
+    }
+    const terminalStateData: Record<string, unknown> = {
+      continuation: 'checkpoint-1'
+    }
+    const checkpoint: Record<string, unknown> = {
+      responseId: 'response-1'
+    }
+
+    reducer.push({
+      type: 'response.started',
+      responseId: 'response-1',
+      ignored: 'strip-start'
+    })
+    reducer.push({
+      type: 'part.started',
+      part: {
+        kind: 'tool-call',
+        partId: 'tool-1',
+        callId: 'call-1',
+        name: 'read_file',
+        ignored: 'strip-header'
+      }
+    })
+    const validatedPart = reducer.push({
+      type: 'part.completed',
+      partId: 'tool-1',
+      ignored: 'strip-event',
+      part: {
+        kind: 'tool-call',
+        callId: 'call-1',
+        name: 'read_file',
+        rawArguments: '{"path":"README.md"}',
+        arguments: toolArguments,
+        providerState: {
+          adapterId: 'fixture.model',
+          schemaVersion: 1,
+          data: partStateData,
+          ignored: 'strip-provider-state'
+        },
+        ignored: 'strip-part'
+      }
+    })
+    const validatedTerminal = reducer.push({
+      type: 'response.completed',
+      messageId: 'message-1',
+      stopReason: 'tool-calls',
+      providerState: {
+        adapterId: 'fixture.model',
+        schemaVersion: 1,
+        data: terminalStateData,
+        ignored: 'strip-terminal-state'
+      },
+      checkpoint,
+      ignored: 'strip-terminal'
+    })
+
+    toolArguments.path = 'mutated-before-finish'
+    partStateData.opaqueItemId = 'mutated-before-finish'
+    terminalStateData.continuation = 'mutated-before-finish'
+    checkpoint.responseId = 'mutated-before-finish'
+    if (
+      validatedPart.type !== 'part.completed' ||
+      validatedPart.part.kind !== 'tool-call' ||
+      !validatedPart.part.arguments
+    ) {
+      throw new Error('Expected a validated tool call')
+    }
+    validatedPart.part.arguments.path = 'mutated-validated-event'
+    if (
+      validatedTerminal.type !== 'response.completed' ||
+      !validatedTerminal.providerState ||
+      typeof validatedTerminal.providerState.data !== 'object' ||
+      validatedTerminal.providerState.data === null ||
+      Array.isArray(validatedTerminal.providerState.data)
+    ) {
+      throw new Error('Expected validated terminal provider state')
+    }
+    validatedTerminal.providerState.data.continuation =
+      'mutated-validated-event'
+
+    const first = reducer.finish()
+    expect(first.output.parts).toEqual([
+      {
+        kind: 'tool-call',
+        callId: 'call-1',
+        name: 'read_file',
+        rawArguments: '{"path":"README.md"}',
+        arguments: { path: 'README.md' },
+        providerState: {
+          adapterId: 'fixture.model',
+          schemaVersion: 1,
+          data: { opaqueItemId: 'item-1' }
+        }
+      }
+    ])
+    expect(first.output.providerState).toEqual({
+      adapterId: 'fixture.model',
+      schemaVersion: 1,
+      data: { continuation: 'checkpoint-1' }
+    })
+    expect(first.checkpoint).toEqual({ responseId: 'response-1' })
+
+    const firstPart = first.output.parts[0]
+    if (firstPart?.kind !== 'tool-call' || !firstPart.arguments) {
+      throw new Error('Expected normalized tool-call arguments')
+    }
+    firstPart.arguments.path = 'mutated-return-value'
+    const firstPartState = firstPart.providerState?.data
+    if (
+      firstPartState &&
+      typeof firstPartState === 'object' &&
+      !Array.isArray(firstPartState)
+    ) {
+      firstPartState.opaqueItemId = 'mutated-return-value'
+    }
+    const firstCheckpoint = first.checkpoint
+    if (
+      firstCheckpoint &&
+      typeof firstCheckpoint === 'object' &&
+      !Array.isArray(firstCheckpoint)
+    ) {
+      firstCheckpoint.responseId = 'mutated-return-value'
+    }
+
+    const second = reducer.finish()
+    expect(second.output.parts[0]).toMatchObject({
+      arguments: { path: 'README.md' },
+      providerState: {
+        data: { opaqueItemId: 'item-1' }
+      }
+    })
+    expect(second.checkpoint).toEqual({ responseId: 'response-1' })
+  })
+
   it('reports cancellation distinctly', async () => {
     const controller = new AbortController()
     controller.abort()
+    let iteratorConstructions = 0
+    const stream: Iterable<ModelEvent> = {
+      [Symbol.iterator]() {
+        iteratorConstructions += 1
+        return [][Symbol.iterator]()
+      }
+    }
 
     await expect(
-      consumeModelEventStream([], { signal: controller.signal })
+      consumeModelEventStream(stream, { signal: controller.signal })
     ).rejects.toMatchObject({
       category: 'cancelled',
       retryable: false,
       partialOutput: false
     })
+    expect(iteratorConstructions).toBe(0)
+  })
+
+  it('cancels a blocked adapter iterator without waiting for next()', async () => {
+    const controller = new AbortController()
+    let returnCalls = 0
+    const stream: AsyncIterable<ModelEvent> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: () => new Promise<IteratorResult<ModelEvent>>(() => undefined),
+          return: async () => {
+            returnCalls += 1
+            return { done: true, value: undefined }
+          }
+        }
+      }
+    }
+    const consuming = consumeModelEventStream(stream, {
+      signal: controller.signal
+    })
+    controller.abort()
+
+    await expect(consuming).rejects.toMatchObject({
+      category: 'cancelled',
+      retryable: false
+    })
+    expect(returnCalls).toBe(1)
   })
 
   it('marks transport errors after emitted output as partial', async () => {

@@ -61,6 +61,9 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Verify adapter SDK package
+        run: npm run adapter-sdk:pack-check
+
       - name: Check production license inventory
         run: npm run licenses:check
 

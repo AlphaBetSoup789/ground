@@ -281,9 +281,21 @@ describe('CLI invocation grants', () => {
     await expect(grants.authorize(base)).resolves.toBe(await realpath(process.execPath))
     await grants.authorize(base)
     expect(confirm).toHaveBeenCalledTimes(1)
+    expect(confirm.mock.calls[0]?.[0]).toMatchObject({
+      phase: 'configuration',
+      runtimeAdapterId: 'ground.cli.generic',
+      cliAdapter: 'generic'
+    })
 
     await grants.authorize({ ...base, args: ['--help'] })
     expect(confirm).toHaveBeenCalledTimes(2)
+
+    await grants.authorize({ ...base, cliAdapter: 'codex' })
+    expect(confirm).toHaveBeenCalledTimes(3)
+    expect(confirm.mock.calls[2]?.[0]).toMatchObject({
+      runtimeAdapterId: 'openai.codex-cli',
+      cliAdapter: 'codex'
+    })
   })
 
   it('does not accept a renderer assertion when native confirmation is denied', async () => {
@@ -321,6 +333,7 @@ describe('CLI invocation grants', () => {
       prompt: { transport: 'stdin' as const },
       promptMode: 'stdin' as const,
       outputMode: 'plain' as const,
+      runtimeAdapterId: 'ground.cli.generic',
       cliAdapter: 'generic' as const,
       environmentVariables: []
     }
@@ -334,6 +347,10 @@ describe('CLI invocation grants', () => {
       'configuration',
       'invocation'
     ])
+    expect(confirm.mock.calls[1]?.[0]).toMatchObject({
+      runtimeAdapterId: 'ground.cli.generic',
+      cliAdapter: 'generic'
+    })
 
     await grants.authorizeInvocation({
       ...invocation,
@@ -371,6 +388,7 @@ describe('CLI invocation grants', () => {
       prompt: { transport: 'stdin' as const },
       promptMode: 'stdin' as const,
       outputMode: 'plain' as const,
+      runtimeAdapterId: 'ground.cli.generic',
       cliAdapter: 'generic' as const,
       environmentVariables: ['ACME_AGENT_TOKEN'],
       environmentFingerprint: 'a'.repeat(64)
@@ -409,6 +427,7 @@ describe('CLI invocation grants', () => {
       },
       promptMode: 'argument',
       outputMode: 'plain',
+      runtimeAdapterId: 'ground.cli.generic',
       cliAdapter: 'generic',
       environmentVariables: []
     })
@@ -417,5 +436,70 @@ describe('CLI invocation grants', () => {
     expect(request?.phase).toBe('invocation')
     expect(request?.args).toEqual(['--prompt', '<prompt omitted>'])
     expect(JSON.stringify(request)).not.toContain(secretPrompt)
+  })
+
+  it.each([
+    {
+      runtimeAdapterId: 'openai.codex-cli',
+      cliAdapter: 'generic' as const
+    },
+    {
+      runtimeAdapterId: 'ground.cli.generic',
+      cliAdapter: 'codex' as const
+    }
+  ])(
+    'rejects a mismatched $runtimeAdapterId and $cliAdapter trust identity',
+    async ({ runtimeAdapterId, cliAdapter }) => {
+      const confirm = vi.fn(async (_request: CliTrustRequest) => true)
+      const grants = new CliTrustRegistry(confirm)
+
+      await expect(
+        grants.authorizeInvocation({
+          command: process.execPath,
+          displayArgs: ['--version'],
+          invocationSha256: 'e'.repeat(64),
+          cwd: process.cwd(),
+          prompt: { transport: 'stdin' },
+          promptMode: 'stdin',
+          outputMode: 'plain',
+          runtimeAdapterId,
+          cliAdapter,
+          environmentVariables: []
+        })
+      ).rejects.toThrow(/runtime adapter does not match/i)
+      expect(confirm).not.toHaveBeenCalled()
+    }
+  )
+
+  it('binds invocation grants to a distinct source-registered runtime id', async () => {
+    const confirm = vi.fn(async (_request: CliTrustRequest) => true)
+    const grants = new CliTrustRegistry(confirm)
+    const invocation = {
+      command: process.execPath,
+      displayArgs: ['--version'],
+      invocationSha256: 'f'.repeat(64),
+      cwd: process.cwd(),
+      prompt: { transport: 'stdin' as const },
+      promptMode: 'stdin' as const,
+      outputMode: 'plain' as const,
+      runtimeAdapterId: 'community.runtime-alpha',
+      cliAdapter: 'generic' as const,
+      environmentVariables: []
+    }
+
+    await grants.authorizeInvocation(invocation)
+    await grants.authorizeInvocation(invocation)
+    await grants.authorizeInvocation({
+      ...invocation,
+      runtimeAdapterId: 'community.runtime-beta'
+    })
+
+    expect(confirm).toHaveBeenCalledTimes(2)
+    expect(
+      confirm.mock.calls.map(([request]) => request.runtimeAdapterId)
+    ).toEqual(['community.runtime-alpha', 'community.runtime-beta'])
+    expect(
+      confirm.mock.calls.map(([request]) => request.cliAdapter)
+    ).toEqual(['generic', 'generic'])
   })
 })

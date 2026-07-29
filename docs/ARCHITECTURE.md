@@ -109,33 +109,32 @@ that Ground could approve or prevent the command.
 
 ## Provider-neutral core
 
-The experimental core under `src/main/agent/` defines:
+The versioned, framework-independent core under `src/main/agent/` defines:
 
 - distinct model and agent-runtime contracts;
 - explicit capability descriptors;
 - JSON-safe canonical conversation items;
 - versioned provider-owned opaque state;
 - typed provider error categories;
-- an adapter registry; and
-- a strict model-event reducer that accepts interleaved output parts and exactly one
-  terminal response.
+- one adapter registry spanning model and agent-runtime IDs;
+- strict model- and runtime-event reducers; and
+- deterministic adapter conformance helpers.
 
 The core has no Electron or React dependency. Protocol implementations may use
 provider libraries internally, but their public boundary is Ground’s canonical
-contract.
+contract. The same canonical source builds the provisional publishable package in
+`packages/adapter-sdk/`; Ground does not maintain a second SDK implementation.
 
-Production model composition constructs a deterministic source-trusted registry,
-maps each provider profile to one adapter ID and secret-reference-only
-configuration, validates that configuration, and injects the resulting factory
-into `RunManager`. No provider code is discovered or loaded dynamically. A
-downstream build can register another reviewed model adapter without changing the
-event reducer or managed context/tool/MCP loop. A new first-class profile kind or
-provider-specific UI still requires changes at the shared schema and desktop
-composition boundaries.
-
-The `AgentRuntimeAdapter` registry remains a forward contract. The current desktop
-CLI path uses the bounded launcher and recognized/generic parsers directly, so a
-new structured CLI dialect still requires a source change.
+Production composition constructs one deterministic source-trusted registry,
+registers all built-in model and runtime adapters in a global ID namespace, maps
+each provider profile to a registered ID and data-only configuration, validates
+that configuration, and injects separate model/runtime factories into
+`RunManager`. No provider code is discovered or loaded dynamically. A downstream
+build can register another reviewed adapter without changing the canonical event
+reducers or managed context/tool/MCP loop. The built-in runtime adapters delegate
+to the same bounded, shell-free launcher and recognized/generic parsers used by the
+desktop security boundary. A new first-class profile kind, provider-specific UI,
+or built-in CLI dialect still requires a reviewed source change and rebuild.
 
 ## Data ownership
 
@@ -158,9 +157,16 @@ new structured CLI dialect still requires a source change.
 | Portable task bundle / Markdown transcript | User | User-selected file outside Ground’s state store |
 | Unreadable state quarantine | User / Ground recovery | Application-data directory until manually removed |
 
-A CLI session is resumed only when its adapter, provider revision, workspace, and
-task mode still match. Otherwise Ground starts a new runtime session and supplies
-bounded readable history.
+A CLI session is resumed only when its source-registered adapter ID, explicit
+session-compatibility ID, provider revision, workspace, and task mode still match.
+Legacy Codex, Claude, and Gemini session records migrate to those two identities.
+Generic runtimes never persist opaque sessions. An incompatible record is deleted
+before Ground constructs the next prompt. A compatible record is a one-attempt
+lease: Ground durably deletes it before launch and persists a replacement only
+after canonical completion. Switching back, stopping, failing, or crashing
+therefore cannot revive context that skipped intervening normalized history.
+Otherwise Ground starts a new runtime session and supplies bounded readable
+history.
 
 Each assistant message and runtime/tool activity is stored with the provider name,
 kind, model, and provider ID captured when the run begins. A run also captures its
@@ -177,6 +183,21 @@ tool calls can interleave without relying on provider-specific chunk ordering.
 
 Runtime streams normalize into session identity, assistant deltas, activity
 lifecycle, provider notices, usage, and one terminal runtime result.
+
+Canonical validation is necessary but not sufficient for persistence. `RunManager`
+treats even a source-reviewed runtime as fallible: configured CLI environment
+values and their JSON-escaped forms are stream-redacted across delta boundaries,
+activity and notice text is redacted again, and runtime activity IDs become fresh
+opaque Ground call IDs. A protected value in runtime/session identity fails the
+run instead of becoming resumable state. The built-in CLI launcher independently
+redacts its adapter-specific inherited credentials, making the main projection a
+second boundary rather than the only one. Model responses receive equivalent
+successful-output handling: resolved credentials are stream-redacted from text and
+notices, while reflected credentials in tool calls, provider state, checkpoints,
+or identity metadata fail closed. Iterator reads race the run signal and transient
+runtime progress updates are projected live but coalesced into a terminal durable
+snapshot. Cancellation is checked before and after validation, projection,
+reducer completion, and every terminal persistence step.
 
 Persisted assistant messages and activities are attributable to a task, run,
 provider, and model. Model history and native runtime-session records additionally
@@ -353,13 +374,15 @@ launching with unreviewed values.
 
 ## Current composition and migration
 
-The runnable desktop still has a compatibility `RunManager` and atomic JSON
-`StateStore`. OpenAI Responses, Anthropic Messages, Google Gemini, and
-OpenAI-compatible model adapters are integrated end to end through the
-provider-neutral model loop and are resolved through its static adapter registry.
-Their tests use mocked transports; CI does not make credentialed live-provider
-requests. Recognized CLI adapters normalize events and persist resume metadata,
-but do not yet use the experimental agent-runtime registry.
+The runnable desktop uses `RunManager` and an atomic JSON `StateStore`. OpenAI
+Responses, Anthropic Messages, Google Gemini, OpenAI-compatible, Codex CLI, Claude
+Code, Gemini CLI, and Generic CLI are resolved through one static adapter registry.
+All runtime output crosses `AgentRuntimeEventReducer` before durable task state or
+renderer events. Recognized CLI adapters normalize activities, usage, diagnostics,
+and compatible native sessions while retaining the existing executable,
+environment, native-confirmation, cancellation, and process-tree safeguards.
+Tests use mocked transports and synthetic pinned fixtures; CI does not make
+credentialed live-provider requests or launch paid/native agent sessions.
 
 The next storage boundary is a transactional, append-only event store with schema
 migrations and materialized task views. Stronger OS-specific confinement,

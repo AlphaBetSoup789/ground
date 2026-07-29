@@ -1,0 +1,290 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ground.local/schemas/compatibility-manifest-v1.json",
+  "title": "Ground compatibility fixture manifest",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/cliManifest"
+    },
+    {
+      "$ref": "#/$defs/apiManifest"
+    }
+  ],
+  "$defs": {
+    "provenance": {
+      "enum": [
+        "synthetic-contract",
+        "documented-example"
+      ]
+    },
+    "jsonEvent": {
+      "type": "object"
+    },
+    "canonicalEvent": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "cliSuite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "adapter",
+        "runtime",
+        "version",
+        "fixtureDate",
+        "provenance",
+        "provenanceNote",
+        "liveCapture"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]+$"
+        },
+        "kind": {
+          "const": "cli"
+        },
+        "adapter": {
+          "enum": [
+            "codex",
+            "claude",
+            "gemini"
+          ]
+        },
+        "runtime": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+        },
+        "fixtureDate": {
+          "type": "string",
+          "format": "date"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "provenanceNote": {
+          "type": "string",
+          "minLength": 20
+        },
+        "liveCapture": {
+          "const": false
+        }
+      }
+    },
+    "apiSuite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "adapterBoundary",
+        "protocols",
+        "packages",
+        "fixtureDate",
+        "provenance",
+        "provenanceNote",
+        "liveCapture"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]+$"
+        },
+        "kind": {
+          "const": "api"
+        },
+        "adapterBoundary": {
+          "const": "ai-sdk-language-model-v4"
+        },
+        "protocols": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "openai-responses",
+              "anthropic-messages",
+              "google-generative-ai",
+              "openai-compatible"
+            ]
+          }
+        },
+        "packages": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ai",
+            "@ai-sdk/openai",
+            "@ai-sdk/anthropic",
+            "@ai-sdk/google",
+            "@ai-sdk/openai-compatible"
+          ],
+          "properties": {
+            "ai": {
+              "type": "string"
+            },
+            "@ai-sdk/openai": {
+              "type": "string"
+            },
+            "@ai-sdk/anthropic": {
+              "type": "string"
+            },
+            "@ai-sdk/google": {
+              "type": "string"
+            },
+            "@ai-sdk/openai-compatible": {
+              "type": "string"
+            }
+          }
+        },
+        "fixtureDate": {
+          "type": "string",
+          "format": "date"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "provenanceNote": {
+          "type": "string",
+          "minLength": 20
+        },
+        "liveCapture": {
+          "const": false
+        }
+      }
+    },
+    "cliCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "description",
+        "inputEvents",
+        "expectedCanonicalEvents"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]+$"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "inputEvents": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/jsonEvent"
+          }
+        },
+        "expectedCanonicalEvents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/canonicalEvent"
+          }
+        }
+      }
+    },
+    "apiCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "description",
+        "request",
+        "inputEvents",
+        "expectedCanonicalEvents"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]+$"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "request": {
+          "type": "object"
+        },
+        "inputEvents": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/jsonEvent"
+          }
+        },
+        "expectedCanonicalEvents": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/canonicalEvent"
+          }
+        }
+      }
+    },
+    "cliManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "suite",
+        "cases"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "suite": {
+          "$ref": "#/$defs/cliSuite"
+        },
+        "cases": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/cliCase"
+          }
+        }
+      }
+    },
+    "apiManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "suite",
+        "cases"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "suite": {
+          "$ref": "#/$defs/apiSuite"
+        },
+        "cases": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/apiCase"
+          }
+        }
+      }
+    }
+  }
+}

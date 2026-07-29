@@ -49,6 +49,8 @@ npm run test:watch
 npm run build
 npm run build-deps:check
 npm run install-scripts:check
+npm run compatibility:check
+npm run adapter-sdk:pack-check
 npm run licenses:check
 npm run package:mac
 npm run smoke:package:launch
@@ -71,7 +73,8 @@ cleanup.
 | `src/renderer/` | Untrusted React presentation layer |
 | `src/preload/` | Narrow renderer-to-main bridge |
 | `src/main/` | Desktop composition, policy, storage, tools, secrets, and runtimes |
-| `src/main/agent/` | Provider-neutral contracts, event reducer, registry, and model adapters |
+| `src/main/agent/` | Canonical provider-neutral contracts, event reducers, registry, and adapters |
+| `packages/adapter-sdk/` | Provisional publishable manifest, declarations build, and adapter SDK guide |
 | `src/main/providers/` | Current provider/runtime transport implementations |
 | `src/shared/` | Typed IPC and renderer-safe data structures |
 | `docs/` | Architecture, compatibility, SDK, and threat-model documentation |
@@ -103,7 +106,9 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
 
 ## Adding a model adapter
 
-- Implement the experimental `ModelAdapter` contract in `src/main/agent/`.
+- Implement the versioned `ModelAdapter` contract from
+  `@ground-app/adapter-sdk` (or its canonical `src/main/agent/sdk.ts` source in
+  this repository).
 - Register it under a stable ID with `AdapterRegistry`, map the provider profile to
   a secret-reference-only configuration with
   `createRegisteredModelRuntimeFactory`, and inject that factory at trusted
@@ -121,6 +126,8 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
 - Map authentication, rate-limit, timeout, cancellation, protocol, and mid-stream
   failures into typed provider errors.
 - Add provider-independent contract fixtures and protocol-specific mocked tests.
+- Pass `assertModelAdapterConformance` with one valid configuration and at least
+  one rejected configuration fixture.
 - Document data egress, endpoint rules, tool behavior, and tested model/version
   combinations.
 
@@ -129,15 +136,24 @@ separate design and explicit user consent.
 
 ## Adding an external runtime adapter
 
-- The current desktop CLI path is `src/main/providers/cli.ts`; the experimental
-  `AgentRuntimeAdapter` registry is not yet wired into production composition.
+- Implement the versioned `AgentRuntimeAdapter` contract, register it under a
+  stable source-reviewed ID, and map only data configuration from the provider
+  profile with `createRegisteredAgentRuntimeFactory`.
+- Keep registration in trusted desktop composition. Provider state must never
+  select a module path, package, script, or remote code to load.
 - Resolve and spawn an executable directly; never build a shell command string.
 - Define its structured event parser, session identity, resume behavior, and
   cancellation semantics.
 - Declare who owns permissions and surface that boundary in the UI.
 - Treat runtime-reported activity as observability, not proof that Ground approved
   the action.
+- Resolve credentials only through opaque main-process references and never emit
+  or log their values. Add reflection tests covering raw, JSON-escaped, and
+  cross-delta output; Ground’s projection redaction is defense in depth, not an
+  adapter API.
 - Pin fixtures to a documented CLI version and cover malformed/unknown events.
+- Validate every emitted object with `AgentRuntimeEventReducer` and pass
+  `assertAgentRuntimeAdapterConformance` using a deterministic mocked process.
 - Do not enable bypass, unsafe, or “trust everything” flags by default.
 
 ## Security-sensitive changes

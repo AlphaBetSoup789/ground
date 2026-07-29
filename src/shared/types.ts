@@ -91,7 +91,16 @@ export interface ProviderDraft {
 }
 
 export interface RuntimeSession {
-  adapter: Exclude<CliAdapter, 'generic'>
+  /**
+   * Stable source-registered AgentRuntimeAdapter identity.
+   */
+  adapterId: string
+  /**
+   * Adapter-defined opaque-session compatibility boundary. This can change
+   * independently from adapterId when a new adapter release cannot safely
+   * resume prior native sessions.
+   */
+  sessionCompatibilityId: string
   sessionId: string
   providerRevision: string
   workspacePath: string

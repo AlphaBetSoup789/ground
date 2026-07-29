@@ -145,10 +145,19 @@ therefore retains the current account’s OS authority.
   strip known bypass flags and select mode-specific runtime permissions. Saving a
   profile and launching its fully expanded invocation require distinct native
   grants. The final grant binds the content-hashed launch envelope, raw argv
-  digest, canonical workspace, adapter/parser, prompt transport, profile
-  environment-key set, and opaque environment revision before another pre-spawn
-  revalidation. Optional values remain in a fingerprint-matched encrypted vault
-  record, are redacted if echoed, and never enter renderer/provider snapshots.
+  digest, canonical workspace, parser dialect, actual source-registered runtime
+  adapter ID, prompt transport, profile environment-key set, and opaque
+  environment revision before another pre-spawn revalidation. Optional values
+  remain in a fingerprint-matched encrypted vault record and never enter
+  renderer/provider snapshots.
+- The built-in launcher redacts configured and adapter-specific inherited
+  credentials if echoed. After canonical runtime validation, the main-process
+  projection independently stream-redacts raw and JSON-escaped configured values,
+  replaces provider activity IDs with opaque IDs, rejects protected runtime or
+  session identity, and checks cancellation around projection and terminal
+  persistence. This limits accidental reflection by a buggy reviewed adapter; it
+  does not sandbox adapter code or detect arbitrary secrets the adapter obtains
+  outside Ground’s configured resolver.
 - Custom CLI environment names cannot redirect executable search, dynamic or
   interpreter loading, user/config roots, or temporary roots. Native CLI
   credential stores and the small adapter-specific inherited allowlist remain the
@@ -276,6 +285,12 @@ therefore retains the current account’s OS authority.
 - Git repository metadata contains control characters or a worktree path escapes
   the managed root;
 - provider stream emits malformed, duplicated, reordered, or oversized events;
+- registered runtime output reflects a configured secret raw, JSON-escaped, split
+  across deltas, or through activity/notice/session identity, then ignores
+  cancellation and emits late terminal state;
+- a hosted or local API endpoint reflects its resolved credential through split
+  successful text, notices, tool arguments, provider state, checkpoints, or
+  response identity;
 - imported task text prompt-injects a later exact-provider run or includes a secret
   embedded in unstructured prose;
 - corrupt primary and backup state both fail validation, state/vault access fails

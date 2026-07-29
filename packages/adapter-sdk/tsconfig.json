@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "rootDir": "../../src/main/agent",
+    "outDir": "./dist",
+    "declaration": true,
+    "noEmit": false,
+    "types": [
+      "node"
+    ]
+  },
+  "files": [
+    "../../src/main/agent/sdk.ts"
+  ]
+}

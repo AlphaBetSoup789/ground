@@ -11,20 +11,33 @@ import type {
 } from '../shared/types'
 import {
   AdapterRegistry,
+  AgentRuntimeEventReducer,
   AiSdkModelAdapter,
+  closeAdapterIteratorWithGrace,
+  createBuiltInCliRuntimeAdapters,
   ModelEventReducer,
+  nextAdapterEvent,
+  type AgentActivityKind,
+  type AgentRuntimeAdapter,
+  type AgentRuntimeEvent,
   type AiSdkAdapterConfig,
   type AiSdkProtocol,
   type ConversationItem,
   type JsonObject,
   type ModelAdapter,
   type ModelRequest,
+  type ProviderNotice,
+  type ReducedModelResponse,
   type TokenUsage,
   type ToolCallPart,
   type ToolDefinition as ModelToolDefinition
 } from './agent'
 import { assertJsonObject } from './agent/json'
-import { resolveCliEnvironment } from './cli-environment'
+import {
+  cliEnvironmentSecretReference,
+  resolveCliEnvironment
+} from './cli-environment'
+import { BUILT_IN_CLI_RUNTIME_BINDINGS } from './cli-runtime-bindings'
 import {
   fingerprintPreparedCommandAction,
   fingerprintPreparedMcpCall,
@@ -40,16 +53,20 @@ import type {
 import { agentApprovalFingerprint } from './native-agent-approval'
 import {
   cliSessionIdContainsSensitiveValue,
-  type CliActivity,
-  type CliInvocationAuthorizer,
-  type CliUsage,
-  runCli
+  type CliInvocationAuthorizer
 } from './providers/cli'
 import {
   providerCredentialReferenceFor,
   resolveProviderCredential
 } from './provider-credentials'
 import { ProviderOperationGate } from './provider-operation-gate'
+import {
+  RuntimeSecretStreamRedactor,
+  createRuntimeSecretRedactionPlan,
+  redactRuntimeSecrets,
+  runtimeTextContainsSecret,
+  type RuntimeSecretRedactionPlan
+} from './runtime-secret-redaction'
 import { SecretVault } from './secrets'
 import { StateStore } from './store'
 import {
@@ -78,10 +95,19 @@ interface NormalizedToolCall {
 
 export interface ModelRuntime<C = unknown> {
   adapter: ModelAdapter<C>
+  adapterId: string
   config: C
 }
 
+export interface AgentRuntime<C = unknown> {
+  adapter: AgentRuntimeAdapter<C>
+  adapterId: string
+  config: C
+  sessionCompatibilityId?: string
+}
+
 export type ModelRuntimeFactory = (provider: ApiProvider) => ModelRuntime
+export type AgentRuntimeFactory = (provider: CliProvider) => AgentRuntime
 export type WorkspaceAuthorizer = (storedPath: string) => Promise<string>
 
 export interface ModelAdapterBinding {
@@ -92,6 +118,16 @@ export interface ModelAdapterBinding {
 export type ModelAdapterBindingResolver = (
   provider: ApiProvider
 ) => ModelAdapterBinding
+
+export interface AgentRuntimeBinding {
+  adapterId: string
+  config: unknown
+  sessionCompatibilityId?: string
+}
+
+export type AgentRuntimeBindingResolver = (
+  provider: CliProvider
+) => AgentRuntimeBinding
 
 export interface McpRuntime {
   listApprovedTools(): McpExposedTool[]
@@ -133,6 +169,98 @@ const CREDENTIAL_REDACTION_MARKERS = [
   '[removed]',
   ''
 ] as const
+
+function assertCredentialFreeModelValue(
+  value: unknown,
+  plan: RuntimeSecretRedactionPlan,
+  label: string
+): void {
+  if (!plan.patterns.length || value === undefined) return
+  const pending: unknown[] = [value]
+  while (pending.length) {
+    const candidate = pending.pop()
+    if (typeof candidate === 'string') {
+      if (!runtimeTextContainsSecret(candidate, plan)) continue
+      throw new Error(
+        `The provider exposed a protected credential through ${label}`
+      )
+    }
+    if (!candidate || typeof candidate !== 'object') continue
+    if (Array.isArray(candidate)) {
+      pending.push(...candidate)
+      continue
+    }
+    for (const [key, entry] of Object.entries(candidate)) {
+      pending.push(key, entry)
+    }
+  }
+}
+
+function sanitizeSuccessfulModelResponse(
+  response: ReducedModelResponse,
+  plan: RuntimeSecretRedactionPlan
+): ReducedModelResponse {
+  assertCredentialFreeModelValue(response.responseId, plan, 'its response id')
+  assertCredentialFreeModelValue(
+    response.servingModel,
+    plan,
+    'its serving model'
+  )
+  assertCredentialFreeModelValue(
+    response.providerStopReason,
+    plan,
+    'its stop metadata'
+  )
+  assertCredentialFreeModelValue(
+    response.output.id,
+    plan,
+    'its message identity'
+  )
+  assertCredentialFreeModelValue(
+    response.output.providerState,
+    plan,
+    'provider-owned message state'
+  )
+  assertCredentialFreeModelValue(
+    response.checkpoint,
+    plan,
+    'provider continuation state'
+  )
+
+  const parts = response.output.parts.map((part) => {
+    assertCredentialFreeModelValue(
+      part.providerState,
+      plan,
+      'provider-owned part state'
+    )
+    if (part.kind !== 'text' && part.kind !== 'reasoning-summary') {
+      assertCredentialFreeModelValue(part, plan, 'a tool call')
+      return structuredClone(part)
+    }
+    return {
+      ...structuredClone(part),
+      text: redactRuntimeSecrets(part.text, plan)
+    }
+  })
+
+  return {
+    ...response,
+    output: {
+      ...response.output,
+      parts
+    },
+    notices: response.notices.map((notice) => ({
+      ...notice,
+      code: redactRuntimeSecrets(notice.code, plan),
+      message: redactRuntimeSecrets(notice.message, plan),
+      retry: notice.retry ? { ...notice.retry } : undefined
+    })),
+    checkpoint:
+      response.checkpoint === undefined
+        ? undefined
+        : structuredClone(response.checkpoint)
+  }
+}
 
 interface ActiveRun {
   id: string
@@ -188,6 +316,7 @@ type EventSink = (event: RunEvent) => void
 export class RunManager {
   private readonly activeRuns = new Map<string, ActiveRun>()
   private readonly startingTaskIds = new Set<string>()
+  private readonly agentRuntimeFactory: AgentRuntimeFactory
 
   constructor(
     private readonly store: StateStore,
@@ -199,8 +328,13 @@ export class RunManager {
     private readonly providerOperations?: ProviderOperationGate,
     private readonly authorizeWorkspace: WorkspaceAuthorizer = async () => {
       throw new Error('Workspace access is unavailable')
-    }
-  ) {}
+    },
+    agentRuntimeFactory?: AgentRuntimeFactory
+  ) {
+    this.agentRuntimeFactory =
+      agentRuntimeFactory ??
+      createBuiltinAgentRuntimeFactory(authorizeCliInvocation)
+  }
 
   assertTaskCanStart(taskId: string): void {
     const task = this.store.getTask(taskId)
@@ -439,6 +573,29 @@ export class RunManager {
   }
 
   private async execute(run: ActiveRun, provider: ProviderProfile): Promise<void> {
+    const clearContinuation = (task: Task): void => {
+      if (provider.kind === 'cli') {
+        if (!task.runtimeSessions?.[provider.id]) return
+        delete task.runtimeSessions[provider.id]
+        if (!Object.keys(task.runtimeSessions).length) {
+          delete task.runtimeSessions
+        }
+        return
+      }
+      if (!task.modelSessions?.[provider.id]) return
+      delete task.modelSessions[provider.id]
+      if (!Object.keys(task.modelSessions).length) {
+        delete task.modelSessions
+      }
+    }
+    const finalizeStopped = async (): Promise<void> => {
+      await this.store.mutateTask(run.taskId, (task) => {
+        clearContinuation(task)
+        task.runStatus = 'idle'
+      })
+      this.emit({ type: 'run-stopped', taskId: run.taskId, runId: run.id })
+    }
+
     try {
       if (provider.kind === 'cli') {
         await this.runCliProvider(run, provider)
@@ -446,22 +603,20 @@ export class RunManager {
         await this.runModelProvider(run, provider)
       }
       if (run.controller.signal.aborted) {
-        await this.store.mutateTask(run.taskId, (task) => {
-          task.runStatus = 'idle'
-        })
-        this.emit({ type: 'run-stopped', taskId: run.taskId, runId: run.id })
+        await finalizeStopped()
       } else {
         await this.store.mutateTask(run.taskId, (task) => {
           task.runStatus = 'idle'
         })
-        this.emit({ type: 'run-completed', taskId: run.taskId, runId: run.id })
+        if (run.controller.signal.aborted) {
+          await finalizeStopped()
+        } else {
+          this.emit({ type: 'run-completed', taskId: run.taskId, runId: run.id })
+        }
       }
     } catch (error) {
       if (run.controller.signal.aborted || isAbortError(error)) {
-        await this.store.mutateTask(run.taskId, (task) => {
-          task.runStatus = 'idle'
-        })
-        this.emit({ type: 'run-stopped', taskId: run.taskId, runId: run.id })
+        await finalizeStopped()
       } else {
         const message = readableError(error, run.credentialValues)
         const item: ActivityItem = {
@@ -476,11 +631,16 @@ export class RunManager {
           provider: run.provider
         }
         await this.store.mutateTask(run.taskId, (task) => {
+          clearContinuation(task)
           task.runStatus = 'failed'
           task.items.push(item)
         })
-        this.emit({ type: 'item-added', taskId: run.taskId, runId: run.id, item })
-        this.emit({ type: 'run-error', taskId: run.taskId, runId: run.id, message })
+        if (run.controller.signal.aborted) {
+          await finalizeStopped()
+        } else {
+          this.emit({ type: 'item-added', taskId: run.taskId, runId: run.id, item })
+          this.emit({ type: 'run-error', taskId: run.taskId, runId: run.id, message })
+        }
       }
     } finally {
       this.activeRuns.delete(run.id)
@@ -511,7 +671,7 @@ export class RunManager {
     const resumableSession = matchingModelSession(
       task,
       provider,
-      runtime.adapter.id
+      runtime.adapterId
     )
     const includeImportedTimeline =
       task.includeImportedHistory === true &&
@@ -593,6 +753,21 @@ export class RunManager {
         })
         return assistantItem
       }
+      const appendAssistantDelta = (delta: string): void => {
+        if (!delta) return
+        streamedText += delta
+        const item = ensureAssistant()
+        const offset = item.content.length
+        item.content += delta
+        this.emit({
+          type: 'text-delta',
+          taskId: run.taskId,
+          runId: run.id,
+          itemId: item.id,
+          delta,
+          offset
+        })
+      }
 
       const contextDetails = contextManagementDetails(input)
       if (contextDetails && !contextNoticeShown) {
@@ -633,63 +808,115 @@ export class RunManager {
           latestCheckpoint === undefined
             ? undefined
             : {
-                adapterId: runtime.adapter.id,
+                adapterId: runtime.adapterId,
                 checkpoint: structuredClone(latestCheckpoint)
               }
       }
       const reducer = new ModelEventReducer()
+      const resolvedCredentials = new Set<string>()
+      let credentialPlan = createRuntimeSecretRedactionPlan([])
+      let assistantRedactor: RuntimeSecretStreamRedactor | undefined
+      let adapterOutputStarted = false
+      let pendingCredentialResolutions = 0
+      let modelIterator: AsyncIterator<unknown> | undefined
+      let modelIteratorCompleted = false
+      const closeModelIterator = async (): Promise<void> => {
+        const iterator = modelIterator
+        if (!iterator || modelIteratorCompleted) return
+        modelIterator = undefined
+        await closeAdapterIteratorWithGrace(iterator)
+      }
       try {
-        for await (const event of runtime.adapter.stream(request, {
-          config: runtime.config,
-          signal: run.controller.signal,
-          secrets: {
-            resolve: async (reference) => {
-              if (reference !== credentialReference) {
-                throw new Error(
-                  `The API key for ${provider.name} is missing or unavailable`
-                )
+        modelIterator = runtime.adapter
+          .stream(request, {
+            config: runtime.config,
+            signal: run.controller.signal,
+            secrets: {
+              resolve: async (reference) => {
+                if (adapterOutputStarted) {
+                  throw new Error(
+                    'A model adapter cannot resolve credentials after output begins'
+                  )
+                }
+                pendingCredentialResolutions += 1
+                try {
+                  if (reference !== credentialReference) {
+                    throw new Error(
+                      `The API key for ${provider.name} is missing or unavailable`
+                    )
+                  }
+                  const secret = await resolveProviderCredential(
+                    this.vault,
+                    credentialProvider,
+                    reference
+                  )
+                  if (adapterOutputStarted) {
+                    throw new Error(
+                      'A model adapter cannot resolve credentials after output begins'
+                    )
+                  }
+                  if (!secret || secret.length < 4) {
+                    throw new Error(
+                      `The API key for ${provider.name} is missing or unavailable`
+                    )
+                  }
+                  run.credentialValues.add(secret)
+                  resolvedCredentials.add(secret)
+                  credentialPlan = createRuntimeSecretRedactionPlan(
+                    resolvedCredentials
+                  )
+                  return secret
+                } finally {
+                  pendingCredentialResolutions -= 1
+                }
               }
-              const secret = await resolveProviderCredential(
-                this.vault,
-                credentialProvider,
-                reference
-              )
-              if (!secret) {
-                throw new Error(`The API key for ${provider.name} is missing or unavailable`)
-              }
-              run.credentialValues.add(secret)
-              return secret
             }
+          })
+          [Symbol.asyncIterator]()
+        while (true) {
+          const next = await nextAdapterEvent(
+            modelIterator,
+            run.controller.signal
+          )
+          if (next.done) {
+            modelIteratorCompleted = true
+            break
           }
-        })) {
-          reducer.push(event)
+          if (pendingCredentialResolutions > 0) {
+            throw new Error(
+              'A model adapter emitted output while credential resolution was pending'
+            )
+          }
+          adapterOutputStarted = true
+          const event = reducer.push(next.value)
           if (event.type !== 'part.delta') continue
           if (event.delta.kind === 'text' && event.delta.text) {
-            const delta = event.delta.text
-            streamedText += delta
-            const item = ensureAssistant()
-            const offset = item.content.length
-            item.content += delta
-            this.emit({
-              type: 'text-delta',
-              taskId: run.taskId,
-              runId: run.id,
-              itemId: item.id,
-              delta,
-              offset
-            })
-          } else if (
-            event.delta.kind === 'reasoning-summary' &&
-            event.delta.text
-          ) {
-            reasoningSummary = `${reasoningSummary}${event.delta.text}`.slice(-30_000)
+            assistantRedactor ??= new RuntimeSecretStreamRedactor(
+              credentialPlan
+            )
+            appendAssistantDelta(assistantRedactor.push(event.delta.text))
           }
         }
+        appendAssistantDelta(assistantRedactor?.finish() ?? '')
       } catch (error) {
-        if (assistantItem) await this.store.addItem(run.taskId, assistantItem)
+        await closeModelIterator()
+        appendAssistantDelta(assistantRedactor?.finish() ?? '')
+        if (
+          assistantItem &&
+          !run.controller.signal.aborted &&
+          !isAbortError(error)
+        ) {
+          await this.store.addItem(run.taskId, assistantItem)
+        }
         throw error
+      } finally {
+        await closeModelIterator()
       }
-      const response = reducer.finish()
+      const response = sanitizeSuccessfulModelResponse(
+        reducer.finish(),
+        credentialPlan
+      )
+      run.controller.signal.throwIfAborted()
       totalUsage = mergeTokenUsage(totalUsage, response.usage)
       if (response.checkpoint !== undefined) {
         latestCheckpoint = response.checkpoint as PortableJsonValue
@@ -760,10 +987,11 @@ export class RunManager {
         await this.persistModelSession(
           run,
           provider,
-          runtime.adapter.id,
+          runtime.adapterId,
           conversation,
           latestCheckpoint
         )
+        run.controller.signal.throwIfAborted()
         if (totalUsage) await this.addModelUsage(run, totalUsage)
         return
       }
@@ -805,7 +1033,7 @@ export class RunManager {
       await this.persistModelSession(
         run,
         provider,
-        runtime.adapter.id,
+        runtime.adapterId,
         conversation,
         latestCheckpoint
       )
@@ -1250,17 +1478,47 @@ export class RunManager {
     }
     const workspacePath = run.workspacePath
     if (!workspacePath) throw new Error('CLI agents require an active workspace')
-    const adapter = provider.cliAdapter ?? 'generic'
+    const runtime = this.agentRuntimeFactory(structuredClone(provider))
+    const dialect = provider.cliAdapter ?? 'generic'
     const cliEnvironment = resolveCliEnvironment(this.vault, provider)
+    const runtimeSecretPlan = createRuntimeSecretRedactionPlan(
+      Object.values(cliEnvironment)
+    )
+    for (const pattern of runtimeSecretPlan.patterns) {
+      run.credentialValues.add(pattern)
+    }
+    const assistantRedactor = new RuntimeSecretStreamRedactor(
+      runtimeSecretPlan
+    )
     const savedSession = task.runtimeSessions?.[provider.id]
+    const clearSavedSession = async (): Promise<void> => {
+      await this.store.mutateTask(run.taskId, (mutable) => {
+        if (!mutable.runtimeSessions?.[provider.id]) return
+        delete mutable.runtimeSessions[provider.id]
+        if (!Object.keys(mutable.runtimeSessions).length) {
+          delete mutable.runtimeSessions
+        }
+      })
+      if (!task.runtimeSessions?.[provider.id]) return
+      delete task.runtimeSessions[provider.id]
+      if (!Object.keys(task.runtimeSessions).length) {
+        delete task.runtimeSessions
+      }
+    }
     let resumableSession =
-      adapter !== 'generic' &&
-      savedSession?.adapter === adapter &&
+      runtime.sessionCompatibilityId !== undefined &&
+      savedSession?.adapterId === runtime.adapterId &&
+      savedSession.sessionCompatibilityId ===
+        runtime.sessionCompatibilityId &&
       savedSession.providerRevision === provider.updatedAt &&
       savedSession.workspacePath === workspacePath &&
-      savedSession.mode === task.mode
+      savedSession.mode === task.mode &&
+      savedSession.sessionId.length <= 200
         ? savedSession
         : undefined
+    if (savedSession && !resumableSession) {
+      await clearSavedSession()
+    }
     if (
       resumableSession &&
       cliSessionIdContainsSensitiveValue(
@@ -1269,63 +1527,35 @@ export class RunManager {
         cliEnvironment
       )
     ) {
-      await this.store.mutateTask(run.taskId, (mutable) => {
-        if (!mutable.runtimeSessions) return
-        delete mutable.runtimeSessions[provider.id]
-        if (!Object.keys(mutable.runtimeSessions).length) {
-          delete mutable.runtimeSessions
-        }
-      })
-      if (task.runtimeSessions) {
-        delete task.runtimeSessions[provider.id]
-        if (!Object.keys(task.runtimeSessions).length) {
-          delete task.runtimeSessions
-        }
-      }
+      await clearSavedSession()
       resumableSession = undefined
     }
     const prompt = buildCliPrompt(task, Boolean(resumableSession))
-    let assistantItem: MessageItem | undefined
-    let diagnostics = ''
-    let sessionId = resumableSession?.sessionId
-    let usage: CliUsage | undefined
-    const pendingActivities: Array<Promise<unknown>> = []
-    const runtimeActivities = new Map<string, string>()
-    const runtimeActivityItems = new Set<string>()
-    let activityMutationTail = Promise.resolve()
-    const queueRuntimeActivity = (activity: CliActivity): void => {
-      const operation = activityMutationTail.then(async () => {
-        const item = await this.upsertCliActivity(
-          run,
-          activity,
-          runtimeActivities
-        )
-        runtimeActivityItems.add(item.id)
-        return item
-      })
-      activityMutationTail = operation.then(
-        () => undefined,
-        () => undefined
-      )
-      pendingActivities.push(operation)
+    // A native continuation is a one-attempt lease. Delete it durably before
+    // launch so a crash, cancellation, or malformed response cannot resume past
+    // a user turn that the runtime never committed.
+    if (resumableSession) {
+      await clearSavedSession()
     }
+    let assistantItem: MessageItem | undefined
+    const runtimeNotices: ProviderNotice[] = []
+    const runtimeActivities = new Map<string, string>()
+    const runtimeActivitySnapshots = new Map<string, ActivityItem>()
 
-    pendingActivities.push(
-      this.addActivity(run, {
-        activityType: 'status',
-        title:
-          task.mode === 'ask'
-            ? `${provider.name} · read-only runtime policy`
-            : `${provider.name} · runtime-managed permissions`,
-        detail:
-          adapter === 'generic'
-            ? 'This external CLI owns its tool and permission behavior. Ground captures its output but cannot mediate individual actions.'
-            : task.mode === 'ask'
-              ? 'Ground launched this runtime with its supported read-only or planning mode.'
-              : 'The external runtime may edit this workspace under its own sandbox and permission policy. Ground records activity but does not approve each action.',
-        status: 'success'
-      })
-    )
+    await this.addActivity(run, {
+      activityType: 'status',
+      title:
+        task.mode === 'ask'
+          ? `${provider.name} · read-only runtime policy`
+          : `${provider.name} · runtime-managed permissions`,
+      detail:
+        dialect === 'generic'
+          ? 'This external CLI owns its tool and permission behavior. Ground captures its output but cannot mediate individual actions.'
+          : task.mode === 'ask'
+            ? 'Ground launched this runtime with its supported read-only or planning mode.'
+            : 'The external runtime may edit this workspace under its own sandbox and permission policy. Ground records activity but does not approve each action.',
+      status: 'success'
+    })
 
     const ensureAssistant = (): MessageItem => {
       if (assistantItem) return assistantItem
@@ -1347,79 +1577,289 @@ export class RunManager {
       return assistantItem
     }
 
-    let result: Awaited<ReturnType<typeof runCli>>
-    try {
-      result = await runCli(
+    const appendAssistantDelta = (delta: string): void => {
+      if (!delta) return
+      const item = ensureAssistant()
+      const offset = item.content.length
+      item.content += delta
+      this.emit({
+        type: 'text-delta',
+        taskId: run.taskId,
+        runId: run.id,
+        itemId: item.id,
+        delta,
+        offset
+      })
+    }
+
+    const containsProtectedRuntimeValue = (value: string): boolean =>
+      runtimeTextContainsSecret(value, runtimeSecretPlan) ||
+      cliSessionIdContainsSensitiveValue(
         provider,
-        prompt,
-        workspacePath,
-        run.controller.signal,
-        {
-        onText: (delta) => {
-          const item = ensureAssistant()
-          const offset = item.content.length
-          item.content += delta
-          this.emit({
-            type: 'text-delta',
-            taskId: run.taskId,
-            runId: run.id,
-            itemId: item.id,
-            delta,
-            offset
-          })
-        },
-        onDiagnostic: (detail) => {
-          diagnostics = `${diagnostics}${detail}`.slice(-12_000)
-        },
-        onSession: (nextSessionId) => {
-          sessionId = nextSessionId
-        },
-        onActivity: (activity) => {
-          queueRuntimeActivity(activity)
-        },
-        onUsage: (nextUsage) => {
-          usage = nextUsage
-        }
-        },
-        {
-          mode: task.mode,
-          sessionId: resumableSession?.sessionId
-        },
-        this.authorizeCliInvocation,
+        value,
         cliEnvironment
       )
+
+    const reducer = new AgentRuntimeEventReducer()
+    const processEvent = async (event: AgentRuntimeEvent): Promise<void> => {
+      switch (event.type) {
+        case 'runtime.started':
+          if (
+            (event.sessionId &&
+              containsProtectedRuntimeValue(event.sessionId)) ||
+            (event.servingModel &&
+              containsProtectedRuntimeValue(event.servingModel))
+          ) {
+            throw new Error(
+              'The runtime exposed a protected CLI environment value through its identity metadata'
+            )
+          }
+          return
+        case 'assistant.delta': {
+          if (!event.delta) return
+          appendAssistantDelta(assistantRedactor.push(event.delta))
+          return
+        }
+        case 'activity.started': {
+          const item = await this.addActivity(run, {
+            activityType: agentActivityType(event.kind),
+            title: redactRuntimeSecrets(event.title, runtimeSecretPlan),
+            detail:
+              event.detail === undefined
+                ? undefined
+                : redactRuntimeSecrets(event.detail, runtimeSecretPlan),
+            status: 'running',
+            callId: createId('runtime-activity')
+          })
+          runtimeActivities.set(event.activityId, item.id)
+          runtimeActivitySnapshots.set(event.activityId, item)
+          return
+        }
+        case 'activity.updated': {
+          if (event.detail === undefined) return
+          const snapshot = runtimeActivitySnapshots.get(event.activityId)
+          if (!snapshot) {
+            throw new Error(
+              `Validated runtime activity "${event.activityId}" was not persisted`
+            )
+          }
+          snapshot.detail = redactRuntimeSecrets(
+            event.detail,
+            runtimeSecretPlan
+          )
+          this.emit({
+            type: 'item-updated',
+            taskId: run.taskId,
+            runId: run.id,
+            item: structuredClone(snapshot)
+          })
+          return
+        }
+        case 'activity.completed': {
+          const itemId = runtimeActivities.get(event.activityId)
+          const snapshot = runtimeActivitySnapshots.get(event.activityId)
+          if (!itemId || !snapshot) {
+            throw new Error(
+              `Validated runtime activity "${event.activityId}" was not persisted`
+            )
+          }
+          const updated = await this.store.updateItem(
+            run.taskId,
+            itemId,
+            (item) => {
+              if (item.kind !== 'activity') {
+                throw new Error(
+                  'Agent runtime activity identity resolved to a message'
+                )
+              }
+              if (event.detail !== undefined) {
+                item.detail = redactRuntimeSecrets(
+                  event.detail,
+                  runtimeSecretPlan
+                )
+              } else {
+                item.detail = snapshot.detail
+              }
+              item.status = event.status
+            }
+          )
+          if (updated.kind !== 'activity') {
+            throw new Error(
+              'Agent runtime activity update produced a message'
+            )
+          }
+          runtimeActivitySnapshots.set(event.activityId, updated)
+          this.emit({
+            type: 'item-updated',
+            taskId: run.taskId,
+            runId: run.id,
+            item: updated
+          })
+          return
+        }
+        case 'provider.notice':
+          runtimeNotices.push({
+            level: event.level,
+            code: redactRuntimeSecrets(event.code, runtimeSecretPlan),
+            message: redactRuntimeSecrets(
+              event.message,
+              runtimeSecretPlan
+            ),
+            retry: event.retry ? { ...event.retry } : undefined
+          })
+          return
+        case 'usage.updated':
+          return
+        case 'runtime.completed':
+          if (
+            event.sessionId &&
+            containsProtectedRuntimeValue(event.sessionId)
+          ) {
+            throw new Error(
+              'The runtime exposed a protected CLI environment value through its session identifier'
+            )
+          }
+          return
+      }
+    }
+
+    let result: ReturnType<AgentRuntimeEventReducer['finish']>
+    let runtimeIterator: AsyncIterator<AgentRuntimeEvent> | undefined
+    let runtimeIteratorCompleted = false
+    const closeRuntimeIterator = async (): Promise<void> => {
+      const iterator = runtimeIterator
+      if (!iterator || runtimeIteratorCompleted) return
+      runtimeIterator = undefined
+      await closeAdapterIteratorWithGrace(iterator)
+    }
+    try {
+      runtimeIterator = runtime.adapter
+        .run(
+          {
+            requestId: run.id,
+            prompt,
+            workspacePath,
+            model: provider.model || undefined,
+            mode: task.mode,
+            resume: resumableSession
+              ? { sessionId: resumableSession.sessionId }
+              : undefined
+          },
+          {
+            config: runtime.config,
+            signal: run.controller.signal,
+            secrets: {
+              resolve: async (reference) => {
+                const expectedReference = cliEnvironmentSecretReference(
+                  provider.id
+                )
+                if (reference !== expectedReference) {
+                  throw new Error(
+                    `The CLI environment for ${provider.name} is missing or unavailable`
+                  )
+                }
+                const secret = this.vault.get(reference)
+                if (secret === undefined) {
+                  throw new Error(
+                    `The CLI environment for ${provider.name} is missing or unavailable`
+                  )
+                }
+                run.credentialValues.add(secret)
+                return secret
+              }
+            }
+          }
+        )
+        [Symbol.asyncIterator]()
+      while (true) {
+        const next = await nextAdapterEvent(
+          runtimeIterator,
+          run.controller.signal
+        )
+        if (next.done) {
+          runtimeIteratorCompleted = true
+          break
+        }
+        const value = next.value
+        run.controller.signal.throwIfAborted()
+        const event = reducer.push(value)
+        run.controller.signal.throwIfAborted()
+        await processEvent(event)
+        run.controller.signal.throwIfAborted()
+      }
+      run.controller.signal.throwIfAborted()
+      result = reducer.finish()
+      run.controller.signal.throwIfAborted()
+      appendAssistantDelta(assistantRedactor.finish())
     } catch (error) {
-      await Promise.allSettled(pendingActivities)
+      await closeRuntimeIterator()
       await this.finalizeCliActivities(
         run,
-        runtimeActivityItems,
+        runtimeActivitySnapshots,
         'error',
         run.controller.signal.aborted
           ? 'The run stopped before the runtime reported completion.'
           : 'The runtime ended before reporting completion.'
       ).catch(() => undefined)
-      if (assistantItem) await this.store.addItem(run.taskId, assistantItem)
+      if (!run.controller.signal.aborted && !isAbortError(error)) {
+        appendAssistantDelta(assistantRedactor.finish())
+        if (assistantItem) await this.store.addItem(run.taskId, assistantItem)
+        await this.addRuntimeNotices(run, runtimeNotices).catch(() => undefined)
+      }
       throw error
+    } finally {
+      await closeRuntimeIterator()
     }
-    sessionId = result.sessionId ?? sessionId
-    usage = result.usage ?? usage
-    await Promise.all(pendingActivities)
+
+    run.controller.signal.throwIfAborted()
     await this.finalizeCliActivities(
       run,
-      runtimeActivityItems,
+      runtimeActivitySnapshots,
       run.controller.signal.aborted ? 'error' : 'success',
       run.controller.signal.aborted
         ? 'The run stopped before the runtime reported completion.'
         : undefined
     )
+    run.controller.signal.throwIfAborted()
     if (assistantItem) await this.store.addItem(run.taskId, assistantItem)
 
-    if (adapter !== 'generic' && sessionId) {
-      const persistedSessionId = sessionId
+    run.controller.signal.throwIfAborted()
+    if (result.usage) {
+      await this.addModelUsage(run, result.usage)
+    }
+    run.controller.signal.throwIfAborted()
+    await this.addRuntimeNotices(run, runtimeNotices)
+    run.controller.signal.throwIfAborted()
+    if (result.stopReason !== 'complete') {
+      await this.addActivity(run, {
+        activityType: 'status',
+        title: 'Runtime stopped before normal completion',
+        detail:
+          result.stopReason === 'max-steps'
+            ? 'The runtime reached its configured step limit.'
+            : 'The runtime completed without a more specific stop reason.',
+        status: 'success'
+      })
+    }
+    run.controller.signal.throwIfAborted()
+    if (!assistantItem) {
+      await this.addAssistantMessage(run, 'The CLI completed without returning a text response.')
+    }
+    run.controller.signal.throwIfAborted()
+    if (runtime.sessionCompatibilityId !== undefined && result.sessionId) {
+      if (containsProtectedRuntimeValue(result.sessionId)) {
+        throw new Error(
+          'The runtime exposed a protected CLI environment value through its session identifier'
+        )
+      }
+      const persistedSessionId = result.sessionId
+      const sessionCompatibilityId = runtime.sessionCompatibilityId
       await this.store.mutateTask(run.taskId, (mutable) => {
+        run.controller.signal.throwIfAborted()
         mutable.runtimeSessions ??= {}
         mutable.runtimeSessions[provider.id] = {
-          adapter,
+          adapterId: runtime.adapterId,
+          sessionCompatibilityId,
           sessionId: persistedSessionId,
           providerRevision: provider.updatedAt,
           workspacePath,
@@ -1427,25 +1867,10 @@ export class RunManager {
           updatedAt: nowIso()
         }
       })
-    }
-    if (usage) {
-      await this.addActivity(run, {
-        activityType: 'status',
-        title: 'Usage',
-        detail: formatCliUsage(usage),
-        status: 'success'
-      })
-    }
-    if (diagnostics.trim()) {
-      await this.addActivity(run, {
-        activityType: 'diagnostic',
-        title: 'CLI diagnostics',
-        detail: diagnostics.trim(),
-        status: 'success'
-      })
-    }
-    if (!assistantItem) {
-      await this.addAssistantMessage(run, 'The CLI completed without returning a text response.')
+      if (run.controller.signal.aborted) {
+        await clearSavedSession()
+        run.controller.signal.throwIfAborted()
+      }
     }
   }
 
@@ -1456,7 +1881,9 @@ export class RunManager {
     conversation: ConversationItem[],
     checkpoint: PortableJsonValue | undefined
   ): Promise<void> {
+    run.controller.signal.throwIfAborted()
     await this.store.mutateTask(run.taskId, (mutable) => {
+      run.controller.signal.throwIfAborted()
       mutable.modelSessions ??= {}
       mutable.modelSessions[provider.id] = {
         adapterId,
@@ -1473,6 +1900,7 @@ export class RunManager {
         updatedAt: nowIso()
       }
     })
+    run.controller.signal.throwIfAborted()
   }
 
   private async addModelUsage(run: ActiveRun, usage: TokenUsage): Promise<void> {
@@ -1480,6 +1908,28 @@ export class RunManager {
       activityType: 'status',
       title: 'Usage',
       detail: formatTokenUsage(usage),
+      status: 'success'
+    })
+  }
+
+  private async addRuntimeNotices(
+    run: ActiveRun,
+    notices: readonly ProviderNotice[]
+  ): Promise<void> {
+    if (!notices.length) return
+    const detail = notices
+      .map((notice) => {
+        const retry = notice.retry
+          ? ` (retry ${notice.retry.attempt}, ${notice.retry.delayMs} ms)`
+          : ''
+        return `[${notice.level}] ${notice.code}${retry}\n${notice.message}`
+      })
+      .join('\n\n')
+      .slice(0, 100_000)
+    await this.addActivity(run, {
+      activityType: 'diagnostic',
+      title: 'Runtime notices',
+      detail,
       status: 'success'
     })
   }
@@ -1499,91 +1949,55 @@ export class RunManager {
     return item
   }
 
-  private async upsertCliActivity(
-    run: ActiveRun,
-    activity: CliActivity,
-    runtimeActivities: Map<string, string>
-  ): Promise<ActivityItem> {
-    const runtimeId = activity.runtimeId
-    const existingItemId = runtimeId
-      ? runtimeActivities.get(runtimeId)
-      : undefined
-    if (!existingItemId) {
-      const item = await this.addActivity(run, {
-        activityType: activity.activityType,
-        title: activity.title,
-        detail: activity.detail,
-        status: activity.status,
-        ...(runtimeId ? { callId: runtimeId } : {})
-      })
-      if (runtimeId) runtimeActivities.set(runtimeId, item.id)
-      return item
-    }
-
-    const updated = await this.store.updateItem(
-      run.taskId,
-      existingItemId,
-      (item) => {
-        if (item.kind !== 'activity') {
-          throw new Error('CLI runtime activity identity resolved to a message')
-        }
-        if (
-          item.activityType !== 'command' ||
-          activity.activityType !== 'tool'
-        ) {
-          item.activityType = activity.activityType
-        }
-        if (activity.detail !== undefined) item.detail = activity.detail
-        item.status = activity.status
-      }
-    )
-    if (updated.kind !== 'activity') {
-      throw new Error('CLI runtime activity update produced a message')
-    }
-    this.emit({
-      type: 'item-updated',
-      taskId: run.taskId,
-      runId: run.id,
-      item: updated
-    })
-    return updated
-  }
-
   private async finalizeCliActivities(
     run: ActiveRun,
-    runtimeActivityItems: ReadonlySet<string>,
+    runtimeActivitySnapshots: ReadonlyMap<string, ActivityItem>,
     status: 'success' | 'error',
     detail?: string
   ): Promise<void> {
-    for (const itemId of runtimeActivityItems) {
-      const current = this.store
-        .getTask(run.taskId)
-        .items.find((item) => item.id === itemId)
-      if (
-        current?.kind !== 'activity' ||
-        !['pending', 'running'].includes(current.status)
-      ) {
-        continue
-      }
-      const updated = await this.store.updateItem(
-        run.taskId,
-        itemId,
-        (item) => {
-          if (
-            item.kind !== 'activity' ||
-            !['pending', 'running'].includes(item.status)
-          ) {
-            return
-          }
-          item.status = status
-          if (detail) {
-            item.detail = item.detail
-              ? `${item.detail}\n\n${detail}`
-              : detail
-          }
-        }
+    if (!runtimeActivitySnapshots.size) return
+    const snapshotsByItemId = new Map(
+      [...runtimeActivitySnapshots.values()].map((snapshot) => [
+        snapshot.id,
+        snapshot
+      ])
+    )
+    const hasOpenActivity = this.store
+      .getTask(run.taskId)
+      .items.some(
+        (item) =>
+          item.kind === 'activity' &&
+          snapshotsByItemId.has(item.id) &&
+          ['pending', 'running'].includes(item.status)
       )
-      if (updated.kind !== 'activity') continue
+    if (!hasOpenActivity) return
+
+    const updatedItems: ActivityItem[] = []
+    await this.store.mutateTask(run.taskId, (task) => {
+      for (const item of task.items) {
+        if (
+          item.kind !== 'activity' ||
+          !['pending', 'running'].includes(item.status)
+        ) {
+          continue
+        }
+        const snapshot = snapshotsByItemId.get(item.id)
+        if (!snapshot) continue
+        if (snapshot.detail === undefined) {
+          delete item.detail
+        } else {
+          item.detail = snapshot.detail
+        }
+        item.status = status
+        if (detail) {
+          item.detail = item.detail
+            ? `${item.detail}\n\n${detail}`
+            : detail
+        }
+        updatedItems.push(structuredClone(item))
+      }
+    })
+    for (const updated of updatedItems) {
       this.emit({
         type: 'item-updated',
         taskId: run.taskId,
@@ -1651,6 +2065,15 @@ function statusTransitionToRunning(item: ActivityItem): void {
   if (item.activityType === 'approval') item.activityType = item.toolName === 'run_command' ? 'command' : 'tool'
 }
 
+function agentActivityType(
+  kind: AgentActivityKind
+): ActivityItem['activityType'] {
+  if (kind === 'command') return 'command'
+  if (kind === 'diagnostic') return 'diagnostic'
+  if (kind === 'plan' || kind === 'reasoning') return 'status'
+  return 'tool'
+}
+
 const BUILTIN_MODEL_PROTOCOLS: Readonly<
   Record<ApiProvider['kind'], AiSdkProtocol>
 > = Object.freeze({
@@ -1669,12 +2092,62 @@ const BUILTIN_MODEL_ADAPTER_IDS: Readonly<
   'openai-compatible': 'openai.compatible'
 })
 
-export function createBuiltinModelAdapterRegistry(): AdapterRegistry {
-  const registry = new AdapterRegistry()
+function registerBuiltinModelAdapters(
+  registry: AdapterRegistry
+): AdapterRegistry {
   for (const protocol of Object.values(BUILTIN_MODEL_PROTOCOLS)) {
     registry.registerModel(new AiSdkModelAdapter(protocol))
   }
   return registry
+}
+
+function requiredCliInvocationAuthorizer(
+  authorizeInvocation?: CliInvocationAuthorizer
+): CliInvocationAuthorizer {
+  return (
+    authorizeInvocation ??
+    (async () => {
+      throw new Error('A main-process CLI invocation authorizer is required')
+    })
+  )
+}
+
+function registerBuiltinAgentRuntimeAdapters(
+  registry: AdapterRegistry,
+  authorizeInvocation?: CliInvocationAuthorizer
+): AdapterRegistry {
+  for (const adapter of createBuiltInCliRuntimeAdapters(
+    requiredCliInvocationAuthorizer(authorizeInvocation)
+  )) {
+    registry.registerAgentRuntime(adapter)
+  }
+  return registry
+}
+
+export function createBuiltinModelAdapterRegistry(): AdapterRegistry {
+  return registerBuiltinModelAdapters(new AdapterRegistry())
+}
+
+export function createBuiltinAgentRuntimeAdapterRegistry(
+  authorizeInvocation?: CliInvocationAuthorizer
+): AdapterRegistry {
+  return registerBuiltinAgentRuntimeAdapters(
+    new AdapterRegistry(),
+    authorizeInvocation
+  )
+}
+
+/**
+ * Compose every source-reviewed built-in adapter in one registry. A single
+ * namespace makes model/runtime id collisions fail during startup.
+ */
+export function createBuiltinAdapterRegistry(
+  authorizeInvocation?: CliInvocationAuthorizer
+): AdapterRegistry {
+  return registerBuiltinAgentRuntimeAdapters(
+    registerBuiltinModelAdapters(new AdapterRegistry()),
+    authorizeInvocation
+  )
 }
 
 /**
@@ -1688,15 +2161,60 @@ export function createRegisteredModelRuntimeFactory(
 ): ModelRuntimeFactory {
   return (provider) => {
     const binding = resolveBinding(structuredClone(provider))
-    const adapter = registry.requireModel(binding.adapterId)
+    const adapterId = binding.adapterId
+    const adapter = registry.requireModel(adapterId)
+    const config = adapter.validateConfig(binding.config)
+    registry.requireModel(adapterId)
     return {
       adapter,
-      config: adapter.validateConfig(binding.config)
+      adapterId,
+      config
     }
   }
 }
 
-function builtinModelBinding(provider: ApiProvider): ModelAdapterBinding {
+/**
+ * Bind statically registered, reviewed agent runtimes to persisted CLI
+ * profiles. Provider state selects only a registered id and data config; it
+ * never supplies a module path or executable code to load.
+ */
+export function createRegisteredAgentRuntimeFactory(
+  registry: AdapterRegistry,
+  resolveBinding: AgentRuntimeBindingResolver
+): AgentRuntimeFactory {
+  return (provider) => {
+    const binding = resolveBinding(structuredClone(provider))
+    const adapterId = binding.adapterId
+    const sessionCompatibilityId = binding.sessionCompatibilityId
+    if (
+      sessionCompatibilityId !== undefined &&
+      (typeof sessionCompatibilityId !== 'string' ||
+        sessionCompatibilityId.length < 1 ||
+        sessionCompatibilityId.length > 200)
+    ) {
+      throw new Error(
+        'Agent runtime session compatibility ids must contain 1-200 characters'
+      )
+    }
+    const adapter = registry.requireAgentRuntime(adapterId)
+    const config = adapter.validateConfig(binding.config)
+    registry.requireAgentRuntime(adapterId)
+    return {
+      adapter,
+      adapterId,
+      config,
+      ...(sessionCompatibilityId === undefined
+        ? {}
+        : {
+            sessionCompatibilityId
+          })
+    }
+  }
+}
+
+export function resolveBuiltinModelAdapterBinding(
+  provider: ApiProvider
+): ModelAdapterBinding {
   const protocol = BUILTIN_MODEL_PROTOCOLS[provider.kind]
   return {
     adapterId: BUILTIN_MODEL_ADAPTER_IDS[provider.kind],
@@ -1712,9 +2230,25 @@ function builtinModelBinding(provider: ApiProvider): ModelAdapterBinding {
   }
 }
 
+export function resolveBuiltinAgentRuntimeBinding(
+  provider: CliProvider
+): AgentRuntimeBinding {
+  const binding =
+    BUILT_IN_CLI_RUNTIME_BINDINGS[provider.cliAdapter ?? 'generic']
+  return {
+    adapterId: binding.adapterId,
+    config: structuredClone(provider),
+    ...('sessionCompatibilityId' in binding
+      ? {
+          sessionCompatibilityId: binding.sessionCompatibilityId
+        }
+      : {})
+  }
+}
+
 const BUILTIN_MODEL_RUNTIME_FACTORY = createRegisteredModelRuntimeFactory(
   createBuiltinModelAdapterRegistry(),
-  builtinModelBinding
+  resolveBuiltinModelAdapterBinding
 )
 
 export function createModelRuntime(
@@ -1723,6 +2257,15 @@ export function createModelRuntime(
   return BUILTIN_MODEL_RUNTIME_FACTORY(
     provider
   ) as ModelRuntime<AiSdkAdapterConfig>
+}
+
+export function createBuiltinAgentRuntimeFactory(
+  authorizeInvocation?: CliInvocationAuthorizer
+): AgentRuntimeFactory {
+  return createRegisteredAgentRuntimeFactory(
+    createBuiltinAgentRuntimeAdapterRegistry(authorizeInvocation),
+    resolveBuiltinAgentRuntimeBinding
+  )
 }
 
 function matchingModelSession(
@@ -2453,18 +2996,6 @@ function boundedCliText(value: string, limit: number): string {
   return `${value.slice(0, Math.max(0, limit - marker.length))}${marker}`
 }
 
-function formatCliUsage(usage: CliUsage): string {
-  const parts = [
-    usage.inputTokens === undefined ? undefined : `${usage.inputTokens} input`,
-    usage.outputTokens === undefined ? undefined : `${usage.outputTokens} output`,
-    usage.cachedInputTokens === undefined ? undefined : `${usage.cachedInputTokens} cached`,
-    usage.reasoningTokens === undefined ? undefined : `${usage.reasoningTokens} reasoning`,
-    usage.totalTokens === undefined ? undefined : `${usage.totalTokens} total`,
-    usage.costUsd === undefined ? undefined : `$${usage.costUsd.toFixed(4)}`
-  ].filter((part): part is string => Boolean(part))
-  return parts.length ? parts.join(' · ') : 'The runtime reported usage without token details.'
-}
-
 function mergeTokenUsage(
   current: TokenUsage | undefined,
   next: TokenUsage | undefined
@@ -2477,7 +3008,8 @@ function mergeTokenUsage(
     'cachedInputTokens',
     'cacheWriteInputTokens',
     'reasoningTokens',
-    'totalTokens'
+    'totalTokens',
+    'costUsd'
   ]
   for (const key of keys) {
     const value = next[key]
@@ -2495,7 +3027,8 @@ function formatTokenUsage(usage: TokenUsage): string {
       ? undefined
       : `${usage.cacheWriteInputTokens} cache write`,
     usage.reasoningTokens === undefined ? undefined : `${usage.reasoningTokens} reasoning`,
-    usage.totalTokens === undefined ? undefined : `${usage.totalTokens} total`
+    usage.totalTokens === undefined ? undefined : `${usage.totalTokens} total`,
+    usage.costUsd === undefined ? undefined : `$${usage.costUsd.toFixed(4)}`
   ].filter((part): part is string => Boolean(part))
   return parts.length ? parts.join(' · ') : 'The provider reported usage without token details.'
 }

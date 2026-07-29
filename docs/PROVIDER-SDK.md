@@ -1,20 +1,57 @@
 # Provider and Runtime SDK
 
-Ground’s adapter contracts are experimental internal TypeScript interfaces, not a
-published package or stable third-party SDK. They live under `src/main/agent/` and
-may change before the first public alpha.
+Ground’s provider-neutral adapter contracts have an explicitly versioned public
+entry point and a publishable package source under `packages/adapter-sdk/`. The
+canonical TypeScript source remains in `src/main/agent/`; the package build compiles
+that source into a self-contained CommonJS distribution with declarations rather
+than maintaining a second copy. The provisional npm manifest is not evidence that
+the package name has been published or that its scope is available.
 
 There are two extension surfaces because “a model” and “a coding agent runtime” do
 not have the same authority.
 
+## Package and conformance suite
+
+The pure `src/main/agent/sdk.ts` entry exports API version 1 contracts,
+capabilities, normalized event validators, typed errors, registry primitives, and
+framework-independent conformance helpers. It intentionally excludes Electron,
+the production AI SDK adapter, CLI implementations, and workspace authority.
+
+Build and verify the exact publishable surface with:
+
+```bash
+npm run adapter-sdk:build
+npm run adapter-sdk:pack-check
+```
+
+The pack check permits only compiled JavaScript, declarations, package metadata,
+the SDK README, and the MIT license. It installs the generated tarball into a clean
+temporary consumer and imports it through its declared package export. Normal
+`npm run verify` includes this check so a repo-relative import or accidental
+production-only dependency fails CI.
+
+`runModelAdapterConformance` and `runAgentRuntimeAdapterConformance` return
+versioned reports without depending on a test framework. Their `assert...`
+counterparts throw `AdapterConformanceError`. A fixture supplies a mocked adapter,
+one valid configuration, at least one invalid configuration, and optionally a
+deterministic request and secret resolver. The suite checks inspection descriptors,
+complete capabilities, normalized lifecycle/order, a unique terminal event, and
+declared pre-start plus mid-stream cancellation.
+
+`AgentRuntimeEventReducer.push(raw)` is also the incremental production validator
+for third-party runtime output. It returns a detached validated event and bounds
+event count, identifiers, assistant/activity text, notices, token usage, and
+reported USD cost. `finish()` requires one `runtime.completed`, a stable session,
+and no open activity.
+
 ## What is wired today
 
-The desktop resolves every built-in model adapter through a source-trusted
-`AdapterRegistry` and an injected `ModelRuntimeFactory`. Registration is static:
-the adapter is reviewed, compiled, and shipped with Ground. Ground does not scan
-the filesystem, install provider packages, or load remote adapter code at runtime.
-Duplicate IDs, unknown IDs, kind mismatches, and invalid adapter configuration fail
-before a model stream starts.
+The desktop resolves every built-in model and agent runtime through one
+source-trusted `AdapterRegistry` and injected model/runtime factories.
+Registration is static: the adapter is reviewed, compiled, and shipped with
+Ground. Ground does not scan the filesystem, install provider packages, or load
+remote adapter code at runtime. Duplicate IDs across either adapter kind, unknown
+IDs, kind mismatches, and invalid configuration fail before a stream starts.
 
 Two no-code connection paths cover most models:
 
@@ -35,11 +72,27 @@ OpenAI-compatible endpoint must genuinely support the advertised tool-call shape
 and support remains model-dependent. External CLIs do not receive Ground-hosted
 MCP tools—their own runtime configuration owns any MCP integrations.
 
-`AgentRuntimeAdapter` and agent-runtime registration are contract scaffolding, not
-the current CLI composition path. Codex, Claude, Gemini, and Generic CLI profiles
-currently use the bounded launcher and parsers in `src/main/providers/cli.ts`.
-Wiring source-registered runtime adapters through the desktop composition remains
-future work.
+Codex, Claude, Gemini, and Generic CLI profiles resolve to the built-in runtime IDs
+`openai.codex-cli`, `anthropic.claude-code`, `google.gemini-cli`, and
+`ground.cli.generic`. Their adapters delegate to the bounded launcher and parsers
+in `src/main/providers/cli.ts`, but all emitted objects cross the canonical runtime
+reducer before persistence or presentation. Native session resume binds both the
+adapter ID and a separate compatibility ID; Generic CLI has no compatibility ID
+and never persists an opaque session. Incompatible records are removed before
+prompt construction. Compatible records are deleted before launch as one-attempt
+leases and replaced only by a validated terminal session.
+
+The desktop projection also treats registered adapter output as untrusted.
+Configured CLI environment values are redacted across assistant-delta boundaries
+and from activity/notice text, provider activity IDs are replaced with opaque
+Ground IDs, and protected values in model/session identity fail closed. Built-in
+CLI adapters redact inherited sensitive environment values at their parser
+boundary as well. This defense in depth does not permit an adapter to emit secrets:
+resolve them as late as possible, never log or place them in events, and add
+negative reflection tests. For model adapters, Ground stream-redacts credentials
+resolved before output from successful text and notices; reflected values in tool
+arguments, provider state, checkpoints, or response identity fail the run. A
+credential request after adapter output begins is rejected.
 
 ## Static model registration
 
@@ -77,6 +130,26 @@ The factory clones the renderer-safe provider profile, resolves exactly one
 registered model adapter, and calls that adapter’s `validateConfig` before
 returning a runtime. Credential values are still resolved indirectly inside the
 main-process run; the registration must pass only the endpoint-scoped reference.
+
+Agent runtimes use the parallel `createRegisteredAgentRuntimeFactory`. Its binding
+selects a registered runtime ID, data-only configuration, and an optional
+`sessionCompatibilityId`. `RunManager` validates every event with
+`AgentRuntimeEventReducer`, persists only a fully compatible session, and never
+accepts a renderer-selected module path:
+
+```ts
+const runtimeAdapters = new AdapterRegistry().registerAgentRuntime(
+  new ExampleCodingCliAdapter()
+)
+const agentRuntimeFactory = createRegisteredAgentRuntimeFactory(
+  runtimeAdapters,
+  (profile) => ({
+    adapterId: 'example.coding-cli',
+    config: profile,
+    sessionCompatibilityId: 'example-session-v1'
+  })
+)
+```
 
 This is an integration seam, not a stable binary plugin ABI. A new protocol can
 reuse the existing endpoint/model/credential profile envelope in a downstream
@@ -131,7 +204,10 @@ observability, not evidence that Ground approved or denied it.
 Runtime adapters must enforce independent limits for normalized text, total process
 stdout/stderr, event count, line/event fields, notices, and session identifiers.
 Cancellation must work before executable resolution, before spawn, and during the
-stream.
+stream. Ground races each iterator read against the run signal, calls `return()`
+best effort, rechecks cancellation around every canonical event, and compensates
+terminal continuation writes if Stop lands during persistence. An adapter must
+still stop its transport and descendants promptly.
 
 ## Capabilities
 
@@ -150,8 +226,8 @@ streaming, strict schemas, structured output, reasoning summaries, opaque-state
 replay, media input, usage, discovery, continuation, cancellation, runtime
 activities, and permission ownership.
 
-Capability descriptors are still an internal contract; the current provider form
-does not perform live model-capability negotiation. Its tools toggle,
+Capability descriptors are part of the versioned adapter contract, but the current
+provider form does not perform live model-capability negotiation. Its tools toggle,
 context-window estimate, maximum output tokens, and optional reasoning effort are
 explicit user configuration. Leave provider-specific generation controls unset
 unless the selected model/protocol is known to support them. The current managed
@@ -191,6 +267,8 @@ untrusted.
 - Adapter configuration must be validated before use.
 - Persist only a secret reference, never the credential value.
 - Resolve the credential in the main process immediately before the request.
+- Resolve every credential before yielding the first event. Ground rejects late
+  resolution so one immutable redaction boundary covers the complete stream.
 - Bind saved credentials to the provider ID, protocol, and canonical endpoint
   through an opaque reference. Write a new-boundary secret before profile
   persistence and garbage-collect the old reference only afterward.
@@ -198,10 +276,14 @@ untrusted.
   strings, and fragments.
 - Redact authorization headers, prompt content, tool results, and provider state
   from logs by default.
+- Treat successful response content as untrusted reflection. Never place a
+  credential in text, notices, tool calls, provider state, checkpoints, or IDs
+  even though Ground applies an independent projection boundary.
 
 ## Contract tests
 
-Every model adapter should share fixtures for:
+Every model adapter must pass the package conformance suite with a mocked transport
+and should add protocol-specific fixtures for:
 
 - text and reasoning streaming;
 - split and parallel tool calls;
@@ -212,7 +294,8 @@ Every model adapter should share fixtures for:
 - mid-stream failure with partial-output metadata; and
 - exactly one terminal response.
 
-Every runtime adapter should cover:
+Every runtime adapter must pass the package conformance suite with a mocked process
+and should additionally cover:
 
 - executable resolution and argv construction;
 - prompt transport;

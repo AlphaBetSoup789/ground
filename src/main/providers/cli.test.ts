@@ -1,14 +1,18 @@
 import { realpath } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
-import type { CliProvider } from '../../shared/types'
+import type { CliAdapter, CliProvider } from '../../shared/types'
+import { CLI_RUNTIME_ADAPTER_IDS } from '../cli-runtime-bindings'
 import { createProcessLaunchEnvelope } from '../process-launch'
 import {
+  assertValidCliSessionId,
   expandCliArgs,
   parseCliRuntimeEvent,
   runCli,
   safeCliEnvironment,
-  type CliInvocationAuthorizer
+  type CliInvocationAuthorizer,
+  type CliInvocationOptions,
+  type CliRunOptions
 } from './cli'
 
 function provider(overrides: Partial<CliProvider> = {}): CliProvider {
@@ -32,7 +36,17 @@ const authorizeFixture: CliInvocationAuthorizer = async (request) => ({
   launch: await createProcessLaunchEnvelope(request.command),
   cwd: await realpath(request.cwd)
 })
-const REDACTION_MARKER = '█'.repeat(5)
+const REDACTION_MARKER = '█'.repeat(4)
+
+function runOptions(
+  adapter: CliAdapter = 'generic',
+  overrides: CliInvocationOptions = {}
+): CliRunOptions {
+  return {
+    ...overrides,
+    runtimeAdapterId: CLI_RUNTIME_ADAPTER_IDS[adapter]
+  }
+}
 
 describe('CLI adapter', () => {
   it('expands each argv entry without invoking a shell', () => {
@@ -61,7 +75,7 @@ describe('CLI adapter', () => {
         },
         onDiagnostic: () => undefined
       },
-      {},
+      runOptions(),
       authorizeFixture
     )
     expect(output).toBe('Received: hello')
@@ -81,7 +95,7 @@ describe('CLI adapter', () => {
         },
         onDiagnostic: () => undefined
       },
-      {},
+      runOptions(),
       authorizeFixture
     )
     expect(output).toBe('Received: hello')
@@ -106,7 +120,7 @@ describe('CLI adapter', () => {
         },
         onDiagnostic: () => undefined
       },
-      {},
+      runOptions(),
       authorizeFixture
     )
     expect(output).toBe('Received 🌱: hello')
@@ -125,7 +139,7 @@ describe('CLI adapter', () => {
           onText: () => undefined,
           onDiagnostic: () => undefined
         },
-        {},
+        runOptions(),
         authorizeFixture
       )
     ).rejects.toThrow(/text output exceeded/i)
@@ -144,7 +158,8 @@ describe('CLI adapter', () => {
         {
           onText: () => undefined,
           onDiagnostic: () => undefined
-        }
+        },
+        runOptions()
       )
     ).rejects.toMatchObject({ name: 'AbortError' })
   })
@@ -171,7 +186,10 @@ describe('CLI adapter', () => {
         process.cwd(),
         new AbortController().signal,
         { onText: () => undefined, onDiagnostic: () => undefined },
-        { mode: 'agent', sessionId: 'session-1' },
+        runOptions('claude', {
+          mode: 'agent',
+          sessionId: 'session-1'
+        }),
         authorize
       )
     ).rejects.toThrow('authorization stopped for inspection')
@@ -179,6 +197,8 @@ describe('CLI adapter', () => {
     expect(authorize).toHaveBeenCalledTimes(1)
     const request = authorize.mock.calls[0]?.[0]
     expect(request?.invocationSha256).toMatch(/^[a-f0-9]{64}$/)
+    expect(request?.runtimeAdapterId).toBe('anthropic.claude-code')
+    expect(request?.cliAdapter).toBe('claude')
     expect(request?.displayArgs).toContain('--model=model-x')
     expect(request?.displayArgs).toContain(`--workspace=${process.cwd()}`)
     expect(request?.displayArgs.join('\n')).toContain('<prompt omitted;')
@@ -190,6 +210,59 @@ describe('CLI adapter', () => {
       transport: 'argument',
       byteLength: Buffer.byteLength(secretPrompt)
     })
+  })
+
+  it('forwards a delegated runtime identity and rejects a forged built-in dialect pair', async () => {
+    const authorize = vi.fn<CliInvocationAuthorizer>(async () => {
+      throw new Error('authorization stopped for inspection')
+    })
+    const generic = provider({ cliAdapter: 'generic' })
+
+    await expect(
+      runCli(
+        generic,
+        'Inspect this workspace.',
+        process.cwd(),
+        new AbortController().signal,
+        { onText: () => undefined, onDiagnostic: () => undefined },
+        { runtimeAdapterId: 'community.example-runtime' },
+        authorize
+      )
+    ).rejects.toThrow('authorization stopped for inspection')
+    expect(authorize.mock.calls[0]?.[0]).toMatchObject({
+      runtimeAdapterId: 'community.example-runtime',
+      cliAdapter: 'generic'
+    })
+
+    authorize.mockClear()
+    await expect(
+      runCli(
+        generic,
+        'Inspect this workspace.',
+        process.cwd(),
+        new AbortController().signal,
+        { onText: () => undefined, onDiagnostic: () => undefined },
+        { runtimeAdapterId: 'openai.codex-cli' },
+        authorize
+      )
+    ).rejects.toThrow(/runtime adapter does not match/i)
+    expect(authorize).not.toHaveBeenCalled()
+  })
+
+  it('rejects an omitted runtime identity before native authorization', async () => {
+    const authorize = vi.fn(authorizeFixture)
+    await expect(
+      runCli(
+        provider(),
+        'Inspect this workspace.',
+        process.cwd(),
+        new AbortController().signal,
+        { onText: () => undefined, onDiagnostic: () => undefined },
+        {} as CliRunOptions,
+        authorize
+      )
+    ).rejects.toThrow(/runtime adapter identity is required/i)
+    expect(authorize).not.toHaveBeenCalled()
   })
 
   it('reuses an stdin launch identity across prompt contents but binds argument prompts', async () => {
@@ -205,7 +278,7 @@ describe('CLI adapter', () => {
         process.cwd(),
         new AbortController().signal,
         { onText: () => undefined, onDiagnostic: () => undefined },
-        {},
+        runOptions(profile.cliAdapter ?? 'generic'),
         inspect
       ).catch(() => undefined)
     }
@@ -214,6 +287,7 @@ describe('CLI adapter', () => {
     await invoke(provider({ args: ['agent'], promptMode: 'stdin' }), 'second private prompt')
     expect(requests[0]?.prompt).toEqual({ transport: 'stdin' })
     expect(requests[1]?.prompt).toEqual({ transport: 'stdin' })
+    expect(requests[0]?.runtimeAdapterId).toBe('ground.cli.generic')
     expect(requests[0]?.invocationSha256).toBe(requests[1]?.invocationSha256)
 
     await invoke(
@@ -236,11 +310,20 @@ describe('CLI adapter', () => {
         process.cwd(),
         new AbortController().signal,
         { onText: () => undefined, onDiagnostic: () => undefined },
-        { sessionId: 'valid\n--dangerously-skip-permissions' },
+        runOptions('claude', {
+          sessionId: 'valid\n--dangerously-skip-permissions'
+        }),
         authorize
       )
     ).rejects.toThrow(/session identifier/i)
     expect(authorize).not.toHaveBeenCalled()
+  })
+
+  it('aligns native session identifiers to the canonical 200-character limit', () => {
+    expect(() => assertValidCliSessionId(`s${'a'.repeat(199)}`)).not.toThrow()
+    expect(() => assertValidCliSessionId(`s${'a'.repeat(200)}`)).toThrow(
+      /1-200/
+    )
   })
 
   it('enforces conservative known-runtime arguments and strips bypass flags', () => {
@@ -742,7 +825,7 @@ describe('CLI adapter', () => {
           },
           onDiagnostic: () => undefined
         },
-        {},
+        runOptions('codex'),
         authorizeFixture
       )
     } finally {
@@ -778,13 +861,15 @@ describe('CLI adapter', () => {
         },
         onDiagnostic: () => undefined
       },
-      {},
+      runOptions(),
       authorize,
       { ACME_AGENT_TOKEN: secret }
     )
 
     expect(authorize).toHaveBeenCalledWith(
       expect.objectContaining({
+        runtimeAdapterId: 'ground.cli.generic',
+        cliAdapter: 'generic',
         environmentVariables: ['ACME_AGENT_TOKEN'],
         environmentFingerprint: fingerprint
       })
@@ -812,7 +897,7 @@ describe('CLI adapter', () => {
           onText: () => undefined,
           onDiagnostic: () => undefined
         },
-        { sessionId: secret },
+        runOptions('codex', { sessionId: secret }),
         authorize,
         { ACME_AGENT_TOKEN: secret }
       )
@@ -846,7 +931,7 @@ describe('CLI adapter', () => {
           onDiagnostic: () => undefined,
           onSession
         },
-        {},
+        runOptions('codex'),
         authorizeFixture,
         { ACME_AGENT_TOKEN: secret }
       )
@@ -892,7 +977,7 @@ describe('CLI adapter', () => {
         onDiagnostic: () => undefined,
         onActivity: (activity) => activities.push(activity)
       },
-      {},
+      runOptions('codex'),
       authorizeFixture,
       {
         BOUNDARY_SECRET: boundarySecret,
@@ -952,7 +1037,7 @@ describe('CLI adapter', () => {
           diagnostic += value
         }
       },
-      {},
+      runOptions(),
       authorizeFixture,
       { ACME_AGENT_TOKEN: secret }
     )
@@ -990,7 +1075,7 @@ describe('CLI adapter', () => {
         },
         onDiagnostic: () => undefined
       },
-      {},
+      runOptions(),
       authorizeFixture,
       customEnvironment
     )
@@ -1010,26 +1095,29 @@ describe('CLI adapter', () => {
     ).toThrow(/invalid value/i)
   })
 
-  it('bounds text again after credential redaction expansion', async () => {
-    await expect(
-      runCli(
-        provider({
-          model: '',
-          args: ['-e', 'process.stdout.write("aaaa".repeat(150000))'],
-          environmentVariables: ['ACME_AGENT_TOKEN'],
-          environmentFingerprint: 'f'.repeat(64)
-        }),
-        'hello',
-        process.cwd(),
-        new AbortController().signal,
-        {
-          onText: () => undefined,
-          onDiagnostic: () => undefined
+  it('never expands durable text characters while redacting credentials', async () => {
+    let output = ''
+    await runCli(
+      provider({
+        model: '',
+        args: ['-e', 'process.stdout.write("aaaa".repeat(150000))'],
+        environmentVariables: ['ACME_AGENT_TOKEN'],
+        environmentFingerprint: 'f'.repeat(64)
+      }),
+      'hello',
+      process.cwd(),
+      new AbortController().signal,
+      {
+        onText: (delta) => {
+          output += delta
         },
-        {},
-        authorizeFixture,
-        { ACME_AGENT_TOKEN: 'aaaa' }
-      )
-    ).rejects.toThrow(/after credential redaction/i)
+        onDiagnostic: () => undefined
+      },
+      runOptions(),
+      authorizeFixture,
+      { ACME_AGENT_TOKEN: 'aaaa' }
+    )
+    expect(output).toHaveLength(600_000)
+    expect(output).not.toContain('aaaa')
   })
 })

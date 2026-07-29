@@ -427,7 +427,8 @@ describe('StateStore', () => {
       mutable.runStatus = 'awaiting-approval'
       mutable.runtimeSessions = {
         'ollama-local': {
-          adapter: 'codex',
+          adapterId: 'openai.codex-cli',
+          sessionCompatibilityId: 'codex',
           sessionId: 'native-session',
           providerRevision: timestamp,
           workspacePath: directory,
@@ -1059,7 +1060,8 @@ describe('StateStore', () => {
       ]
       task.runtimeSessions = {
         'ollama-local': {
-          adapter: 'codex',
+          adapterId: 'openai.codex-cli',
+          sessionCompatibilityId: 'codex',
           sessionId: 'native-session-authority',
           providerRevision: '2026-07-28T12:00:00.000Z',
           workspacePath: directory,

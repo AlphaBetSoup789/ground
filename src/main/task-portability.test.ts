@@ -51,7 +51,8 @@ function taskFixture(): Task {
     updatedAt: timestamp,
     runtimeSessions: {
       'provider-source-secret-id': {
-        adapter: 'codex',
+        adapterId: 'openai.codex-cli',
+        sessionCompatibilityId: 'codex',
         sessionId: 'native-cli-session-secret',
         providerRevision: 'native-provider-revision-secret',
         workspacePath,

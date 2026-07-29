@@ -189,6 +189,9 @@ export class ProviderService {
       existing = undefined
     }
     const newApiKey = draft.apiKey?.trim()
+    if (newApiKey && newApiKey.length < 4) {
+      throw new Error('API keys must contain at least 4 characters')
+    }
 
     let provider: ProviderProfile
     if (draft.kind !== 'cli') {

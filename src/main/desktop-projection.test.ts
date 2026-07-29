@@ -59,7 +59,8 @@ function stateTask(workspacePath: string): Task {
     updatedAt: timestamp,
     runtimeSessions: {
       'provider-1': {
-        adapter: 'codex' as const,
+        adapterId: 'openai.codex-cli',
+        sessionCompatibilityId: 'codex',
         sessionId: 'native-secret-session',
         providerRevision: timestamp,
         workspacePath,

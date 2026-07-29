@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react'
 import { PanelLeft, Settings2 } from 'lucide-react'
 import type {
   AppSnapshot,
@@ -10,6 +17,13 @@ import type {
 } from '../../shared/types'
 import { desktop } from './lib/desktop'
 import { readableError } from './lib/format'
+import {
+  NARROW_SIDEBAR_MEDIA_QUERY,
+  releaseFocusBeforeSidebarClose,
+  restoreFocusAfterSidebarClose,
+  shouldInertMainSurface,
+  type SidebarCloseFocusTarget
+} from './lib/sidebar-focus'
 import {
   applyRunEventEnvelope,
   reconcileSnapshotWithEvents
@@ -23,6 +37,10 @@ export default function App(): React.JSX.Element {
   const [snapshotError, setSnapshotError] = useState<string>()
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [narrowSidebarLayout, setNarrowSidebarLayout] = useState(() =>
+    window.matchMedia(NARROW_SIDEBAR_MEDIA_QUERY).matches
+  )
+  const mainSurfaceRef = useRef<HTMLElement>(null)
   const pendingRunEventsRef = useRef<DesktopRunEventEnvelope[]>([])
   const refreshQueueRef = useRef<Promise<void>>(Promise.resolve())
   const pendingRefreshesRef = useRef(0)
@@ -61,12 +79,45 @@ export default function App(): React.JSX.Element {
     }
   }, [])
 
-  const closeSidebar = useCallback(() => {
-    setSidebarOpen(false)
-    window.requestAnimationFrame(() => {
-      document.querySelector<HTMLButtonElement>('.sidebar-reopen')?.focus()
-    })
+  const closeSidebar = useCallback(
+    (focusTarget: SidebarCloseFocusTarget = 'reopen') => {
+      releaseFocusBeforeSidebarClose(document)
+      setSidebarOpen(false)
+      window.requestAnimationFrame(() => {
+        restoreFocusAfterSidebarClose(document, focusTarget)
+      })
+    },
+    []
+  )
+
+  useEffect(() => {
+    const media = window.matchMedia(NARROW_SIDEBAR_MEDIA_QUERY)
+    const updateLayout = (): void => {
+      setNarrowSidebarLayout(media.matches)
+    }
+    updateLayout()
+    media.addEventListener('change', updateLayout)
+    return () => media.removeEventListener('change', updateLayout)
   }, [])
+
+  const mainSurfaceInert = shouldInertMainSurface(
+    sidebarOpen,
+    narrowSidebarLayout
+  )
+
+  useLayoutEffect(() => {
+    const activeElement = document.activeElement
+    if (
+      !mainSurfaceInert ||
+      !activeElement ||
+      !mainSurfaceRef.current?.contains(activeElement)
+    ) {
+      return
+    }
+    document
+      .querySelector<HTMLInputElement>('#task-search')
+      ?.focus({ preventScroll: true })
+  }, [mainSurfaceInert])
 
   const refresh = useCallback((): Promise<void> => {
     pendingRefreshesRef.current += 1
@@ -150,14 +201,14 @@ export default function App(): React.JSX.Element {
       })
       try {
         await desktop.selectTask(taskId)
-        if (window.matchMedia('(max-width: 900px)').matches) {
-          setSidebarOpen(false)
+        if (narrowSidebarLayout) {
+          closeSidebar('task')
         }
       } catch (error) {
         showError(error)
       }
     },
-    [snapshot, showError]
+    [closeSidebar, narrowSidebarLayout, snapshot, showError]
   )
 
   const createTask = useCallback(
@@ -435,15 +486,17 @@ export default function App(): React.JSX.Element {
         <button
           className="sidebar-scrim"
           type="button"
-          onClick={() => setSidebarOpen(false)}
+          onClick={() => closeSidebar()}
           tabIndex={-1}
           aria-hidden="true"
         />
       )}
 
       <section
+        ref={mainSurfaceRef}
         className={`main-surface${sidebarOpen ? '' : ' sidebar-hidden'}`}
         aria-label="Current task"
+        inert={mainSurfaceInert}
       >
         {snapshot.recoveryNotice &&
           snapshot.recoveryNotice.id !== dismissedRecoveryId && (

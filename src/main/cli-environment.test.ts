@@ -5,7 +5,8 @@ import {
   cliEnvironmentSecretReference,
   normalizeCliEnvironmentVariableNames,
   prepareCliEnvironmentPlan,
-  resolveCliEnvironment
+  resolveCliEnvironment,
+  resolveCliEnvironmentWithSecretResolver
 } from './cli-environment'
 import type { SecretVault } from './secrets'
 
@@ -139,5 +140,50 @@ describe('CLI profile environments', () => {
     expect((vault.get as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(
       reference
     )
+  })
+
+  it('resolves and validates the same envelope through an async secret resolver', async () => {
+    const fingerprint = 'd'.repeat(64)
+    const storedProvider = provider(fingerprint)
+    const reference = cliEnvironmentSecretReference(storedProvider.id)
+    const resolver = {
+      resolve: vi.fn(async (candidate: string) => {
+        expect(candidate).toBe(reference)
+        return serializedEnvironment(fingerprint, {
+          ACME_AGENT_TOKEN: 'resolver-secret'
+        })
+      })
+    }
+
+    await expect(
+      resolveCliEnvironmentWithSecretResolver(resolver, storedProvider)
+    ).resolves.toEqual({
+      ACME_AGENT_TOKEN: 'resolver-secret'
+    })
+    expect(resolver.resolve).toHaveBeenCalledTimes(1)
+
+    resolver.resolve.mockResolvedValueOnce(
+      serializedEnvironment('e'.repeat(64), {
+        ACME_AGENT_TOKEN: 'resolver-secret'
+      })
+    )
+    await expect(
+      resolveCliEnvironmentWithSecretResolver(resolver, storedProvider)
+    ).rejects.toThrow(/no longer match/i)
+  })
+
+  it('does not consult a secret resolver for an environment-free profile', async () => {
+    const storedProvider = provider('', [])
+    delete storedProvider.environmentFingerprint
+    const resolver = {
+      resolve: vi.fn(async () => {
+        throw new Error('must not resolve')
+      })
+    }
+
+    await expect(
+      resolveCliEnvironmentWithSecretResolver(resolver, storedProvider)
+    ).resolves.toEqual({})
+    expect(resolver.resolve).not.toHaveBeenCalled()
   })
 })

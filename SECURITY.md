@@ -148,12 +148,15 @@ before the first supported release.
   identity and argument template. That configuration grant cannot authorize a run.
 - Immediately before every spawn, a separate native authorization binds the
   content-hashed launch identity, fully expanded raw argv, canonical working
-  directory, parser, adapter, prompt transport, profile environment-key set, and
-  opaque environment revision. The immutable launch envelope is revalidated again
-  before process creation. Changing an encrypted environment name or value changes
-  the revision and invalidates both configuration and invocation grants. An exact
-  fingerprint can be reused only within the current app session. Launch files
-  larger than 512 MB are rejected instead of receiving a metadata-only grant.
+  directory, parser dialect, actual source-registered runtime adapter ID, prompt
+  transport, profile environment-key set, and opaque environment revision. The
+  immutable launch envelope is revalidated again before process creation. A
+  custom reviewed adapter delegating to the same dialect receives a distinct
+  grant; built-in IDs cannot be paired with another dialect. Changing an encrypted
+  environment name or value changes the revision and invalidates both
+  configuration and invocation grants. An exact fingerprint can be reused only
+  within the current app session. Launch files larger than 512 MB are rejected
+  instead of receiving a metadata-only grant.
 - Argument-delivered prompt text is included in the raw argv digest but replaced
   by a byte-count/hash marker in the native dialog. Stdin prompt content is neither
   displayed nor included in the launch fingerprint; stdin is treated as data, so
@@ -171,8 +174,12 @@ before the first supported release.
   subprocess behavior; unrelated environment variables remain filtered. Optional
   profile variables are encrypted as one fingerprinted vault record; only names
   and the opaque revision enter persisted provider metadata. Values never enter
-  renderer snapshots or native dialogs and are redacted from text, diagnostics,
-  activities, and errors if the child echoes them.
+  renderer snapshots or native dialogs. The launcher redacts them from parsed
+  text, diagnostics, activities, and errors if the child echoes them. The
+  main-process runtime projection independently stream-redacts raw and JSON-escaped
+  configured values across assistant deltas, redacts activity/notice text,
+  replaces provider activity IDs with opaque IDs, and fails closed on a
+  protected-value-bearing runtime or session identity.
 - Custom profile variables cannot override executable-search, loader/interpreter,
   user/config-root, or temporary-root controls. Examples include `PATH`,
   `NODE_OPTIONS`, `LD_*`, `DYLD_*`, `HOME`, `USERPROFILE`, `XDG_*`, and
@@ -182,9 +189,16 @@ before the first supported release.
   fails closed before launch; an operating-system crash between the two separate
   files can require the user to re-enter the values.
 - Runtime text, total stdout/stderr, event count, event fields, notices, and session
-  identifiers are bounded before and after credential redaction; session
-  identifiers must use a restricted 1–256 character ASCII form. A limit breach
-  terminates the process and fails the run.
+  identifiers are bounded before and after credential redaction. Built-in and
+  canonical CLI session IDs use the same restricted 1–200 character form and
+  persist only behind an explicit compatibility identity. A compatible session is
+  consumed before launch and re-created only after validated completion, so a
+  failed, stopped, or crashed turn cannot be skipped by a later resume.
+- Successful model output is also a secret boundary. Ground stream-redacts
+  credentials resolved for the active request from assistant text and notices.
+  Credential-bearing tool arguments, provider state, checkpoints, or response
+  identity fail closed instead of entering tools, renderer events, or durable
+  continuation state.
 - App shutdown aborts every active run and waits up to a bounded shutdown window
   for its provider/process cleanup before Electron exits.
 

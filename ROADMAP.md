@@ -11,8 +11,8 @@ are not necessarily release-certified.
 - [x] Local Electron workspace with durable tasks and provider profiles
 - [x] Direct OpenAI-compatible/local endpoint
 - [x] Generic CLI transport and recognized Codex, Claude, and Gemini event parsers
-- [x] Provider-neutral model/runtime contracts and canonical event reducer
-- [x] Source-trusted static model-adapter registry and injectable runtime factory
+- [x] Provider-neutral model/runtime contracts and canonical event reducers
+- [x] Source-trusted static model/runtime registry and injectable factories
 - [x] Main-process renderer, workspace, endpoint, secret, and executable checks
 - [x] Bounded built-in file/search/full-write/localized-edit/command tools with
   side-effect approvals
@@ -47,11 +47,12 @@ are not necessarily release-certified.
   the desktop provider screen and managed run loop
 - [x] Persist canonical model/tool history, per-item provider attribution, and
   normalized cross-provider tool exchanges
-- [ ] Publish version-pinned API and CLI compatibility fixtures
+- [x] Publish version-pinned synthetic API-adapter and CLI-parser compatibility
+  fixtures with explicit provenance and package/declaration drift checks
 - [x] Document source-trusted static model-adapter registration without runtime
   provider-code loading
-- [ ] Wire the agent-runtime registry into desktop CLI composition and publish a
-  stable adapter package/conformance suite
+- [x] Wire the agent-runtime registry into desktop CLI composition and provide a
+  versioned, publishable adapter package plus deterministic conformance suite
 
 ### Safe coding loop
 

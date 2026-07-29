@@ -35,9 +35,21 @@ interface TimelineProps {
 }
 
 const TIMELINE_PAGE_SIZE = 200
+const TIMELINE_FOLLOW_DISTANCE_PX = 80
+
+export function shouldFollowTimeline(
+  viewport: Pick<HTMLElement, 'clientHeight' | 'scrollHeight' | 'scrollTop'>
+): boolean {
+  return (
+    viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <=
+    TIMELINE_FOLLOW_DISTANCE_PX
+  )
+}
 
 export function Timeline(props: TimelineProps): React.JSX.Element {
-  const bottomRef = useRef<HTMLDivElement>(null)
+  const timelineRef = useRef<HTMLElement>(null)
+  const followOutputRef = useRef(true)
+  const previousItemCountRef = useRef(props.task.items.length)
   const [visibleCount, setVisibleCount] = useState(TIMELINE_PAGE_SIZE)
   const lastItem = props.task.items.at(-1)
   const contentKey = useMemo(
@@ -51,17 +63,33 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
 
   useEffect(() => {
     setVisibleCount(TIMELINE_PAGE_SIZE)
+    followOutputRef.current = true
+    previousItemCountRef.current = props.task.items.length
   }, [props.task.id])
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: 'end' })
-  }, [contentKey])
+    const newUserMessage =
+      props.task.items.length > previousItemCountRef.current &&
+      lastItem?.kind === 'message' &&
+      lastItem.role === 'user'
+    if (newUserMessage) followOutputRef.current = true
+    previousItemCountRef.current = props.task.items.length
+
+    const timeline = timelineRef.current
+    if (timeline && followOutputRef.current) {
+      timeline.scrollTop = timeline.scrollHeight
+    }
+  }, [contentKey, lastItem, props.task.items.length])
 
   if (!props.task.items.length) {
     return (
       <section
+        ref={timelineRef}
         className="timeline timeline-empty"
         aria-label="Task conversation"
+        onScroll={(event) => {
+          followOutputRef.current = shouldFollowTimeline(event.currentTarget)
+        }}
       >
         <div className="empty-task">
           <div className="empty-task-icon">
@@ -108,12 +136,16 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
 
   return (
     <section
+      ref={timelineRef}
       className="timeline"
       role="log"
       aria-label="Task conversation"
       aria-live="polite"
       aria-relevant="additions"
       aria-busy={props.task.runStatus === 'running'}
+      onScroll={(event) => {
+        followOutputRef.current = shouldFollowTimeline(event.currentTarget)
+      }}
     >
       <div className="timeline-column">
         {props.task.items.some((item) => item.historyOnly) && (
@@ -230,7 +262,6 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
             Waiting for your approval
           </div>
         )}
-        <div ref={bottomRef} />
       </div>
     </section>
   )

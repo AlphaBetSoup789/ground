@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import type { ModelApiProvider } from '../shared/types'
 import {
+  AdapterIdentityDriftError,
   AdapterRegistry,
   DEFAULT_MODEL_CAPABILITIES,
   type ModelAdapter
 } from './agent'
 import {
   createBuiltinModelAdapterRegistry,
-  createRegisteredModelRuntimeFactory
+  createRegisteredModelRuntimeFactory,
+  type ModelAdapterBinding
 } from './run-manager'
 
 const provider: ModelApiProvider = {
@@ -84,5 +86,75 @@ describe('registered model runtime factory', () => {
     expect(() => factory(provider)).toThrow(
       'Custom adapter requires an endpoint'
     )
+  })
+
+  it('rejects identity drift during adapter-owned configuration validation', () => {
+    const adapter = customAdapter()
+    const validate = adapter.validateConfig.bind(adapter)
+    adapter.validateConfig = (value) => {
+      const config = validate(value)
+      Object.defineProperty(adapter, 'id', {
+        configurable: true,
+        value: 'community.drifted-protocol',
+        writable: true
+      })
+      return config
+    }
+    const factory = createRegisteredModelRuntimeFactory(
+      new AdapterRegistry().registerModel(adapter),
+      () => ({
+        adapterId: 'community.custom-protocol',
+        config: { endpoint: 'https://models.example.test/v1' }
+      })
+    )
+
+    expect(() => factory(provider)).toThrow(AdapterIdentityDriftError)
+  })
+
+  it('keeps an immutable registered identity snapshot in a constructed runtime', () => {
+    const adapter = customAdapter()
+    const factory = createRegisteredModelRuntimeFactory(
+      new AdapterRegistry().registerModel(adapter),
+      () => ({
+        adapterId: adapter.id,
+        config: { endpoint: 'https://models.example.test/v1' }
+      })
+    )
+    const runtime = factory(provider)
+    Object.defineProperty(adapter, 'id', {
+      configurable: true,
+      value: 'community.drifted-after-factory',
+      writable: true
+    })
+
+    expect(runtime.adapterId).toBe('community.custom-protocol')
+  })
+
+  it('captures binding identity before adapter validation mutates aliased config', () => {
+    const adapter = customAdapter()
+    const binding: ModelAdapterBinding = {
+      adapterId: adapter.id,
+      config: undefined
+    }
+    binding.config = binding
+    adapter.validateConfig = (value) => {
+      const aliased = value as ModelAdapterBinding
+      aliased.adapterId = 'community.other-protocol'
+      return { endpoint: 'https://models.example.test/v1' }
+    }
+    const registry = new AdapterRegistry()
+      .registerModel(adapter)
+      .registerModel({
+        ...customAdapter(),
+        id: 'community.other-protocol'
+      })
+    const runtime = createRegisteredModelRuntimeFactory(
+      registry,
+      () => binding
+    )(provider)
+
+    expect(binding.adapterId).toBe('community.other-protocol')
+    expect(runtime.adapter).toBe(adapter)
+    expect(runtime.adapterId).toBe('community.custom-protocol')
   })
 })

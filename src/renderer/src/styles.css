@@ -10,10 +10,14 @@
   --surface-soft: #24251f;
   --sidebar: #1c1d18;
   --border: rgba(239, 241, 224, 0.09);
+  --border-subtle: var(--border);
   --border-strong: rgba(239, 241, 224, 0.15);
   --text: #eeefe7;
+  --text-primary: var(--text);
   --text-soft: #b8bbae;
+  --text-secondary: var(--text-soft);
   --muted: #94988c;
+  --text-tertiary: var(--muted);
   --accent: #d8ff7d;
   --accent-strong: #b9e85d;
   --accent-ink: #18200d;

@@ -164,6 +164,74 @@ describe('persisted task lifecycle validation', () => {
     expect(() => JSON.stringify(parsed)).not.toThrow()
   })
 
+  it('normalizes legacy CLI sessions into adapter and compatibility identities', () => {
+    const legacy = parsePersistedState(
+      stateWithTask({
+        runtimeSessions: {
+          'cli-provider': {
+            adapter: 'codex',
+            sessionId: 'session-1',
+            providerRevision: '2026-07-28T12:00:00.000Z',
+            workspacePath: '/workspace',
+            mode: 'agent',
+            updatedAt: '2026-07-28T12:00:00.000Z'
+          }
+        }
+      })
+    )
+    expect(legacy.tasks[0]?.runtimeSessions?.['cli-provider']).toEqual({
+      adapterId: 'openai.codex-cli',
+      sessionCompatibilityId: 'codex',
+      sessionId: 'session-1',
+      providerRevision: '2026-07-28T12:00:00.000Z',
+      workspacePath: '/workspace',
+      mode: 'agent',
+      updatedAt: '2026-07-28T12:00:00.000Z'
+    })
+
+    const canonical = parsePersistedState(
+      stateWithTask({
+        runtimeSessions: {
+          'cli-provider': {
+            adapterId: 'community.runtime',
+            sessionCompatibilityId: 'format-v2',
+            sessionId: 'session-2',
+            providerRevision: '2026-07-28T12:00:00.000Z',
+            workspacePath: '/workspace',
+            mode: 'ask',
+            updatedAt: '2026-07-28T12:00:00.000Z'
+          }
+        }
+      })
+    )
+    expect(canonical.tasks[0]?.runtimeSessions?.['cli-provider']).toMatchObject({
+      adapterId: 'community.runtime',
+      sessionCompatibilityId: 'format-v2',
+      sessionId: 'session-2',
+      mode: 'ask'
+    })
+  })
+
+  it('drops native sessions outside the canonical 200-character boundary', () => {
+    const parsed = parsePersistedState(
+      stateWithTask({
+        runtimeSessions: {
+          'cli-provider': {
+            adapterId: 'community.runtime',
+            sessionCompatibilityId: 'format-v2',
+            sessionId: 's'.repeat(201),
+            providerRevision: '2026-07-28T12:00:00.000Z',
+            workspacePath: '/workspace',
+            mode: 'agent',
+            updatedAt: '2026-07-28T12:00:00.000Z'
+          }
+        }
+      })
+    )
+
+    expect(parsed.tasks[0]?.runtimeSessions).toEqual({})
+  })
+
   it('rejects malformed archive timestamps and archived active runs', () => {
     expect(() =>
       parsePersistedState(stateWithTask({ archivedAt: 'yesterday' }))

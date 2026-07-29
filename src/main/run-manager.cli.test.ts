@@ -12,6 +12,7 @@ import type {
 import { createProcessLaunchEnvelope } from './process-launch'
 import type { CliInvocationAuthorizer } from './providers/cli'
 import { RunManager } from './run-manager'
+import { BUILT_IN_CLI_RUNTIME_BINDINGS } from './cli-runtime-bindings'
 import { SecretVault } from './secrets'
 import { StateStore } from './store'
 
@@ -19,7 +20,7 @@ const authorizeFixture: CliInvocationAuthorizer = async (request) => ({
   launch: await createProcessLaunchEnvelope(request.command),
   cwd: await realpath(request.cwd)
 })
-const REDACTION_MARKER = '█'.repeat(5)
+const REDACTION_MARKER = '█'.repeat(4)
 
 const FIXTURE_SOURCE = `
 const dialect = process.argv.find((value) => value.startsWith('--dialect='))?.split('=')[1]
@@ -167,9 +168,11 @@ async function runCliFixture(
   await store.mutateTask(task.id, (mutable) => {
     mutable.providerId = provider.id
     if (options.savedSessionId && adapter !== 'generic') {
+      const binding = BUILT_IN_CLI_RUNTIME_BINDINGS[adapter]
       mutable.runtimeSessions = {
         [provider.id]: {
-          adapter,
+          adapterId: binding.adapterId,
+          sessionCompatibilityId: binding.sessionCompatibilityId,
           sessionId: options.savedSessionId,
           providerRevision: provider.updatedAt,
           workspacePath: workspace,
@@ -209,7 +212,11 @@ async function runCliFixture(
       if (
         event.type === 'item-added' &&
         event.item.kind === 'activity' &&
-        event.item.callId
+        event.item.callId &&
+        (
+          !options.stopAfterFirstRuntimeActivity ||
+          event.item.title === 'read_file'
+        )
       ) {
         resolveRuntimeActivity()
       }
@@ -254,7 +261,9 @@ describe('RunManager CLI activity lifecycle', () => {
     const run = await runCliFixture('codex')
     expect(run.terminal).toMatchObject({ type: 'run-completed' })
     const command = run.activities.filter(
-      (item) => item.callId === 'codex:command-1'
+      (item) =>
+        item.activityType === 'command' &&
+        item.title === 'npm test'
     )
     expect(command).toHaveLength(1)
     expect(command[0]).toMatchObject({
@@ -264,11 +273,18 @@ describe('RunManager CLI activity lifecycle', () => {
       status: 'success'
     })
     expect(
-      run.activities.find((item) => item.callId === 'codex:inspection-1')
+      run.activities.find((item) => item.title === 'inspect_workspace')
     ).toMatchObject({ title: 'inspect_workspace', status: 'success' })
     expect(
-      run.activities.filter((item) => item.callId === 'codex:turn')
+      run.activities.filter((item) => item.title === 'Codex turn')
     ).toHaveLength(1)
+    expect(
+      run.activities
+        .filter((item) => item.callId)
+        .every((item) =>
+          /^runtime-activity_[0-9a-f-]{36}$/u.test(item.callId as string)
+        )
+    ).toBe(true)
     expect(run.activities.some((item) => item.status === 'running')).toBe(false)
   })
 
@@ -276,7 +292,9 @@ describe('RunManager CLI activity lifecycle', () => {
     const run = await runCliFixture('gemini')
     expect(run.terminal).toMatchObject({ type: 'run-completed' })
     const command = run.activities.filter(
-      (item) => item.callId === 'gemini:shell-1'
+      (item) =>
+        item.activityType === 'command' &&
+        item.title === 'run_shell_command'
     )
     expect(command).toHaveLength(1)
     expect(command[0]).toMatchObject({
@@ -286,11 +304,11 @@ describe('RunManager CLI activity lifecycle', () => {
       status: 'success'
     })
     expect(
-      run.activities.find((item) => item.callId === 'gemini:read-1')
+      run.activities.find((item) => item.title === 'read_file')
     ).toMatchObject({ title: 'read_file', status: 'success' })
     expect(
       run.activities.find(
-        (item) => item.title === 'search_file' && item.callId === undefined
+        (item) => item.title === 'search_file'
       )
     ).toMatchObject({ status: 'success' })
     expect(run.activities.some((item) => item.status === 'running')).toBe(false)
@@ -302,10 +320,10 @@ describe('RunManager CLI activity lifecycle', () => {
     })
     expect(run.terminal).toMatchObject({ type: 'run-stopped' })
     expect(
-      run.activities.find((item) => item.callId === 'gemini:held-1')
+      run.activities.find((item) => item.title === 'read_file')
     ).toMatchObject({
       status: 'error',
-      detail: expect.stringMatching(/run stopped before/i)
+      detail: expect.stringMatching(/cancelled|stopped before/i)
     })
     expect(run.activities.some((item) => item.status === 'running')).toBe(false)
   })
@@ -322,9 +340,10 @@ describe('RunManager CLI activity lifecycle', () => {
     )
     expect(sensitiveActivity).toMatchObject({
       detail: expect.stringContaining(REDACTION_MARKER),
-      status: 'success'
+      status: 'success',
+      callId: expect.stringMatching(/^runtime-activity_[0-9a-f-]{36}$/u)
     })
-    expect(sensitiveActivity).not.toHaveProperty('callId')
+    expect(sensitiveActivity?.callId).not.toContain(secret)
     expect(JSON.stringify(run.task)).not.toContain(secret)
   })
 

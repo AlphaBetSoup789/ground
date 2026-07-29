@@ -53,6 +53,7 @@ function scriptedRuntime(
   } as unknown as ModelAdapter<AiSdkAdapterConfig>
   return () => ({
     adapter,
+    adapterId: adapter.id,
     config: {
       protocol: 'openai-compatible',
       baseUrl: 'http://127.0.0.1:11434/v1'
@@ -87,7 +88,7 @@ function credentialResolvingRuntime(
         })()
       }
     } as unknown as ModelAdapter<AiSdkAdapterConfig>
-    return { adapter, config }
+    return { adapter, adapterId: adapter.id, config }
   }
 }
 
@@ -121,7 +122,67 @@ function credentialFailingRuntime(
         })()
       }
     } as unknown as ModelAdapter<AiSdkAdapterConfig>
-    return { adapter, config }
+    return { adapter, adapterId: adapter.id, config }
+  }
+}
+
+function credentialReflectingRuntime(
+  events: (
+    secret: string,
+    request: ModelRequest
+  ) => AsyncIterable<ModelEvent>
+): ModelRuntimeFactory {
+  return (provider) => {
+    const config: AiSdkAdapterConfig = {
+      protocol: 'openai-compatible',
+      baseUrl: provider.baseUrl,
+      apiKeyRef: providerCredentialReferenceFor(provider)
+    }
+    const adapter = {
+      id: 'credential.reflection-test',
+      stream(
+        request: ModelRequest,
+        context: {
+          secrets: { resolve(reference: string): Promise<string> }
+        }
+      ): AsyncIterable<ModelEvent> {
+        return (async function* () {
+          const secret = await context.secrets.resolve(
+            config.apiKeyRef as string
+          )
+          yield* events(secret, request)
+        })()
+      }
+    } as unknown as ModelAdapter<AiSdkAdapterConfig>
+    return { adapter, adapterId: adapter.id, config }
+  }
+}
+
+function credentialRacingRuntime(): ModelRuntimeFactory {
+  return (provider) => {
+    const config: AiSdkAdapterConfig = {
+      protocol: 'openai-compatible',
+      baseUrl: provider.baseUrl,
+      apiKeyRef: providerCredentialReferenceFor(provider)
+    }
+    const adapter = {
+      id: 'credential.race-test',
+      stream(
+        request: ModelRequest,
+        context: {
+          secrets: { resolve(reference: string): Promise<string> }
+        }
+      ): AsyncIterable<ModelEvent> {
+        return (async function* () {
+          const credential = context.secrets.resolve(
+            config.apiKeyRef as string
+          )
+          yield { type: 'response.started', servingModel: request.model }
+          yield* textResponse(request, await credential)
+        })()
+      }
+    } as unknown as ModelAdapter<AiSdkAdapterConfig>
+    return { adapter, adapterId: adapter.id, config }
   }
 }
 
@@ -603,6 +664,22 @@ describe('RunManager model runtime', () => {
         throw new Error('Provider connection failed')
       }
     ])
+    const providerId = run.store.getTask(run.taskId).providerId
+    const provider = run.store.getProvider(providerId)
+    if (provider.kind === 'cli') throw new Error('Expected a model provider')
+    await run.store.mutateTask(run.taskId, (task) => {
+      task.modelSessions = {
+        [provider.id]: {
+          adapterId: 'test.model',
+          providerRevision: provider.updatedAt,
+          model: provider.model,
+          workspacePath: task.workspacePath,
+          mode: task.mode,
+          conversation: [],
+          updatedAt: task.updatedAt
+        }
+      }
+    })
 
     await run.manager.start(run.taskId, 'Stream a partial answer')
     await expect(run.terminal).resolves.toMatchObject({
@@ -617,6 +694,7 @@ describe('RunManager model runtime', () => {
         })
       ])
     )
+    expect(run.store.getTask(run.taskId).modelSessions).toBeUndefined()
   })
 
   it('can stop the active run by task after a renderer is recreated', async () => {
@@ -642,6 +720,38 @@ describe('RunManager model runtime', () => {
     })
     expect(run.manager.isTaskActive(run.taskId)).toBe(false)
     expect(run.manager.isProviderActive(providerId)).toBe(false)
+  })
+
+  it('compensates a model-session write when Stop lands during persistence', async () => {
+    const run = await harness([
+      (request) => textResponse(request, 'Completed at the provider.')
+    ])
+    const originalMutateTask = run.store.mutateTask.bind(run.store)
+    let mutationCalls = 0
+    const mutateTask = vi
+      .spyOn(run.store, 'mutateTask')
+      .mockImplementation(async (taskId, mutator) => {
+        mutationCalls += 1
+        if (mutationCalls === 2) {
+          const persistence = originalMutateTask(taskId, mutator)
+          queueMicrotask(() => {
+            void run.manager.stopTask(run.taskId)
+          })
+          return persistence
+        }
+        return originalMutateTask(taskId, mutator)
+      })
+
+    try {
+      await run.manager.start(run.taskId, 'Stop during continuation commit.')
+
+      await expect(run.terminal).resolves.toMatchObject({
+        type: 'run-stopped'
+      })
+      expect(run.store.getTask(run.taskId).modelSessions).toBeUndefined()
+    } finally {
+      mutateTask.mockRestore()
+    }
   })
 
   it('does not strand an approval when stopped before pending registration', async () => {
@@ -775,6 +885,7 @@ describe('RunManager model runtime', () => {
           })()
         }
       } as unknown as ModelAdapter<AiSdkAdapterConfig>,
+      adapterId: 'shutdown.test',
       config: {
         protocol: 'openai-compatible',
         baseUrl: 'http://127.0.0.1:11434/v1'
@@ -1020,6 +1131,231 @@ describe('RunManager model runtime', () => {
     expect(vault.get).not.toHaveBeenCalled()
     expect(vault.set).not.toHaveBeenCalled()
   })
+
+  it('redacts reflected credentials across split successful text and notices', async () => {
+    const secret = 'sk-ground-success-reflection'
+    const vault = credentialVault()
+    const run = await harness([], undefined, {
+      vault: vault.instance,
+      runtimeFactory: credentialReflectingRuntime(
+        async function* (resolvedSecret, request) {
+          const partId = `${request.requestId}:text`
+          const text = `Before ${resolvedSecret} after.`
+          yield {
+            type: 'provider.notice',
+            level: 'warning',
+            code: `echo.${resolvedSecret}`,
+            message: `Notice reflected ${resolvedSecret}.`
+          }
+          yield { type: 'response.started', servingModel: request.model }
+          yield {
+            type: 'part.started',
+            part: { kind: 'text', partId }
+          }
+          yield {
+            type: 'part.delta',
+            partId,
+            delta: {
+              kind: 'text',
+              text: `Before ${resolvedSecret.slice(0, 9)}`
+            }
+          }
+          yield {
+            type: 'part.delta',
+            partId,
+            delta: {
+              kind: 'text',
+              text: `${resolvedSecret.slice(9)} after.`
+            }
+          }
+          yield {
+            type: 'part.completed',
+            partId,
+            part: { kind: 'text', text }
+          }
+          yield {
+            type: 'response.completed',
+            messageId: `${request.requestId}:assistant`,
+            stopReason: 'complete'
+          }
+        }
+      )
+    })
+    const task = run.store.getTask(run.taskId)
+    const stored = run.store.getProvider(task.providerId)
+    if (stored.kind === 'cli') throw new Error('Expected a model provider')
+    const provider = { ...stored, hasApiKey: true }
+    vault.entries.set(providerCredentialReferenceFor(provider), secret)
+    await run.store.upsertProvider(provider)
+
+    await run.manager.start(run.taskId, 'Keep successful output credential-free.')
+    await expect(run.terminal).resolves.toMatchObject({
+      type: 'run-completed'
+    })
+
+    const completedTask = run.store.getTask(run.taskId)
+    expect(
+      completedTask.items.find(
+        (item) => item.kind === 'message' && item.role === 'assistant'
+      )
+    ).toMatchObject({ content: 'Before ████ after.' })
+    expect(
+      completedTask.items.find(
+        (item) =>
+          item.kind === 'activity' &&
+          item.title === 'Provider notices'
+      )
+    ).toMatchObject({ detail: expect.stringContaining('████') })
+    expect(JSON.stringify(completedTask)).not.toContain(secret)
+    expect(JSON.stringify(run.events)).not.toContain(secret)
+    expect(await readFile(path.join(run.directory, 'state.json'), 'utf8'))
+      .not.toContain(secret)
+  })
+
+  it('rejects output that races a pending credential resolution', async () => {
+    const secret = 'sk-ground-deferred-legacy-secret'
+    let releaseMigration: () => void = () => undefined
+    const migrationGate = new Promise<void>((resolve) => {
+      releaseMigration = resolve
+    })
+    const vault = credentialVault()
+    vault.set.mockImplementation(async (reference: string, value: string) => {
+      await migrationGate
+      vault.entries.set(reference, value)
+    })
+    const run = await harness([], undefined, {
+      vault: vault.instance,
+      runtimeFactory: credentialRacingRuntime()
+    })
+    const task = run.store.getTask(run.taskId)
+    const stored = run.store.getProvider(task.providerId)
+    if (stored.kind === 'cli') throw new Error('Expected a model provider')
+    const provider = { ...stored, hasApiKey: true }
+    vault.entries.set(provider.id, secret)
+    await run.store.upsertProvider(provider)
+
+    await run.manager.start(run.taskId, 'Reject credential resolution races.')
+    const terminal = await run.terminal
+    releaseMigration()
+    expect(terminal).toMatchObject({
+      type: 'run-error',
+      message: expect.stringMatching(/credential resolution was pending/i)
+    })
+
+    const failedTask = run.store.getTask(run.taskId)
+    expect(failedTask.modelSessions).toBeUndefined()
+    expect(
+      failedTask.items.some(
+        (item) => item.kind === 'message' && item.role === 'assistant'
+      )
+    ).toBe(false)
+    expect(JSON.stringify(failedTask)).not.toContain(secret)
+    expect(JSON.stringify(run.events)).not.toContain(secret)
+    expect(await readFile(path.join(run.directory, 'state.json'), 'utf8'))
+      .not.toContain(secret)
+  })
+
+  it.each([
+    'tool arguments',
+    'provider state',
+    'checkpoint'
+  ] as const)(
+    'fails closed when successful structured %s reflect a credential',
+    async (location) => {
+      const secret = 'quoted"credential\\value\nnext'
+      const vault = credentialVault()
+      const run = await harness([], undefined, {
+        vault: vault.instance,
+        runtimeFactory: credentialReflectingRuntime(
+          async function* (resolvedSecret, request) {
+            yield { type: 'response.started', servingModel: request.model }
+            if (location === 'tool arguments') {
+              const partId = `${request.requestId}:tool`
+              const rawArguments = JSON.stringify({ value: resolvedSecret })
+              yield {
+                type: 'part.started',
+                part: {
+                  kind: 'tool-call',
+                  partId,
+                  callId: 'credential-call',
+                  name: 'read_file'
+                }
+              }
+              yield {
+                type: 'part.delta',
+                partId,
+                delta: { kind: 'tool-arguments', text: rawArguments }
+              }
+              yield {
+                type: 'part.completed',
+                partId,
+                part: {
+                  kind: 'tool-call',
+                  callId: 'credential-call',
+                  name: 'read_file',
+                  rawArguments,
+                  arguments: { value: resolvedSecret }
+                }
+              }
+              yield {
+                type: 'response.completed',
+                messageId: `${request.requestId}:assistant`,
+                stopReason: 'tool-calls'
+              }
+              return
+            }
+
+            const partId = `${request.requestId}:text`
+            yield {
+              type: 'part.started',
+              part: { kind: 'text', partId }
+            }
+            yield {
+              type: 'part.completed',
+              partId,
+              part: { kind: 'text', text: 'Safe response text.' }
+            }
+            yield {
+              type: 'response.completed',
+              messageId: `${request.requestId}:assistant`,
+              stopReason: 'complete',
+              ...(location === 'provider state'
+                ? {
+                    providerState: {
+                      adapterId: 'credential.reflection-test',
+                      schemaVersion: 1 as const,
+                      data: { reflected: resolvedSecret }
+                    }
+                  }
+                : {
+                    checkpoint: { reflected: resolvedSecret }
+                  })
+            }
+          }
+        )
+      })
+      const task = run.store.getTask(run.taskId)
+      const stored = run.store.getProvider(task.providerId)
+      if (stored.kind === 'cli') throw new Error('Expected a model provider')
+      const provider = { ...stored, hasApiKey: true }
+      vault.entries.set(providerCredentialReferenceFor(provider), secret)
+      await run.store.upsertProvider(provider)
+
+      await run.manager.start(run.taskId, `Reject reflected ${location}.`)
+      const terminal = await run.terminal
+      expect(terminal).toMatchObject({
+        type: 'run-error',
+        message: expect.stringMatching(/protected credential/i)
+      })
+
+      const failedTask = run.store.getTask(run.taskId)
+      expect(failedTask.modelSessions).toBeUndefined()
+      expect(JSON.stringify(failedTask)).not.toContain(secret)
+      expect(JSON.stringify(run.events)).not.toContain(secret)
+      expect(await readFile(path.join(run.directory, 'state.json'), 'utf8'))
+        .not.toContain(secret)
+    }
+  )
 
   it('durably fails with a bounded error and redacts a reflected active credential from state and events', async () => {
     const secret = 'sk-ground-runtime-secret'

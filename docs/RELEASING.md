@@ -14,7 +14,7 @@ unsigned, uncertified, and not an official Ground release.
 Local equivalents are:
 
 ```bash
-npm run dist:mac
+npm run dist:mac:unsigned
 npm run dist:win
 npm run dist:linux
 ```
@@ -27,6 +27,10 @@ native package build, run:
 npm run smoke:package:launch
 npm run smoke:package:native
 ```
+
+The macOS command clears ambient signing and notarization credentials and sets
+`CSC_IDENTITY_AUTO_DISCOVERY=false`, making the local preview explicitly unsigned.
+Use `npm run dist:mac` only in the credential-scoped official release workflow.
 
 The first command boots the unpacked packaged app with an isolated temporary
 profile, waits for the real main process, renderer document, and sandboxed preload

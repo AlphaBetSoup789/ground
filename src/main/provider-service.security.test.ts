@@ -403,6 +403,26 @@ describe('provider credential origin binding', () => {
     expect(harness.upsert).not.toHaveBeenCalled()
   })
 
+  it('rejects credentials too short for exact successful-output redaction', async () => {
+    const harness = createHarness(
+      apiProvider('https://api.example.com/v1', 'openai'),
+      ''
+    )
+
+    await expect(
+      harness.service.save({
+        id: 'provider-one',
+        name: 'OpenAI',
+        kind: 'openai',
+        baseUrl: 'https://api.openai.com/v1',
+        model: 'model-two',
+        apiKey: 'abc'
+      })
+    ).rejects.toThrow(/at least 4 characters/i)
+    expect(harness.vault.set).not.toHaveBeenCalled()
+    expect(harness.upsert).not.toHaveBeenCalled()
+  })
+
   it('leaves the old boundary usable when persistence fails after staging a new key', async () => {
     const existing = apiProvider('https://api.example.com/v1', 'openai')
     const oldReference = providerCredentialReferenceFor(existing)

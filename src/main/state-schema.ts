@@ -9,6 +9,7 @@ import {
   assertSafeCliEnvironmentVariableName,
   normalizeCliEnvironmentVariableNames
 } from './cli-environment'
+import { BUILT_IN_CLI_RUNTIME_BINDINGS } from './cli-runtime-bindings'
 
 export interface PersistedStateData {
   version: 1
@@ -385,14 +386,44 @@ const storedConversationItemSchema = z.discriminatedUnion('kind', [
   })
 ])
 
-const runtimeSessionSchema = z.object({
-  adapter: z.enum(['codex', 'claude', 'gemini']),
+const runtimeSessionFields = {
   sessionId: z.string().min(1).max(10_000),
   providerRevision: timestamp,
   workspacePath: z.string().min(1).max(8_192),
   mode: z.enum(['ask', 'agent']),
   updatedAt: timestamp
-})
+}
+
+const runtimeSessionSchema = z.union([
+  z.object({
+    adapterId: identifier,
+    sessionCompatibilityId: identifier,
+    ...runtimeSessionFields
+  }),
+  z
+    .object({
+      adapter: z.enum(['codex', 'claude', 'gemini']),
+      ...runtimeSessionFields
+    })
+    .transform(({ adapter, ...session }) => {
+      const binding = BUILT_IN_CLI_RUNTIME_BINDINGS[adapter]
+      return {
+        ...session,
+        adapterId: binding.adapterId,
+        sessionCompatibilityId: binding.sessionCompatibilityId
+      }
+    })
+])
+
+const runtimeSessionsSchema = z
+  .record(identifier, runtimeSessionSchema)
+  .transform((sessions) =>
+    Object.fromEntries(
+      Object.entries(sessions).filter(
+        ([, session]) => session.sessionId.length <= 200
+      )
+    )
+  )
 
 const modelRuntimeSessionSchema = z.object({
   adapterId: z.string().min(1).max(200),
@@ -419,7 +450,7 @@ const taskSchema = z
     archivedAt: archivedTimestamp.optional(),
     createdAt: timestamp,
     updatedAt: timestamp,
-    runtimeSessions: z.record(identifier, runtimeSessionSchema).optional(),
+    runtimeSessions: runtimeSessionsSchema.optional(),
     modelSessions: z.record(identifier, modelRuntimeSessionSchema).optional(),
     items: z
       .array(z.discriminatedUnion('kind', [messageItemSchema, activityItemSchema]))

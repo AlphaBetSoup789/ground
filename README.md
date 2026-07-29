@@ -37,12 +37,14 @@ provider-specific feature is automatically portable. Ground exposes capabilities
 explicitly and keeps a normalized history so switching providers does not make the
 task unreadable.
 
-Built-in model protocols are selected through a static, source-trusted adapter
-registry. Downstream builds can register another reviewed model adapter without
-changing Ground’s canonical event reducer or managed tool loop, but Ground does not
-load arbitrary provider plugins at runtime. A new first-class provider form or
-profile kind still requires a reviewed source change and rebuild. See
-[docs/PROVIDER-SDK.md](docs/PROVIDER-SDK.md).
+Built-in model protocols and agent CLIs are selected through one static,
+source-trusted adapter registry. Downstream builds can register another reviewed
+adapter without replacing Ground’s canonical reducers or managed tool loop, but
+Ground does not load arbitrary provider plugins at runtime. A new first-class
+provider form or profile kind still requires a reviewed source change and rebuild. See
+[docs/PROVIDER-SDK.md](docs/PROVIDER-SDK.md). The same canonical contracts compile
+into a versioned, provider-neutral adapter SDK package with a deterministic
+conformance runner; npm publication remains a separate maintainer release step.
 
 ## Current experience
 
@@ -68,6 +70,9 @@ profile kind still requires a reviewed source change and rebuild. See
 - Remote Streamable HTTP and local stdio MCP servers with namespaced tools,
   launch and definition trust, and per-call approval
 - Native session-resume support for recognized Codex, Claude, and Gemini CLIs
+- Provider-neutral runtime event validation with split-delta credential
+  redaction, opaque activity identities, abort-safe projection, and
+  compatibility-bound session persistence
 - Run cancellation, command timeouts, and process-group termination
 - A bounded, atomic local state snapshot plus rotating last-known-good backup,
   corruption quarantine, and an in-app recovery notice
@@ -167,10 +172,11 @@ as `PATH`, `NODE_OPTIONS`, `LD_PRELOAD`, `HOME`, `XDG_CONFIG_HOME`, and `TMPDIR`
 
 Ground first asks for native confirmation of the saved executable and argument
 template. Immediately before a run, it separately authorizes the fully expanded
-argv, canonical workspace, adapter, parser, prompt transport, environment-key set,
-opaque environment revision, and content-hashed launch identity. Names and the
-non-secret revision appear in the native dialog; values do not. Changing a name or
-value invalidates the prior configuration and invocation grants. Argument prompts
+argv, canonical workspace, source-registered runtime adapter ID, CLI dialect,
+parser, prompt transport, environment-key set, opaque environment revision, and
+content-hashed launch identity. Names and the non-secret revision appear in the
+native dialog; values do not. Changing a name or value invalidates the prior
+configuration and invocation grants. Argument prompts
 are redacted in the dialog but remain bound into that authorization. Stdin prompt
 content is treated as process data: it is neither shown nor hashed into the launch
 grant, so an otherwise identical stdin-based runtime does not prompt again for
@@ -324,6 +330,19 @@ separate hashes of the prepared action and native approval. Those durable eviden
 fields are stripped from renderer snapshots and live/replayed events. Ground
 returns the result to the model only after durably recording the outcome.
 
+Registered runtime output crosses a second main-process projection boundary after
+canonical validation. Ground stream-redacts configured CLI environment values
+even when they span assistant deltas, redacts activity and notice text, replaces
+provider activity IDs with opaque local IDs, rejects protected runtime/session
+identity, consumes resumable sessions as one-attempt leases, and checks
+cancellation before terminal state can persist. Successful hosted/local API output
+crosses the same kind of boundary: resolved credentials are stream-redacted from
+text and notices, while credential-bearing tool arguments or provider continuation
+state fail closed. Ground races iterator reads against Stop, so an adapter that
+ignores its signal cannot strand the task. Adapter-side redaction remains required
+because external runtime code owns its process and may have access beyond Ground’s
+configured secret resolver.
+
 Read [SECURITY.md](SECURITY.md) and
 [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) before using Ground with important
 source code.
@@ -339,7 +358,7 @@ Electron main process
   ├─ local task/provider/MCP store
   ├─ OS-protected secret vault
   ├─ Ground-managed model loop and tool broker
-  ├─ static model-adapter registry and runtime factory
+  ├─ static model + agent-runtime registry and factories
   ├─ MCP connection, definition-trust, and call broker
   ├─ workspace PTY service
   ├─ bounded Git and managed-worktree service
@@ -349,7 +368,8 @@ Electron main process
 
 There is no required Ground account, cloud control plane, or provider relay.
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the ownership model and
-[docs/PROVIDER-SDK.md](docs/PROVIDER-SDK.md) for the experimental adapter contracts.
+[docs/PROVIDER-SDK.md](docs/PROVIDER-SDK.md) for the versioned adapter contracts
+and conformance suite.
 
 ## Verify a change
 
@@ -359,9 +379,10 @@ npm audit --audit-level=high
 ```
 
 `verify` checks the reviewed build-dependency bridge, both TypeScript targets, the
-test suite, the generated production-license inventory, and the production build.
-The separate audit covers the complete locked tree, including Electron and
-packaging dependencies.
+test suite, pinned compatibility-fixture drift, the clean-room adapter SDK package,
+the generated production-license inventory, and the production build. The separate
+audit covers the complete locked tree, including Electron and packaging
+dependencies.
 
 The suite covers provider event normalization and output bounds, CLI argv/event
 parsing and cancellation, native session metadata, renderer/IPC trust checks,
@@ -375,9 +396,7 @@ neutralization/staging/commits/worktree containment and removal, and cancellatio
 ## Package a preview
 
 ```bash
-npm run package:mac
-# Or, on the matching host:
-npm run dist:mac
+npm run dist:mac:unsigned
 npm run dist:win
 npm run dist:linux
 # Then certify the matching unpacked package runtime:
@@ -388,6 +407,9 @@ npm run smoke:package:native
 Outputs are written beneath `release/`. The manual **Package previews** workflow
 also targets macOS, Windows, and Linux on native hosted runners. These packages are
 unsigned, short-lived developer artifacts, not certified distributions.
+`dist:mac:unsigned` clears signing/notarization credentials and disables signing
+identity auto-discovery so a local macOS preview cannot silently become a release
+artifact.
 
 The package workflows are configured to launch the unpacked app with an isolated
 temporary profile and verify real main/preload/document startup without browser
@@ -433,8 +455,9 @@ published or certified. Read
   restarts with a durable action-start claim but no recorded outcome, it marks the
   outcome unknown, clears unsafe continuation state, and requires the user to
   review the workspace or external system before continuing.
-- The `AgentRuntimeAdapter` contract is not yet the desktop CLI registration path;
-  adding a new structured CLI parser still requires a reviewed source change.
+- Adapter registration is source-trusted and static; Ground does not install or
+  discover runtime provider code. Adding a built-in structured CLI dialect still
+  requires a reviewed source change and rebuild.
 - Windows cancellation invokes the system `taskkill.exe /T /F` path for the exact
   spawned PID, while macOS and Linux target detached process groups. Descendant
   cleanup remains best effort when a process escapes the tree or races shutdown.
