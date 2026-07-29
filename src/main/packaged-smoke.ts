@@ -9,6 +9,7 @@ import {
 } from 'node:fs/promises'
 import path from 'node:path'
 import {
+  isPackagedSmokeToken,
   parsePackagedSmokeArgument,
   type PackagedSmokeScope
 } from '../shared/packaged-smoke'
@@ -52,6 +53,72 @@ export interface PackagedSmokeResult {
     name: string
     message: string
   }
+}
+
+export interface WindowsTerminalProbe {
+  shell: {
+    executable: string
+    args: string[]
+  }
+  readyMarker: string
+  successMarker: string
+  input: string
+}
+
+export function buildWindowsTerminalProbe(
+  resolvedShell: {
+    executable: string
+    args: string[]
+  },
+  token: string
+): WindowsTerminalProbe {
+  if (!isPackagedSmokeToken(token)) {
+    throw new Error('Packaged PTY smoke requires a valid token')
+  }
+  const shellName = path.win32
+    .basename(resolvedShell.executable)
+    .toLowerCase()
+  const tokenStart = token.slice(0, 16)
+  const tokenEnd = token.slice(16)
+  const readyMarker = `ground-packaged-pty-ready-${token}`
+  const successMarker = `ground-packaged-pty-ok-${token}`
+
+  if (shellName === 'powershell.exe') {
+    return {
+      shell: {
+        executable: resolvedShell.executable,
+        args: [
+          ...resolvedShell.args,
+          '-NoProfile',
+          '-NoExit',
+          '-Command',
+          `Write-Output ('ground-packaged-pty-' + 'ready-' + '${tokenStart}' + '${tokenEnd}')`
+        ]
+      },
+      readyMarker,
+      successMarker,
+      input: `Write-Output ('ground-packaged-pty-' + 'ok-' + '${tokenStart}' + '${tokenEnd}'); exit 0\r`
+    }
+  }
+
+  if (shellName === 'cmd.exe') {
+    return {
+      shell: {
+        executable: resolvedShell.executable,
+        args: [
+          '/D',
+          '/Q',
+          '/K',
+          `echo ground-packaged-pty-re^ady-${tokenStart}^${tokenEnd}`
+        ]
+      },
+      readyMarker,
+      successMarker,
+      input: `echo ground-packaged-pty-o^k-${tokenStart}^${tokenEnd} & exit /b 0\r`
+    }
+  }
+
+  throw new Error('Packaged PTY smoke requires a fixed Windows system shell')
 }
 
 export function shouldMigrateLegacyData(
@@ -206,6 +273,10 @@ async function smokeTerminal(
   const canonicalWorkspace = await realpath(workspace)
   const packagedExecutable = await realpath(process.execPath)
   const marker = `ground-packaged-pty-ok-${config.token}`
+  const readyMarker =
+    process.platform === 'win32'
+      ? `ground-packaged-pty-ready-${config.token}`
+      : 'ground-packaged-pty-ready'
   const program = [
     "process.stdin.setEncoding('utf8');",
     "process.stdin.on('data', (chunk) => {",
@@ -220,34 +291,21 @@ async function smokeTerminal(
     process.platform === 'win32'
       ? await resolveDefaultTerminalShell('win32', process.env)
       : undefined
-  const windowsShellName = resolvedWindowsShell
-    ? path.win32.basename(resolvedWindowsShell.executable).toLowerCase()
+  const windowsProbe = resolvedWindowsShell
+    ? buildWindowsTerminalProbe(resolvedWindowsShell, config.token)
     : undefined
-  const shell =
-    resolvedWindowsShell
-      ? {
-          executable: resolvedWindowsShell.executable,
-          args:
-            windowsShellName === 'powershell.exe'
-              ? [...resolvedWindowsShell.args, '-NoProfile']
-              : ['/D']
-        }
-      : {
-          executable: packagedExecutable,
-          args: ['-e', program]
-        }
-  const input =
-    process.platform !== 'win32'
-      ? 'ground-packaged-pty-input\r'
-      : windowsShellName === 'powershell.exe'
-        ? `Write-Output ('ground-packaged-pty-' + 'ok-' + '${config.token.slice(
-            0,
-            16
-          )}' + '${config.token.slice(16)}'); exit 0\r`
-        : `echo ground-packaged-pty-o^k-${config.token.slice(
-            0,
-            16
-          )}^${config.token.slice(16)} & exit /b 0\r`
+  const shell = windowsProbe?.shell ?? {
+    executable: packagedExecutable,
+    args: ['-e', program]
+  }
+  const input = windowsProbe?.input ?? 'ground-packaged-pty-input\r'
+  if (
+    windowsProbe &&
+    (windowsProbe.readyMarker !== readyMarker ||
+      windowsProbe.successMarker !== marker)
+  ) {
+    throw new Error('Packaged PTY smoke marker construction failed')
+  }
   const ptyFactory = async (): Promise<TerminalPtyFactory> => {
     const nodePty = await import('node-pty')
     return {
@@ -315,7 +373,7 @@ async function smokeTerminal(
         output = `${output}${event.data}`.slice(-16_384)
         if (
           process.platform !== 'win32' &&
-          output.includes('ground-packaged-pty-ready')
+          output.includes(readyMarker)
         ) {
           resolveReady?.()
         }
@@ -344,12 +402,26 @@ async function smokeTerminal(
       if (ready) {
         await waitFor('Packaged PTY readiness', ready, 12_000)
       }
+      // node-pty queues Windows writes until the child produces its first
+      // ConPTY output. The token-bound startup command above supplies that
+      // output and releases this input even if it arrived before the shell.
       service.sendInput(session.id, input)
-      await waitFor(
-        'Packaged PTY marker and exit',
-        Promise.all([marked, exited]),
-        12_000
-      )
+      try {
+        await waitFor(
+          'Packaged PTY marker and exit',
+          Promise.all([marked, exited]),
+          12_000
+        )
+      } catch (error) {
+        const diagnostic = output
+          .replace(/[\u0000-\u001f\u007f-\u009f]/gu, ' ')
+          .slice(-1_000)
+        throw new Error(
+          `${error instanceof Error ? error.message : String(error)}${
+            diagnostic ? `; PTY output: ${diagnostic}` : '; no PTY output'
+          }`
+        )
+      }
     } finally {
       subscription.dispose()
       service.kill(session.id)

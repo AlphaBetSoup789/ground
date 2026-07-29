@@ -3,6 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+  buildWindowsTerminalProbe,
   preparePackagedSmokeDirectory,
   resolvePackagedSmokeConfig,
   shouldMigrateLegacyData
@@ -112,6 +113,71 @@ describe('packaged smoke configuration', () => {
     expect(smokeConfig).toBeDefined()
     expect(shouldMigrateLegacyData(smokeConfig)).toBe(false)
     expect(shouldMigrateLegacyData(undefined)).toBe(true)
+  })
+
+  it('bootstraps token-bound PowerShell output before queued input', () => {
+    const probe = buildWindowsTerminalProbe(
+      {
+        executable:
+          'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+        args: ['-NoLogo']
+      },
+      TOKEN
+    )
+
+    expect(probe.readyMarker).toBe(`ground-packaged-pty-ready-${TOKEN}`)
+    expect(probe.successMarker).toBe(`ground-packaged-pty-ok-${TOKEN}`)
+    expect(probe.shell.args.slice(0, 4)).toEqual([
+      '-NoLogo',
+      '-NoProfile',
+      '-NoExit',
+      '-Command'
+    ])
+    expect(probe.shell.args.join(' ')).not.toContain(probe.readyMarker)
+    expect(probe.input).not.toContain(probe.successMarker)
+    expect(probe.input).toMatch(/exit 0\r$/u)
+  })
+
+  it('bootstraps token-bound cmd output with autorun disabled', () => {
+    const probe = buildWindowsTerminalProbe(
+      {
+        executable: 'C:\\Windows\\System32\\cmd.exe',
+        args: []
+      },
+      TOKEN
+    )
+
+    expect(probe.readyMarker).toBe(`ground-packaged-pty-ready-${TOKEN}`)
+    expect(probe.successMarker).toBe(`ground-packaged-pty-ok-${TOKEN}`)
+    expect(probe.shell.args.slice(0, 3)).toEqual(['/D', '/Q', '/K'])
+    expect(probe.shell.args.join(' ')).not.toContain(probe.readyMarker)
+    expect(probe.input).not.toContain(probe.successMarker)
+    expect(probe.input).toMatch(/exit \/b 0\r$/u)
+  })
+
+  it('rejects an unexpected Windows terminal executable', () => {
+    expect(() =>
+      buildWindowsTerminalProbe(
+        {
+          executable: 'C:\\Users\\example\\custom-shell.exe',
+          args: []
+        },
+        TOKEN
+      )
+    ).toThrow(/fixed Windows system shell/u)
+  })
+
+  it('rejects a token that could alter the Windows probe command', () => {
+    expect(() =>
+      buildWindowsTerminalProbe(
+        {
+          executable:
+            'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+          args: ['-NoLogo']
+        },
+        `${TOKEN}'; Write-Output 'spoof`
+      )
+    ).toThrow(/valid token/u)
   })
 
   it('creates one new contained user-data directory and rejects a precreated child', async () => {
