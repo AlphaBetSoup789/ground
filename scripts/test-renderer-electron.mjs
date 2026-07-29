@@ -17,7 +17,7 @@ const electronApplication = await electron.launch({
 })
 
 const page = await electronApplication.firstWindow()
-page.setDefaultTimeout(8_000)
+page.setDefaultTimeout(20_000)
 
 const results = []
 

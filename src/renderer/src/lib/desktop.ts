@@ -551,7 +551,7 @@ const mockApi: DesktopApi = {
           task.runStatus = 'idle'
           emit({ type: 'run-completed', taskId, runId })
         }
-      }, 420 + index * 45)
+      }, 1_000 + index * 500)
     })
     return { runId }
   },

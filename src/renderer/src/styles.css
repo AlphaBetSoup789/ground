@@ -1904,6 +1904,10 @@ kbd {
   background: #e98d82;
 }
 
+.stop-button:hover:not(:disabled) {
+  transform: none;
+}
+
 .composer-caption {
   display: flex;
   justify-content: space-between;
