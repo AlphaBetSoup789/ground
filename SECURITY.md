@@ -71,6 +71,9 @@ before the first supported release.
   path-free display label derived from the folder basename. Duplicate basenames
   receive an ordinal suffix; canonical paths and runtime/model session bindings
   remain in main-owned state.
+- Durable operation markers and prepared-action/native-approval hashes remain
+  main-owned evidence. The task snapshot and both live and replayed run-event
+  projections strip them before IPC delivery.
 - Task attachment/detachment, run start, workspace reveal, terminal launch, and
   Git mutations share a serialized main-process workspace lifecycle. Revocation
   therefore cannot interleave with a pending native dialog and leave a task bound
@@ -108,8 +111,8 @@ before the first supported release.
   to built-in reads and searches.
 - File listings, file reads, searches, command output, diagnostics, and previews
   have size limits.
-- Full writes, exact localized edits, and commands require one-time inline
-  approval.
+- Full writes, exact localized edits, and commands require a one-time native
+  allow-once approval.
 - A localized edit requires the old text to match exactly, rejects ambiguity by
   default, and replaces every match only when the model requests that explicitly.
 - The managed run loop prepares one immutable write envelope before approval and
@@ -122,6 +125,11 @@ before the first supported release.
   revalidates them before spawning. A recognized Windows Node package shim binds
   the `.cmd`/`.bat` file, canonical package script, and Node interpreter.
 - Incomplete or truncated write and command previews cannot be approved.
+- Before a managed write or command can execute, Ground atomically consumes the
+  pending approval and persists a versioned started claim containing a unique
+  operation ID plus separate SHA-256 identities for the prepared action and exact
+  native approval. The tool result is not returned to the model until the terminal
+  outcome is durably recorded.
 - Full replacement and localized edits use the same immutable prepared-write
   envelope, exclusive temporary file, fsync where supported, and atomic rename.
 - Ground does not concatenate tool arguments into a shell command. Direct
@@ -205,8 +213,13 @@ before the first supported release.
 - Saved definition trust is cleared when the namespace, transport, endpoint,
   executable, or arguments change.
 - Definition trust does not authorize execution. Every MCP call separately
-  presents the server, tool, fingerprint, and complete JSON arguments for inline
-  approval.
+  presents the server, tool, fingerprint, and complete JSON arguments in a native
+  allow-once approval.
+- The approved MCP call is detached and frozen before approval. Dispatch requires
+  the same server ID, connection/config fingerprint, original tool name,
+  definition fingerprint, and canonical argument hash after refresh and again
+  immediately before `callTool`. Approved execution is serialized with same-server
+  save/reconnect operations, so reconfiguration cannot redirect a pending call.
 - MCP results are converted to bounded JSON-safe values. MCP Apps/UI metadata and
   payloads are not exposed.
 - Client elicitation capabilities are not advertised or handled.
@@ -256,6 +269,14 @@ before the first supported release.
   quarantine structurally unreadable files, and display a dismissible recovery
   banner. Operational I/O failures are propagated rather than mislabeled as
   corruption.
+- Managed writes, commands, and MCP calls persist an exact started claim before
+  the side effect and a completed claim afterward. If startup finds a started
+  claim, it preserves both hashes, marks the operation uncertain with an explicit
+  outcome-unknown message, clears native CLI continuation and model checkpoints,
+  and never automatically retries the action. Legacy running mutators are labeled
+  untracked/uncertain without fabricated approval evidence. Interruption summaries
+  are capped at 256 per task and further bounded by remaining capacity under the
+  persisted 100,000-item task limit.
 - Forked tasks receive new task/item/run/tool-call IDs and drop native sessions,
   checkpoints, provider-owned state, pending approval IDs, and incomplete tool
   exchanges. Archived tasks cannot initiate new Ground run/workspace actions until

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type {
   AppSnapshot,
-  DesktopTask,
-  RunEvent
+  DesktopRunEvent,
+  DesktopTask
 } from '../../shared/types'
 import {
   applyRunEvent,
@@ -61,7 +61,7 @@ function snapshot(): AppSnapshot {
 describe('applyRunEvent', () => {
   it('updates only the affected task and item during streaming', () => {
     const current = snapshot()
-    const event: RunEvent = {
+    const event: DesktopRunEvent = {
       type: 'text-delta',
       taskId: 'selected',
       runId: 'selected-run',
@@ -90,7 +90,7 @@ describe('applyRunEvent', () => {
 
   it('keeps the existing snapshot when an event targets an unknown task', () => {
     const current = snapshot()
-    const event: RunEvent = {
+    const event: DesktopRunEvent = {
       type: 'run-stopped',
       taskId: 'missing',
       runId: 'missing-run'

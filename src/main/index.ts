@@ -9,9 +9,9 @@ import {
   PACKAGED_SMOKE_PRELOAD_CHANNEL
 } from '../shared/packaged-smoke'
 import type {
+  DesktopRunEventEnvelope,
   GitOverview,
   RunEvent,
-  RunEventEnvelope,
   Task,
   TaskExportFormat,
   TerminalSessionInfo
@@ -52,9 +52,13 @@ import {
   parseWorkspaceGrantId
 } from './validation'
 import { migrateLegacyData } from './migration'
-import { agentApprovalDialogOptions } from './native-agent-approval'
+import {
+  agentApprovalDialogOptions,
+  agentApprovalFingerprint
+} from './native-agent-approval'
 import {
   projectDesktopTaskOperation,
+  toDesktopRunEventEnvelope,
   toDesktopSnapshot
 } from './desktop-projection'
 import {
@@ -85,7 +89,7 @@ let fatalStartupHandled = false
 let appInitialized = false
 const trustedRendererUrls = new Map<number, string>()
 let runEventRevision = 0
-const activeRunEvents = new Map<string, RunEventEnvelope[]>()
+const activeRunEvents = new Map<string, DesktopRunEventEnvelope[]>()
 const packagedSmokeConfig = resolvePackagedSmokeConfig({
   isPackaged: app.isPackaged,
   temporaryDirectory: os.tmpdir()
@@ -104,10 +108,10 @@ if (packagedSmokeConfig) {
 }
 
 function emitRunEvent(event: RunEvent): void {
-  const envelope: RunEventEnvelope = {
+  const envelope = toDesktopRunEventEnvelope({
     revision: (runEventRevision += 1),
     event
-  }
+  })
   if (event.type === 'run-started') {
     activeRunEvents.set(event.runId, [envelope])
   } else if (
@@ -905,6 +909,7 @@ function registerIpc(
     if (task.archivedAt) {
       throw new Error('Unarchive this task before starting a run')
     }
+    runs.assertTaskCanStart(taskId)
     const provider = store.getProvider(task.providerId)
     if (provider.kind === 'cli') await cliTrust.authorize(provider)
     return { runId: await runs.start(taskId, prompt) }
@@ -935,6 +940,7 @@ function registerIpc(
       const pending = runs.getPendingApproval(parsedRunId, parsedApprovalId)
       nativeApprovalPrompts.add(presenceKey)
       try {
+        const approvalSha256 = agentApprovalFingerprint(pending)
         const options = agentApprovalDialogOptions(pending)
         const owner = BrowserWindow.fromWebContents(event.sender) ?? mainWindow
         const result = owner
@@ -943,7 +949,8 @@ function registerIpc(
         await runs.resolveApproval(
           parsedRunId,
           parsedApprovalId,
-          result.response === 1
+          result.response === 1,
+          result.response === 1 ? approvalSha256 : undefined
         )
       } catch (error) {
         await runs

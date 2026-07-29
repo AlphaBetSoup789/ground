@@ -18,7 +18,7 @@ import {
   Trash2
 } from 'lucide-react'
 import type {
-  ActivityItem,
+  DesktopActivityItem,
   DesktopTask,
   ProviderProfile,
   RunMode,
@@ -42,7 +42,10 @@ interface TaskViewProps {
   onRevealWorkspace: () => void
   onStartRun: (prompt: string) => Promise<void>
   onStopRun: () => Promise<void>
-  onResolveApproval: (item: ActivityItem, approved: boolean) => Promise<void>
+  onResolveApproval: (
+    item: DesktopActivityItem,
+    approved: boolean
+  ) => Promise<void>
   onOpenSettings: () => void
   onImportTask: () => void
   onForkTask: () => void

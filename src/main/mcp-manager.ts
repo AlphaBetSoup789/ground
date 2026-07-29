@@ -512,15 +512,22 @@ export class McpManager {
     options?: McpExecuteOptions
   ): Promise<McpToolExecutionResult> {
     this.requireOpen()
-    let executionError: string | undefined
-    try {
-      return await this.service.executeTool(namespacedName, input, options)
-    } catch (error) {
-      executionError = parseError(error)
-      throw error
-    } finally {
-      this.synchronizeSnapshots(executionError, namespacedName)
+    const execute = async (): Promise<McpToolExecutionResult> => {
+      this.requireOpen()
+      let executionError: string | undefined
+      try {
+        return await this.service.executeTool(namespacedName, input, options)
+      } catch (error) {
+        executionError = parseError(error)
+        throw error
+      } finally {
+        this.synchronizeSnapshots(executionError, namespacedName)
+      }
     }
+    if (options?.approvalGranted === true) {
+      return this.enqueue(options.expectedServerId, execute)
+    }
+    return execute()
   }
 
   close(): Promise<void> {

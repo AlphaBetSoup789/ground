@@ -54,6 +54,9 @@ profile kind still requires a reviewed source change and rebuild. See
   and tool-result context
 - Approval-gated full writes, exact localized edits, commands, and MCP calls for
   Ground-managed API agents, with an exact native allow-once confirmation
+- Durable start/completion claims for Ground-managed writes, commands, and MCP
+  calls; an interrupted claim is reported as outcome unknown and is never
+  automatically retried
 - Sensitive-path filtering and workspace-relative model-visible paths
 - Portable JSON task bundles, Markdown transcript export, and confirmed task
   deletion
@@ -213,7 +216,10 @@ discovered fingerprint set, and changed or newly added definitions are blocked
 until reviewed again. Changing a server namespace, transport, URL, executable, or
 arguments clears saved definition trust. Every individual MCP invocation then
 pauses again to show the server, tool, definition fingerprint, and complete
-arguments before execution.
+arguments before execution. The prepared call also binds a connection fingerprint
+covering the canonical remote URL and namespace, or the exact stdio invocation and
+namespace. Ground verifies it after refresh and immediately before dispatch, so
+reconfiguring the same server ID while approval is open cannot redirect the call.
 
 MCP is intentionally tool-only in this preview. Remote authentication headers and
 OAuth, resources, prompts, MCP Apps/UI, and elicitation are not supported. A local
@@ -312,7 +318,11 @@ Electron’s main process. The renderer receives only a revocable process-scoped
 workspace grant ID and a path-free label derived from the basename; duplicates
 receive an ordinal suffix. It presents the exact approval card. A denial resolves
 immediately, while an allow-once request opens a main-process-owned native dialog
-bound to the same immutable action envelope before execution can continue.
+bound to the same immutable action envelope before execution can continue. Before
+the side effect, the main process durably records a unique operation ID plus
+separate hashes of the prepared action and native approval. Those durable evidence
+fields are stripped from renderer snapshots and live/replayed events. Ground
+returns the result to the model only after durably recording the outcome.
 
 Read [SECURITY.md](SECURITY.md) and
 [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) before using Ground with important
@@ -419,6 +429,10 @@ published or certified. Read
   exact tokenizer or provide semantic repository indexing and summarizing
   compaction.
 - Generic CLIs have limited event semantics and no native session resume.
+- Ground does not automatically resume an interrupted managed action. If it
+  restarts with a durable action-start claim but no recorded outcome, it marks the
+  outcome unknown, clears unsafe continuation state, and requires the user to
+  review the workspace or external system before continuing.
 - The `AgentRuntimeAdapter` contract is not yet the desktop CLI registration path;
   adding a new structured CLI parser still requires a reviewed source change.
 - Windows cancellation invokes the system `taskkill.exe /T /F` path for the exact

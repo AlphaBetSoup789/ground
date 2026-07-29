@@ -1,18 +1,18 @@
 import type {
   AppSnapshot,
-  DesktopTask,
   DesktopApi,
+  DesktopRunEvent,
+  DesktopRunEventEnvelope,
+  DesktopTask,
   ProviderDraft,
   ProviderProfile,
-  RunEvent,
-  RunEventEnvelope,
   TaskPatch,
   TerminalEvent,
   TerminalSessionInfo
 } from '../../../shared/types'
 import { resolveDesktopBridge } from './desktop-bridge'
 
-const listeners = new Set<(event: RunEventEnvelope) => void>()
+const listeners = new Set<(event: DesktopRunEventEnvelope) => void>()
 const terminalListeners = new Set<(event: TerminalEvent) => void>()
 const mockTerminals = new Map<string, TerminalSessionInfo>()
 const mockTerminalAttachments = new Map<string, string>()
@@ -123,7 +123,7 @@ function mockEnvironmentFingerprint(): string {
     .join('')
 }
 
-function emit(event: RunEvent): void {
+function emit(event: DesktopRunEvent): void {
   const envelope = {
     revision: (mockSnapshot.runEventRevision ?? 0) + 1,
     event

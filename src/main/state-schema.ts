@@ -18,9 +18,13 @@ export interface PersistedStateData {
   settings: AppSettings
 }
 
+export const MAX_PERSISTED_TASK_ITEMS = 100_000
+
 const timestamp = z.string().min(1).max(100)
 const archivedTimestamp = z.iso.datetime({ offset: true })
+const managedExecutionTimestamp = z.iso.datetime({ offset: true })
 const identifier = z.string().min(1).max(200)
+const sha256 = z.string().regex(/^[a-f0-9]{64}$/u)
 const portableJson = z.json()
 const portableJsonObject = z.record(z.string(), portableJson)
 
@@ -161,31 +165,171 @@ const messageItemSchema = z.object({
   provider: providerAttributionSchema.optional()
 })
 
-const activityItemSchema = z.object({
-  id: identifier,
-  kind: z.literal('activity'),
-  runId: identifier,
-  activityType: z.enum([
-    'status',
-    'tool',
-    'command',
-    'approval',
-    'error',
-    'diagnostic'
-  ]),
-  title: z.string().max(500),
-  detail: z.string().max(100_000).optional(),
-  status: z.enum(['pending', 'running', 'success', 'error', 'denied']),
-  createdAt: timestamp,
-  approvalId: identifier.optional(),
-  toolName: z.string().max(200).optional(),
-  input: portableJsonObject.optional(),
-  result: z.string().max(100_000).optional(),
-  durationMs: z.number().finite().nonnegative().max(86_400_000).optional(),
-  historyOnly: z.boolean().optional(),
-  callId: identifier.optional(),
-  provider: providerAttributionSchema.optional()
-})
+const managedExecutionBase = {
+  version: z.literal(1),
+  operationId: identifier,
+  kind: z.enum(['workspace-write', 'command', 'mcp']),
+  startedAt: managedExecutionTimestamp
+}
+
+const approvedManagedExecutionBase = {
+  ...managedExecutionBase,
+  claim: z.literal('approved'),
+  actionSha256: sha256,
+  approvalSha256: sha256
+}
+
+const approvedManagedExecutionSchema = z.discriminatedUnion('phase', [
+  z
+    .object({
+      ...approvedManagedExecutionBase,
+      phase: z.literal('started')
+    })
+    .strict(),
+  z
+    .object({
+      ...approvedManagedExecutionBase,
+      phase: z.literal('completed'),
+      completedAt: managedExecutionTimestamp
+    })
+    .strict(),
+  z
+    .object({
+      ...approvedManagedExecutionBase,
+      phase: z.literal('uncertain'),
+      interruptedAt: managedExecutionTimestamp
+    })
+    .strict()
+])
+
+const managedExecutionSchema = z.union([
+  approvedManagedExecutionSchema,
+  z
+    .object({
+      ...managedExecutionBase,
+      claim: z.literal('legacy-untracked'),
+      phase: z.literal('uncertain'),
+      interruptedAt: managedExecutionTimestamp
+    })
+    .strict()
+])
+
+const activityItemSchema = z
+  .object({
+    id: identifier,
+    kind: z.literal('activity'),
+    runId: identifier,
+    activityType: z.enum([
+      'status',
+      'tool',
+      'command',
+      'approval',
+      'error',
+      'diagnostic'
+    ]),
+    title: z.string().max(500),
+    detail: z.string().max(100_000).optional(),
+    status: z.enum(['pending', 'running', 'success', 'error', 'denied']),
+    createdAt: timestamp,
+    approvalId: identifier.optional(),
+    toolName: z.string().max(200).optional(),
+    input: portableJsonObject.optional(),
+    result: z.string().max(100_000).optional(),
+    durationMs: z.number().finite().nonnegative().max(86_400_000).optional(),
+    historyOnly: z.boolean().optional(),
+    callId: identifier.optional(),
+    managedExecution: managedExecutionSchema.optional(),
+    provider: providerAttributionSchema.optional()
+  })
+  .superRefine((item, context) => {
+    const marker = item.managedExecution
+    if (!marker) return
+    if (marker.operationId !== item.id) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Managed execution operation must equal the activity identifier',
+        path: ['managedExecution', 'operationId']
+      })
+    }
+    if (marker.claim === 'approved' && !item.callId) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Approved managed execution requires a tool call identifier',
+        path: ['callId']
+      })
+    }
+    if (item.approvalId) {
+      context.addIssue({
+        code: 'custom',
+        message: 'A started managed execution cannot retain pending approval authority',
+        path: ['approvalId']
+      })
+    }
+    if (item.historyOnly) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Historical activity cannot retain managed execution state',
+        path: ['historyOnly']
+      })
+    }
+
+    const toolMatchesKind =
+      marker.kind === 'workspace-write'
+        ? item.toolName === 'write_file' || item.toolName === 'edit_file'
+        : marker.kind === 'command'
+          ? item.toolName === 'run_command'
+          : item.toolName?.startsWith('mcp__') === true
+    if (!toolMatchesKind) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Managed execution kind does not match the activity tool',
+        path: ['managedExecution', 'kind']
+      })
+    }
+    const expectedActivityType =
+      marker.kind === 'command' ? 'command' : 'tool'
+    if (item.activityType !== expectedActivityType) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'Managed execution kind does not match the activity presentation type',
+        path: ['activityType']
+      })
+    }
+
+    const statusMatchesPhase =
+      marker.phase === 'started'
+        ? item.status === 'running'
+        : marker.phase === 'completed'
+          ? item.status === 'success' || item.status === 'error'
+          : item.status === 'error'
+    if (!statusMatchesPhase) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Managed execution phase does not match activity status',
+        path: ['managedExecution', 'phase']
+      })
+    }
+    const terminalTimestamp =
+      marker.phase === 'completed'
+        ? marker.completedAt
+        : marker.phase === 'uncertain'
+          ? marker.interruptedAt
+          : undefined
+    if (
+      terminalTimestamp &&
+      Date.parse(terminalTimestamp) < Date.parse(marker.startedAt)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Managed execution terminal timestamp precedes its start',
+        path: [
+          'managedExecution',
+          marker.phase === 'completed' ? 'completedAt' : 'interruptedAt'
+        ]
+      })
+    }
+  })
 
 const providerStateSchema = z.object({
   adapterId: z.string().min(1).max(200),
@@ -279,7 +423,7 @@ const taskSchema = z
     modelSessions: z.record(identifier, modelRuntimeSessionSchema).optional(),
     items: z
       .array(z.discriminatedUnion('kind', [messageItemSchema, activityItemSchema]))
-      .max(100_000)
+      .max(MAX_PERSISTED_TASK_ITEMS)
   })
   .refine(
     (task) =>
@@ -290,18 +434,99 @@ const taskSchema = z
       path: ['archivedAt']
     }
   )
-
-const persistedStateSchema = z.object({
-  version: z.literal(1),
-  providers: z.array(providerSchema).min(1).max(1_000),
-  mcpServers: z.array(mcpServerSchema).max(100).default([]),
-  tasks: z.array(taskSchema).max(10_000),
-  settings: z.object({
-    selectedTaskId: identifier.optional(),
-    defaultProviderId: identifier.optional(),
-    sidebarCollapsed: z.boolean()
+  .superRefine((task, context) => {
+    const operations = new Set<string>()
+    const claimsByCall = new Map<string, string>()
+    for (const [index, item] of task.items.entries()) {
+      if (item.kind !== 'activity' || !item.managedExecution) {
+        continue
+      }
+      const marker = item.managedExecution
+      if (operations.has(marker.operationId)) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Managed execution operation is duplicated',
+          path: ['items', index, 'managedExecution', 'operationId']
+        })
+      } else {
+        operations.add(marker.operationId)
+      }
+      if (marker.claim !== 'approved' || !item.callId) continue
+      const callKey = `${item.runId}\u0000${item.callId}`
+      const existing = claimsByCall.get(callKey)
+      if (existing) {
+        context.addIssue({
+          code: 'custom',
+          message:
+            existing === marker.actionSha256
+              ? 'Managed execution claim is duplicated'
+              : 'Managed execution call has conflicting action hashes',
+          path: ['items', index, 'managedExecution', 'actionSha256']
+        })
+        continue
+      }
+      claimsByCall.set(callKey, marker.actionSha256)
+    }
   })
-})
+
+const persistedStateSchema = z
+  .object({
+    version: z.literal(1),
+    providers: z.array(providerSchema).min(1).max(1_000),
+    mcpServers: z.array(mcpServerSchema).max(100).default([]),
+    tasks: z.array(taskSchema).max(10_000),
+    settings: z.object({
+      selectedTaskId: identifier.optional(),
+      defaultProviderId: identifier.optional(),
+      sidebarCollapsed: z.boolean()
+    })
+  })
+  .superRefine((state, context) => {
+    const operationIds = new Set<string>()
+    const claimsByCall = new Map<string, string>()
+    for (const [taskIndex, task] of state.tasks.entries()) {
+      for (const [itemIndex, item] of task.items.entries()) {
+        if (item.kind !== 'activity' || !item.managedExecution) continue
+        const marker = item.managedExecution
+        const markerPath = [
+          'tasks',
+          taskIndex,
+          'items',
+          itemIndex,
+          'managedExecution'
+        ] as Array<string | number>
+        if (operationIds.has(marker.operationId)) {
+          context.addIssue({
+            code: 'custom',
+            message: 'Managed execution operation must be globally unique',
+            path: [...markerPath, 'operationId']
+          })
+        } else {
+          operationIds.add(marker.operationId)
+        }
+        if (
+          marker.claim !== 'approved' ||
+          item.callId === undefined
+        ) {
+          continue
+        }
+        const callKey = `${item.runId}\u0000${item.callId}`
+        const existing = claimsByCall.get(callKey)
+        if (existing !== undefined) {
+          context.addIssue({
+            code: 'custom',
+            message:
+              existing === marker.actionSha256
+                ? 'Managed execution claim must be globally unique'
+                : 'Managed execution call has globally conflicting action hashes',
+            path: [...markerPath, 'actionSha256']
+          })
+        } else {
+          claimsByCall.set(callKey, marker.actionSha256)
+        }
+      }
+    }
+  })
 
 export function parsePersistedState(value: unknown): PersistedStateData {
   const state = persistedStateSchema.parse(value)

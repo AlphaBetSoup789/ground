@@ -17,9 +17,9 @@ import {
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type {
-  ActivityItem,
+  DesktopActivityItem,
   DesktopTask,
-  ProviderProfile,
+  ProviderProfile
 } from '../../../shared/types'
 
 interface TimelineProps {
@@ -27,7 +27,10 @@ interface TimelineProps {
   provider?: ProviderProfile
   suggestions: string[]
   onSuggestion: (prompt: string) => void
-  onResolveApproval: (item: ActivityItem, approved: boolean) => Promise<void>
+  onResolveApproval: (
+    item: DesktopActivityItem,
+    approved: boolean
+  ) => Promise<void>
   onSetImportedHistory: (include: boolean) => void
 }
 
@@ -234,7 +237,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
 }
 
 function ActivityCard(props: {
-  item: ActivityItem
+  item: DesktopActivityItem
   onResolve: (approved: boolean) => Promise<void>
 }): React.JSX.Element {
   const { item } = props
@@ -360,7 +363,11 @@ function ActivityCard(props: {
   )
 }
 
-function StatusIcon({ status }: { status: ActivityItem['status'] }): React.JSX.Element {
+function StatusIcon({
+  status
+}: {
+  status: DesktopActivityItem['status']
+}): React.JSX.Element {
   if (status === 'running') {
     return <LoaderCircle className="status-spin" size={12} aria-hidden="true" />
   }
@@ -376,7 +383,7 @@ function StatusIcon({ status }: { status: ActivityItem['status'] }): React.JSX.E
   return <CircleDot className="status-pending" size={12} aria-hidden="true" />
 }
 
-function activityStatusLabel(status: ActivityItem['status']): string {
+function activityStatusLabel(status: DesktopActivityItem['status']): string {
   switch (status) {
     case 'pending':
       return 'Pending approval'

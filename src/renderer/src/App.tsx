@@ -2,10 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { PanelLeft, Settings2 } from 'lucide-react'
 import type {
   AppSnapshot,
+  DesktopActivityItem,
+  DesktopRunEventEnvelope,
   DesktopTask,
-  RunEventEnvelope,
   TaskExportFormat,
-  TaskItem,
   TaskPatch
 } from '../../shared/types'
 import { desktop } from './lib/desktop'
@@ -23,7 +23,7 @@ export default function App(): React.JSX.Element {
   const [snapshotError, setSnapshotError] = useState<string>()
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
-  const pendingRunEventsRef = useRef<RunEventEnvelope[]>([])
+  const pendingRunEventsRef = useRef<DesktopRunEventEnvelope[]>([])
   const refreshQueueRef = useRef<Promise<void>>(Promise.resolve())
   const pendingRefreshesRef = useRef(0)
   const [toast, setToast] = useState<{
@@ -352,7 +352,7 @@ export default function App(): React.JSX.Element {
   }, [selectedTask, showError])
 
   const resolveApproval = useCallback(
-    async (item: Extract<TaskItem, { kind: 'activity' }>, approved: boolean) => {
+    async (item: DesktopActivityItem, approved: boolean) => {
       if (!item.approvalId) return
       try {
         await desktop.resolveApproval(item.runId, item.approvalId, approved)

@@ -90,14 +90,15 @@ user-configured server
   → namespaced tool discovery + definition fingerprint
   → exact definition-set approval
   → model tool selection
-  → complete per-call argument approval
+  → exact connection/tool/argument approval
   → main-process MCP execution + bounded JSON-safe result
 ```
 
 Definition trust controls which advertised tools a model may request. Per-call
-approval controls a particular invocation. Neither mechanism confines a local
-stdio server process or guarantees that a remote server’s implementation matches
-its advertised schema.
+approval controls a particular invocation and is bound to the canonical remote
+endpoint or exact local invocation so same-ID reconfiguration cannot redirect it.
+Neither mechanism confines a local stdio server process or guarantees that a
+remote server’s implementation matches its advertised schema.
 
 ### Direct user terminal and Git
 
@@ -117,7 +118,9 @@ therefore retains the current account’s OS authority.
 - Workspace grants and CLI authorization are created in the main process.
   Renderer task DTOs contain only fresh process-scoped grant IDs and sanitized
   path-free labels; canonical paths, runtime sessions, and model continuation
-  state are projected out through an explicit allowlist.
+  state are projected out through an explicit allowlist. Durable execution
+  markers and action/approval hashes are likewise removed from snapshots and
+  live/replayed events.
 - Endpoint credentials are bound to a provider kind and canonical endpoint, kept
   out of renderer state, stored under boundary-specific opaque references, and
   saved only when Electron secure storage is genuinely available. Interrupted
@@ -189,10 +192,20 @@ therefore retains the current account’s OS authority.
   main-process-owned native dialog. The dialog renders control and bidirectional
   characters visibly, displays the exact immutable action envelope, and binds it
   to a SHA-256 identity before one-shot execution can continue.
+- Ground durably records a unique operation ID and separate prepared-action and
+  native-approval hashes before each managed write, command, or MCP dispatch. A
+  terminal tool result reaches the model only after the outcome record persists.
+- If Ground restarts after the started record but before the outcome record, it
+  marks the outcome unknown, preserves the evidence, clears unsafe continuation
+  state, and never retries the action automatically. Legacy running mutators are
+  marked untracked/uncertain rather than assigned synthetic approval evidence.
+  Recovery summaries are capped at 256 per task and additionally limited by
+  remaining capacity under the persisted 100,000-item task ceiling.
 - MCP results are JSON-normalized and bounded; Apps/UI material is stripped, and
   elicitation is not advertised.
-- Interrupted in-progress state is recovered explicitly rather than presented as a
-  successful run.
+- Interrupted reads and pending approvals are terminalized explicitly rather than
+  presented as successful. Interrupted managed mutations use the stronger
+  outcome-unknown recovery above.
 - Persisted state is size-bounded, schema-normalized, transactionally published
   only after private atomic replacement, and preceded by one validated rotating
   `.bak` snapshot. Startup can restore that backup, quarantine structurally

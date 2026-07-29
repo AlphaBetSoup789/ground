@@ -25,12 +25,19 @@ import {
 } from './agent'
 import { assertJsonObject } from './agent/json'
 import { resolveCliEnvironment } from './cli-environment'
+import {
+  fingerprintPreparedCommandAction,
+  fingerprintPreparedMcpCall,
+  fingerprintPreparedWriteAction,
+  prepareMcpExecutionCall
+} from './execution-binding'
 import { createId, nowIso } from './lib/ids'
 import type {
   McpExecuteOptions,
   McpExposedTool,
   McpToolExecutionResult
 } from './mcp-service'
+import { agentApprovalFingerprint } from './native-agent-approval'
 import {
   cliSessionIdContainsSensitiveValue,
   type CliActivity,
@@ -153,8 +160,12 @@ export interface PendingAgentApproval {
 
 interface PendingApprovalState {
   envelope: PendingAgentApproval
-  resolve: (approved: boolean) => void
+  resolve: (decision: PendingApprovalDecision) => void
 }
+
+type PendingApprovalDecision =
+  | { approved: false }
+  | { approved: true; approvalSha256: string }
 
 interface RequestToolCandidate {
   definition: ModelToolDefinition
@@ -176,6 +187,7 @@ type EventSink = (event: RunEvent) => void
 
 export class RunManager {
   private readonly activeRuns = new Map<string, ActiveRun>()
+  private readonly startingTaskIds = new Set<string>()
 
   constructor(
     private readonly store: StateStore,
@@ -190,18 +202,41 @@ export class RunManager {
     }
   ) {}
 
-  async start(taskId: string, prompt: string): Promise<string> {
+  assertTaskCanStart(taskId: string): void {
     const task = this.store.getTask(taskId)
     if (task.archivedAt) {
       throw new Error('Unarchive this task before starting a run')
     }
-    if ([...this.activeRuns.values()].some((run) => run.taskId === taskId)) {
+    if (
+      this.startingTaskIds.has(taskId) ||
+      [...this.activeRuns.values()].some((run) => run.taskId === taskId)
+    ) {
       throw new Error('This task already has a run in progress')
+    }
+    if (taskHasStartedManagedExecution(task)) {
+      throw new Error(
+        'This task has a managed action with an unresolved outcome. Restart Ground to recover it before starting another run.'
+      )
     }
     const provider = this.store.getProvider(task.providerId)
     if (this.providerOperations?.isMutationReserved(provider.id)) {
       throw new Error('Wait for the provider change to finish before starting a run')
     }
+  }
+
+  async start(taskId: string, prompt: string): Promise<string> {
+    this.assertTaskCanStart(taskId)
+    this.startingTaskIds.add(taskId)
+    try {
+      return await this.startReserved(taskId, prompt)
+    } finally {
+      this.startingTaskIds.delete(taskId)
+    }
+  }
+
+  private async startReserved(taskId: string, prompt: string): Promise<string> {
+    const task = this.store.getTask(taskId)
+    const provider = this.store.getProvider(task.providerId)
     const workspacePath = task.workspacePath
       ? await this.authorizeWorkspace(task.workspacePath)
       : undefined
@@ -239,6 +274,14 @@ export class RunManager {
     }
     try {
       await this.store.mutateTask(taskId, (mutable) => {
+        if (mutable.archivedAt) {
+          throw new Error('Unarchive this task before starting a run')
+        }
+        if (taskHasStartedManagedExecution(mutable)) {
+          throw new Error(
+            'This task has a managed action with an unresolved outcome. Restart Ground to recover it before starting another run.'
+          )
+        }
         mutable.items.push(userMessage)
         mutable.runStatus = 'running'
         if (mutable.title === 'New task') mutable.title = createTaskTitle(prompt)
@@ -270,7 +313,9 @@ export class RunManager {
   async stop(runId: string): Promise<void> {
     const run = this.activeRuns.get(runId)
     if (!run) return
-    for (const pending of run.pendingApprovals.values()) pending.resolve(false)
+    for (const pending of run.pendingApprovals.values()) {
+      pending.resolve({ approved: false })
+    }
     run.pendingApprovals.clear()
     run.controller.abort()
     await run.completion
@@ -296,7 +341,9 @@ export class RunManager {
   async stopAll(): Promise<void> {
     const runs = [...this.activeRuns.values()]
     for (const run of runs) {
-      for (const pending of run.pendingApprovals.values()) pending.resolve(false)
+      for (const pending of run.pendingApprovals.values()) {
+        pending.resolve({ approved: false })
+      }
       run.pendingApprovals.clear()
       run.controller.abort()
     }
@@ -326,13 +373,69 @@ export class RunManager {
     return structuredClone(pending.envelope)
   }
 
-  async resolveApproval(runId: string, approvalId: string, approved: boolean): Promise<void> {
+  async resolveApproval(
+    runId: string,
+    approvalId: string,
+    approved: boolean,
+    approvalSha256?: string
+  ): Promise<void> {
     const run = this.activeRuns.get(runId)
     if (!run) throw new Error('The run is no longer active')
     const pending = run.pendingApprovals.get(approvalId)
     if (!pending) throw new Error('Approval request not found')
+    if (approved) {
+      const expectedSha256 = agentApprovalFingerprint(pending.envelope)
+      if (approvalSha256 !== expectedSha256) {
+        throw new Error(
+          'Positive approval requires the exact native approval fingerprint'
+        )
+      }
+      run.pendingApprovals.delete(approvalId)
+      pending.resolve({ approved: true, approvalSha256: expectedSha256 })
+      return
+    }
     run.pendingApprovals.delete(approvalId)
-    pending.resolve(approved)
+    pending.resolve({ approved: false })
+  }
+
+  private waitForApprovalDecision(
+    run: ActiveRun,
+    approvalId: string,
+    envelope: PendingAgentApproval
+  ): Promise<PendingApprovalDecision> {
+    return new Promise((resolve, reject) => {
+      const signal = run.controller.signal
+      let settled = false
+      let pending: PendingApprovalState
+      const settle = (decision: PendingApprovalDecision): void => {
+        if (settled) return
+        settled = true
+        signal.removeEventListener('abort', onAbort)
+        if (run.pendingApprovals.get(approvalId) === pending) {
+          run.pendingApprovals.delete(approvalId)
+        }
+        resolve(decision)
+      }
+      const onAbort = (): void => settle({ approved: false })
+
+      if (signal.aborted) {
+        resolve({ approved: false })
+        return
+      }
+      if (run.pendingApprovals.has(approvalId)) {
+        reject(new Error('Approval request identifier is already pending'))
+        return
+      }
+      pending = {
+        envelope,
+        resolve: settle
+      }
+      run.pendingApprovals.set(approvalId, pending)
+      signal.addEventListener('abort', onAbort, { once: true })
+      // Registration and listener installation are synchronous, but retain the
+      // second check so a nonstandard AbortSignal cannot strand the waiter.
+      if (signal.aborted) onAbort()
+    })
   }
 
   private async execute(run: ActiveRun, provider: ProviderProfile): Promise<void> {
@@ -423,6 +526,16 @@ export class RunManager {
           includeImportedTimeline
         )
       : buildModelConversation(task)
+    const observedToolCallIds = conversationToolCallIds(conversation)
+    for (const item of task.items) {
+      if (
+        item.kind === 'activity' &&
+        item.callId &&
+        item.managedExecution
+      ) {
+        observedToolCallIds.add(item.callId)
+      }
+    }
     const workspaceInstructions =
       canUseWorkspaceTools && task.workspacePath
         ? await loadWorkspaceInstructions(task.workspacePath)
@@ -432,6 +545,7 @@ export class RunManager {
     let contextNoticeShown = false
 
     for (let round = 0; round < 20; round += 1) {
+      run.controller.signal.throwIfAborted()
       const mcpTools =
         task.mode === 'agent' && provider.supportsTools
           ? (this.mcp?.listApprovedTools() ?? [])
@@ -580,6 +694,13 @@ export class RunManager {
       if (response.checkpoint !== undefined) {
         latestCheckpoint = response.checkpoint as PortableJsonValue
       }
+      const toolCalls = response.output.parts.filter(
+        (part): part is ToolCallPart => part.kind === 'tool-call'
+      )
+      assertFreshToolCallIds(toolCalls, observedToolCallIds)
+      for (const toolCall of toolCalls) {
+        observedToolCallIds.add(toolCall.callId)
+      }
 
       const completedText = response.output.parts
         .filter((part) => part.kind === 'text')
@@ -632,9 +753,6 @@ export class RunManager {
         })
       }
 
-      const toolCalls = response.output.parts.filter(
-        (part): part is ToolCallPart => part.kind === 'tool-call'
-      )
       if (!toolCalls.length) {
         if (!assistantItem && !completedText) {
           await this.addAssistantMessage(run, 'The provider completed without returning text.')
@@ -655,6 +773,7 @@ export class RunManager {
       }
 
       for (const toolCall of toolCalls) {
+        run.controller.signal.throwIfAborted()
         const normalized = {
           id: toolCall.callId,
           name: toolCall.name,
@@ -682,6 +801,7 @@ export class RunManager {
           isError: isToolFailure(result)
         })
       }
+      run.controller.signal.throwIfAborted()
       await this.persistModelSession(
         run,
         provider,
@@ -689,6 +809,7 @@ export class RunManager {
         conversation,
         latestCheckpoint
       )
+      run.controller.signal.throwIfAborted()
     }
     throw new Error('The agent exceeded the twenty-step tool limit')
   }
@@ -698,6 +819,7 @@ export class RunManager {
     toolCall: NormalizedToolCall,
     workspacePath: string
   ): Promise<string> {
+    run.controller.signal.throwIfAborted()
     let input: Record<string, unknown>
     try {
       input = normalizeToolInput(toolCall.name, toolCall.argumentsText)
@@ -718,6 +840,7 @@ export class RunManager {
     let preparedWrite: PreparedWriteAction | undefined
     let preparedCommand: PreparedCommandAction | undefined
     let nativeApprovalDetail: string | undefined
+    let approvalSha256: string | undefined
     if (toolRequiresApproval(toolCall.name)) {
       const preview =
         toolCall.name === 'write_file' || toolCall.name === 'edit_file'
@@ -753,6 +876,12 @@ export class RunManager {
                 }
               })()
           : await previewTool(toolCall.name, input, workspacePath)
+      run.controller.signal.throwIfAborted()
+      if (!preparedWrite && !preparedCommand) {
+        throw new Error(
+          `Approval-required tool lacks a durable prepared-action binding: ${toolCall.name}`
+        )
+      }
       nativeApprovalDetail = preview.detail
       const approvalId = createId('approval')
       activity = await this.addActivity(run, {
@@ -774,18 +903,17 @@ export class RunManager {
         runId: run.id,
         item: activity
       })
-      const approved = await new Promise<boolean>((resolve) => {
-        run.pendingApprovals.set(approvalId, {
-          envelope: pendingApprovalEnvelope(
-            run,
-            activity,
-            approvalId,
-            nativeApprovalDetail
-          ),
-          resolve
-        })
-      })
-      if (!approved) {
+      const decision = await this.waitForApprovalDecision(
+        run,
+        approvalId,
+        pendingApprovalEnvelope(
+          run,
+          activity,
+          approvalId,
+          nativeApprovalDetail
+        )
+      )
+      if (!decision.approved) {
         const updated = await this.store.updateItem(run.taskId, activity.id, (item) => {
           if (item.kind === 'activity') item.status = 'denied'
         })
@@ -800,6 +928,7 @@ export class RunManager {
         })
         return 'The user denied this tool request.'
       }
+      approvalSha256 = decision.approvalSha256
     } else {
       const preview = await previewTool(toolCall.name, input, workspacePath)
       activity = await this.addActivity(run, {
@@ -813,12 +942,52 @@ export class RunManager {
       })
     }
 
-    const running = await this.store.updateItem(run.taskId, activity.id, (item) => {
-      if (item.kind === 'activity') statusTransitionToRunning(item)
-    })
-    await this.store.mutateTask(run.taskId, (task) => {
-      task.runStatus = 'running'
-    })
+    const managedKind = preparedWrite
+      ? ('workspace-write' as const)
+      : preparedCommand
+        ? ('command' as const)
+        : undefined
+    const actionSha256 = preparedWrite
+      ? fingerprintPreparedWriteAction(preparedWrite)
+      : preparedCommand
+        ? fingerprintPreparedCommandAction(preparedCommand)
+        : undefined
+    let running: ActivityItem
+    if (managedKind) {
+      if (!actionSha256 || !approvalSha256) {
+        throw new Error(
+          'Managed execution is missing its prepared action or native approval evidence'
+        )
+      }
+      running = await this.store.beginManagedExecution({
+        taskId: run.taskId,
+        itemId: activity.id,
+        runId: run.id,
+        callId: toolCall.id,
+        toolName: toolCall.name,
+        kind: managedKind,
+        actionSha256,
+        approvalSha256,
+        startedAt: nowIso()
+      })
+    } else {
+      const updated = await this.store.updateItem(
+        run.taskId,
+        activity.id,
+        (item) => {
+          if (item.kind === 'activity') statusTransitionToRunning(item)
+        }
+      )
+      if (updated.kind !== 'activity') {
+        throw new Error('Tool activity changed type before execution')
+      }
+      running = updated
+    }
+    if (!managedKind) {
+      await this.store.mutateTask(run.taskId, (task) => {
+        task.runStatus = 'running'
+      })
+    }
     this.emit({
       type: 'item-updated',
       taskId: run.taskId,
@@ -826,8 +995,14 @@ export class RunManager {
       item: running
     })
 
-    const startedAt = performance.now()
+    const executionStartedAt = performance.now()
+    let outcome: {
+      status: 'success' | 'error'
+      persistedResult: string
+      modelResult: string
+    }
     try {
+      run.controller.signal.throwIfAborted()
       let result: string
       if (preparedWrite) {
         await executePreparedWriteAction(preparedWrite, run.controller.signal)
@@ -848,37 +1023,46 @@ export class RunManager {
           run.controller.signal
         )
       }
-      const updated = await this.store.updateItem(run.taskId, activity.id, (item) => {
-        if (item.kind === 'activity') {
-          item.status = 'success'
-          item.result = result.slice(0, 30_000)
-          item.durationMs = Math.round(performance.now() - startedAt)
-        }
-      })
-      this.emit({
-        type: 'item-updated',
-        taskId: run.taskId,
-        runId: run.id,
-        item: updated
-      })
-      return result
+      outcome = {
+        status: 'success',
+        persistedResult: result.slice(0, 30_000),
+        modelResult: result
+      }
     } catch (error) {
       const detail = readableError(error)
-      const updated = await this.store.updateItem(run.taskId, activity.id, (item) => {
-        if (item.kind === 'activity') {
-          item.status = 'error'
-          item.result = detail
-          item.durationMs = Math.round(performance.now() - startedAt)
-        }
-      })
-      this.emit({
-        type: 'item-updated',
-        taskId: run.taskId,
-        runId: run.id,
-        item: updated
-      })
-      return `Tool error: ${detail}`
+      outcome = {
+        status: 'error',
+        persistedResult: detail.slice(0, 30_000),
+        modelResult: `Tool error: ${detail}`
+      }
     }
+    const durationMs = Math.round(performance.now() - executionStartedAt)
+    const updated =
+      managedKind && actionSha256
+        ? await this.store.completeManagedExecution({
+            taskId: run.taskId,
+            itemId: activity.id,
+            operationId: activity.id,
+            actionSha256,
+            status: outcome.status,
+            result: outcome.persistedResult,
+            durationMs,
+            completedAt: nowIso()
+          })
+        : await this.store.updateItem(run.taskId, activity.id, (item) => {
+            if (item.kind === 'activity') {
+              item.status = outcome.status
+              item.result = outcome.persistedResult
+              item.durationMs = durationMs
+            }
+          })
+    this.emit({
+      type: 'item-updated',
+      taskId: run.taskId,
+      runId: run.id,
+      item: updated
+    })
+    return outcome.modelResult
   }
 
   private async handleMcpToolCall(
@@ -886,11 +1070,12 @@ export class RunManager {
     toolCall: NormalizedToolCall,
     exposedTool: McpExposedTool
   ): Promise<string> {
-    let input: JsonObject
+    run.controller.signal.throwIfAborted()
+    let preparedCall: ReturnType<typeof prepareMcpExecutionCall>
     try {
       const parsed = JSON.parse(toolCall.argumentsText || '{}') as unknown
       assertJsonObject(parsed, 'MCP tool arguments')
-      input = parsed
+      preparedCall = prepareMcpExecutionCall(exposedTool, parsed)
     } catch (error) {
       const detail = readableError(error)
       await this.addActivity(run, {
@@ -904,6 +1089,7 @@ export class RunManager {
       return `Tool error: ${detail}`
     }
 
+    const input = preparedCall.arguments
     const serializedInput = JSON.stringify(input, null, 2)
     if (serializedInput.length > 80_000) {
       const detail =
@@ -919,6 +1105,7 @@ export class RunManager {
       return `Tool error: ${detail}`
     }
 
+    run.controller.signal.throwIfAborted()
     const approvalId = createId('approval')
     const activity = await this.addActivity(run, {
       activityType: 'approval',
@@ -928,7 +1115,8 @@ export class RunManager {
       detail: [
         `Server: ${exposedTool.metadata.serverName}`,
         `Tool: ${exposedTool.metadata.originalName}`,
-        `Definition SHA-256: ${exposedTool.metadata.fingerprint}`,
+        `Connection SHA-256: ${preparedCall.connectionFingerprint}`,
+        `Definition SHA-256: ${preparedCall.toolFingerprint}`,
         '',
         'Arguments:',
         serializedInput
@@ -948,13 +1136,12 @@ export class RunManager {
       runId: run.id,
       item: activity
     })
-    const approved = await new Promise<boolean>((resolve) => {
-      run.pendingApprovals.set(approvalId, {
-        envelope: pendingApprovalEnvelope(run, activity, approvalId),
-        resolve
-      })
-    })
-    if (!approved) {
+    const decision = await this.waitForApprovalDecision(
+      run,
+      approvalId,
+      pendingApprovalEnvelope(run, activity, approvalId)
+    )
+    if (!decision.approved) {
       const updated = await this.store.updateItem(run.taskId, activity.id, (item) => {
         if (item.kind === 'activity') item.status = 'denied'
       })
@@ -969,12 +1156,18 @@ export class RunManager {
       })
       return 'The user denied this tool request.'
     }
-
-    const running = await this.store.updateItem(run.taskId, activity.id, (item) => {
-      if (item.kind === 'activity') statusTransitionToRunning(item)
-    })
-    await this.store.mutateTask(run.taskId, (task) => {
-      task.runStatus = 'running'
+    const approvalSha256 = decision.approvalSha256
+    const actionSha256 = fingerprintPreparedMcpCall(preparedCall)
+    const running = await this.store.beginManagedExecution({
+      taskId: run.taskId,
+      itemId: activity.id,
+      runId: run.id,
+      callId: toolCall.id,
+      toolName: toolCall.name,
+      kind: 'mcp',
+      actionSha256,
+      approvalSha256,
+      startedAt: nowIso()
     })
     this.emit({
       type: 'item-updated',
@@ -983,13 +1176,29 @@ export class RunManager {
       item: running
     })
 
-    const startedAt = performance.now()
+    const executionStartedAt = performance.now()
+    let outcome: {
+      status: 'success' | 'error'
+      persistedResult: string
+      modelResult: string
+    }
     try {
+      run.controller.signal.throwIfAborted()
       if (!this.mcp) throw new Error('MCP runtime is unavailable')
-      const execution = await this.mcp.executeTool(toolCall.name, input, {
-        approvalGranted: true,
-        signal: run.controller.signal
-      })
+      const execution = await this.mcp.executeTool(
+        preparedCall.namespacedName,
+        preparedCall.arguments,
+        {
+          approvalGranted: true,
+          expectedServerId: preparedCall.serverId,
+          expectedConnectionFingerprint:
+            preparedCall.connectionFingerprint,
+          expectedOriginalName: preparedCall.originalName,
+          expectedToolFingerprint: preparedCall.toolFingerprint,
+          expectedArgumentsSha256: preparedCall.argumentsSha256,
+          signal: run.controller.signal
+        }
+      )
       const resultText = JSON.stringify(execution.result, null, 2)
       const result = [
         execution.isError ? 'MCP tool reported an error.' : undefined,
@@ -1000,37 +1209,36 @@ export class RunManager {
       ]
         .filter((part): part is string => Boolean(part))
         .join('\n')
-      const updated = await this.store.updateItem(run.taskId, activity.id, (item) => {
-        if (item.kind === 'activity') {
-          item.status = execution.isError ? 'error' : 'success'
-          item.result = result.slice(0, 30_000)
-          item.durationMs = Math.round(performance.now() - startedAt)
-        }
-      })
-      this.emit({
-        type: 'item-updated',
-        taskId: run.taskId,
-        runId: run.id,
-        item: updated
-      })
-      return execution.isError ? `Tool error: ${result}` : result
+      outcome = {
+        status: execution.isError ? 'error' : 'success',
+        persistedResult: result.slice(0, 30_000),
+        modelResult: execution.isError ? `Tool error: ${result}` : result
+      }
     } catch (error) {
       const detail = readableError(error)
-      const updated = await this.store.updateItem(run.taskId, activity.id, (item) => {
-        if (item.kind === 'activity') {
-          item.status = 'error'
-          item.result = detail
-          item.durationMs = Math.round(performance.now() - startedAt)
-        }
-      })
-      this.emit({
-        type: 'item-updated',
-        taskId: run.taskId,
-        runId: run.id,
-        item: updated
-      })
-      return `Tool error: ${detail}`
+      outcome = {
+        status: 'error',
+        persistedResult: detail.slice(0, 30_000),
+        modelResult: `Tool error: ${detail}`
+      }
     }
+    const updated = await this.store.completeManagedExecution({
+      taskId: run.taskId,
+      itemId: activity.id,
+      operationId: activity.id,
+      actionSha256,
+      status: outcome.status,
+      result: outcome.persistedResult,
+      durationMs: Math.round(performance.now() - executionStartedAt),
+      completedAt: nowIso()
+    })
+    this.emit({
+      type: 'item-updated',
+      taskId: run.taskId,
+      runId: run.id,
+      item: updated
+    })
+    return outcome.modelResult
   }
 
   private async runCliProvider(run: ActiveRun, provider: CliProvider): Promise<void> {
@@ -1579,6 +1787,45 @@ function buildModelConversation(task: Task): ConversationItem[] {
     recentTimelineItems(task.items, includeImportedHistory),
     includeImportedHistory
   )
+}
+
+function taskHasStartedManagedExecution(task: Readonly<Task>): boolean {
+  return task.items.some(
+    (item) =>
+      item.kind === 'activity' &&
+      item.managedExecution?.phase === 'started'
+  )
+}
+
+function conversationToolCallIds(
+  conversation: readonly ConversationItem[]
+): Set<string> {
+  const callIds = new Set<string>()
+  for (const item of conversation) {
+    if (item.kind === 'tool-result') {
+      callIds.add(item.callId)
+      continue
+    }
+    for (const part of item.parts) {
+      if (part.kind === 'tool-call') callIds.add(part.callId)
+    }
+  }
+  return callIds
+}
+
+function assertFreshToolCallIds(
+  toolCalls: readonly ToolCallPart[],
+  observed: ReadonlySet<string>
+): void {
+  const batch = new Set<string>()
+  for (const toolCall of toolCalls) {
+    if (observed.has(toolCall.callId) || batch.has(toolCall.callId)) {
+      throw new Error(
+        'The provider repeated a tool-call identifier. Ground stopped before running any tool from that response.'
+      )
+    }
+    batch.add(toolCall.callId)
+  }
 }
 
 function recentTimelineItems(

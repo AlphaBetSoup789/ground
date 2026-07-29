@@ -79,6 +79,7 @@ built-in adapter currently emits one.
 | Task portability | Strict JSON bundle + Markdown transcript | Integrated | User must review exports; imported content is untrusted |
 | Task lifecycle | Safe fork, archive/restore, bounded active/archive search | Integrated | Imported history is excluded by default and requires an explicit per-task opt-in |
 | State recovery | Bounded atomic primary + one rotating validated backup | Integrated | Automatic fallback only; no backup browser/manual restore |
+| Managed-action crash recovery | Durable started/completed claims for writes, commands, and MCP calls | Integrated | Reports an interrupted outcome as unknown; no automatic action/run resume |
 
 State and credential-vault readers use `O_NOFOLLOW` where the host exposes it.
 Windows does not yet have equivalent race-free reparse-point handling in Ground;

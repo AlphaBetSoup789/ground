@@ -202,6 +202,7 @@ export interface McpToolMetadata {
   approvalRequired: true
   serverId: string
   serverName: string
+  connectionFingerprint: string
   originalName: string
   title?: string
   fingerprint: string
@@ -240,15 +241,32 @@ export interface McpConnectOptions {
   signal?: AbortSignal
 }
 
-export interface McpExecuteOptions {
-  /**
-   * MCP calls are denied unless the main-process approval flow explicitly sets
-   * this for the exact call it is executing.
-   */
-  approvalGranted?: boolean
+interface McpExecuteOptionsBase {
   timeoutMs?: number
   signal?: AbortSignal
 }
+
+export type McpExecuteOptions =
+  | (McpExecuteOptionsBase & {
+      approvalGranted?: false
+      expectedServerId?: never
+      expectedConnectionFingerprint?: never
+      expectedOriginalName?: never
+      expectedToolFingerprint?: never
+      expectedArgumentsSha256?: never
+    })
+  | (McpExecuteOptionsBase & {
+      /**
+       * This evidence is issued by the main-process approval flow for one
+       * prepared call. A boolean without every exact identity field is denied.
+       */
+      approvalGranted: true
+      expectedServerId: string
+      expectedConnectionFingerprint: string
+      expectedOriginalName: string
+      expectedToolFingerprint: string
+      expectedArgumentsSha256: string
+    })
 
 export interface McpToolExecutionResult {
   serverId: string
@@ -311,12 +329,81 @@ interface PendingConnection {
   promise: Promise<McpServerSnapshot>
 }
 
+interface ApprovedMcpExecutionEvidence {
+  serverId: string
+  connectionFingerprint: string
+  originalName: string
+  toolFingerprint: string
+  argumentsSha256: string
+}
+
 function configurationError(message: string, cause?: unknown): McpServiceError {
   return new McpServiceError(
     'configuration',
     message,
     cause === undefined ? undefined : { cause }
   )
+}
+
+function approvalRequired(message: string): McpServiceError {
+  return new McpServiceError('approval-required', message)
+}
+
+function approvedExecutionEvidence(
+  options: McpExecuteOptions
+): ApprovedMcpExecutionEvidence {
+  if (
+    options.approvalGranted !== true ||
+    typeof options.expectedServerId !== 'string' ||
+    options.expectedServerId.length === 0 ||
+    typeof options.expectedConnectionFingerprint !== 'string' ||
+    !/^[a-f0-9]{64}$/u.test(options.expectedConnectionFingerprint) ||
+    typeof options.expectedOriginalName !== 'string' ||
+    options.expectedOriginalName.length === 0 ||
+    typeof options.expectedToolFingerprint !== 'string' ||
+    !/^[a-f0-9]{64}$/u.test(options.expectedToolFingerprint) ||
+    typeof options.expectedArgumentsSha256 !== 'string' ||
+    !/^[a-f0-9]{64}$/u.test(options.expectedArgumentsSha256)
+  ) {
+    throw approvalRequired(
+      'MCP tool calls require exact main-process approval evidence'
+    )
+  }
+  return Object.freeze({
+    serverId: options.expectedServerId,
+    connectionFingerprint: options.expectedConnectionFingerprint,
+    originalName: options.expectedOriginalName,
+    toolFingerprint: options.expectedToolFingerprint,
+    argumentsSha256: options.expectedArgumentsSha256
+  })
+}
+
+function canonicalJson(value: JsonValue): string {
+  if (
+    value === null ||
+    typeof value === 'boolean' ||
+    typeof value === 'number' ||
+    typeof value === 'string'
+  ) {
+    const serialized = JSON.stringify(value)
+    if (serialized === undefined) {
+      throw configurationError('MCP tool arguments could not be serialized')
+    }
+    return serialized
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(',')}]`
+  }
+  return `{${Object.keys(value)
+    .sort()
+    .map((key) => {
+      const item = value[key]
+      if (item === undefined) {
+        throw configurationError('MCP tool arguments could not be serialized')
+      }
+      return `${JSON.stringify(key)}:${canonicalJson(item)}`
+    })
+    .join(',')}}`
 }
 
 function normalizedHostname(url: URL): string {
@@ -795,6 +882,46 @@ function stdioInvocationFingerprint(
       })
     )
     .digest('hex')
+}
+
+function connectionConfigFingerprint(
+  config: Readonly<NormalizedMcpServerConfig>
+): string {
+  const identity =
+    config.transport === 'streamable-http'
+      ? {
+          version: 1,
+          transport: config.transport,
+          url: config.url,
+          namespace: config.namespace
+        }
+      : {
+          version: 1,
+          transport: config.transport,
+          invocationFingerprint: stdioInvocationFingerprint(config),
+          namespace: config.namespace
+        }
+  return createHash('sha256')
+    .update('ground:mcp:connection-config:v1\0')
+    .update(JSON.stringify(identity))
+    .digest('hex')
+}
+
+function normalizeToolDefinitionFingerprint(value: string): string {
+  if (/^[a-f0-9]{64}$/u.test(value)) return value
+  if (/^[A-Za-z0-9_-]{43}$/u.test(value)) {
+    const digest = Buffer.from(value, 'base64url')
+    if (
+      digest.byteLength === 32 &&
+      digest.toString('base64url') === value
+    ) {
+      return digest.toString('hex')
+    }
+  }
+  throw new McpServiceError(
+    'connection',
+    'MCP tool definition fingerprint was not a SHA-256 digest'
+  )
 }
 
 function boundStdioToolFingerprint(
@@ -1734,10 +1861,13 @@ export class McpService {
     )
     const fingerprints: Record<string, string> = Object.create(null)
     for (const [name, tool] of tools) {
-      const schemaFingerprint = schemaFingerprints[name]
-      if (!schemaFingerprint) {
+      const rawSchemaFingerprint = schemaFingerprints[name]
+      if (!rawSchemaFingerprint) {
         throw new McpServiceError('connection', `Could not fingerprint MCP tool ${name}`)
       }
+      const schemaFingerprint = normalizeToolDefinitionFingerprint(
+        rawSchemaFingerprint
+      )
       const fingerprint =
         config.transport === 'stdio'
           ? boundStdioToolFingerprint(
@@ -1857,6 +1987,9 @@ export class McpService {
       connection.discovery.fingerprints,
       connection.trustedFingerprints
     )
+    const connectionFingerprint = connectionConfigFingerprint(
+      connection.config
+    )
     const tools = [...connection.discovery.tools.values()]
       .map<McpExposedTool>((tool) => ({
         definition: structuredClone(tool.definition),
@@ -1865,6 +1998,7 @@ export class McpService {
           approvalRequired: true,
           serverId: connection.config.id,
           serverName: connection.config.name,
+          connectionFingerprint,
           originalName: tool.originalName,
           ...(tool.title ? { title: tool.title } : {}),
           fingerprint: tool.fingerprint,
@@ -1897,50 +2031,75 @@ export class McpService {
     }
   }
 
+  private approvedToolAtDispatch(
+    connection: Connection,
+    namespacedName: string,
+    evidence: Readonly<ApprovedMcpExecutionEvidence>,
+    argumentsSha256: string
+  ): InternalTool {
+    if (
+      this.connections.get(evidence.serverId) !== connection ||
+      connection.config.id !== evidence.serverId ||
+      connectionConfigFingerprint(connection.config) !==
+        evidence.connectionFingerprint
+    ) {
+      throw new McpServiceError(
+        'tool-drift',
+        'The approved MCP server configuration changed before dispatch'
+      )
+    }
+    if (argumentsSha256 !== evidence.argumentsSha256) {
+      throw approvalRequired(
+        'MCP tool arguments do not match the exact approved call'
+      )
+    }
+    const tool = connection.discovery.tools.get(namespacedName)
+    if (
+      !tool ||
+      tool.namespacedName !== namespacedName ||
+      tool.originalName !== evidence.originalName ||
+      tool.fingerprint !== evidence.toolFingerprint ||
+      connection.trustedFingerprints[namespacedName] !==
+        evidence.toolFingerprint
+    ) {
+      throw new McpServiceError(
+        'tool-drift',
+        'The approved MCP tool identity changed before dispatch'
+      )
+    }
+    return tool
+  }
+
   async executeTool(
     namespacedName: string,
     input: unknown,
     options: McpExecuteOptions = {}
   ): Promise<McpToolExecutionResult> {
-    if (!options.approvalGranted) {
-      throw new McpServiceError(
-        'approval-required',
-        `MCP tool calls require approval: ${namespacedName}`
-      )
-    }
+    const evidence = approvedExecutionEvidence(options)
     assertJsonObject(input, 'MCP tool arguments')
-    const serializedInput = JSON.stringify(input)
+    const serializedInput = canonicalJson(input)
     if (Buffer.byteLength(serializedInput) > MAX_ARGUMENT_BYTES) {
       throw configurationError('MCP tool arguments are too large')
     }
     const safeInput = JSON.parse(serializedInput) as JsonObject
-    let connection: Connection | undefined
-    for (const candidate of this.connections.values()) {
-      if (candidate.discovery.tools.has(namespacedName)) {
-        connection = candidate
-        break
-      }
-    }
+    const argumentsSha256 = createHash('sha256')
+      .update(serializedInput)
+      .digest('hex')
+    const connection = this.connections.get(evidence.serverId)
     if (!connection) {
-      throw new McpServiceError('not-found', `MCP tool was not found: ${namespacedName}`)
+      throw new McpServiceError(
+        'tool-drift',
+        'The approved MCP server is no longer connected'
+      )
     }
 
     await this.refreshConnection(connection, options.signal)
-    const tool = connection.discovery.tools.get(namespacedName)
-    if (!tool) {
-      throw new McpServiceError(
-        'tool-drift',
-        `MCP tool was removed after it was listed: ${namespacedName}`
-      )
-    }
-    if (
-      connection.trustedFingerprints[namespacedName] !== tool.fingerprint
-    ) {
-      throw new McpServiceError(
-        'tool-drift',
-        `MCP tool definition is new or changed and must be approved: ${namespacedName}`
-      )
-    }
+    this.approvedToolAtDispatch(
+      connection,
+      namespacedName,
+      evidence,
+      argumentsSha256
+    )
 
     const timeoutMs = validateDuration(
       options.timeoutMs,
@@ -1956,8 +2115,14 @@ export class McpService {
       timeoutMs,
       connection.lifecycle.signal,
       options.signal,
-      (signal) =>
-        connection.client.callTool({
+      (signal) => {
+        const tool = this.approvedToolAtDispatch(
+          connection,
+          namespacedName,
+          evidence,
+          argumentsSha256
+        )
+        return connection.client.callTool({
           name: tool.originalName,
           arguments: safeInput,
           options: {
@@ -1966,6 +2131,7 @@ export class McpService {
             maxTotalTimeout: timeoutMs
           }
         })
+      }
     )
     const capped = capResult(rawResult, connection.config.maxResultBytes)
     return {

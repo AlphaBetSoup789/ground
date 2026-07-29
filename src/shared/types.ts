@@ -184,6 +184,84 @@ export interface ProviderAttribution {
   model: string
 }
 
+export type ManagedExecutionKind = 'workspace-write' | 'command' | 'mcp'
+
+interface ManagedExecutionMarkerBase {
+  version: 1
+  /**
+   * Durable operation identity. This must equal the owning ActivityItem.id.
+   */
+  operationId: string
+  kind: ManagedExecutionKind
+  startedAt: string
+}
+
+interface ApprovedManagedExecutionBase extends ManagedExecutionMarkerBase {
+  claim: 'approved'
+  /**
+   * SHA-256 of the exact prepared side-effect envelope.
+   */
+  actionSha256: string
+  /**
+   * SHA-256 of the exact native approval envelope consumed at begin.
+   */
+  approvalSha256: string
+}
+
+export interface StartedManagedExecution extends ApprovedManagedExecutionBase {
+  phase: 'started'
+}
+
+export interface CompletedManagedExecution extends ApprovedManagedExecutionBase {
+  phase: 'completed'
+  completedAt: string
+}
+
+export interface UncertainManagedExecution extends ApprovedManagedExecutionBase {
+  phase: 'uncertain'
+  interruptedAt: string
+}
+
+/**
+ * Recovery marker for state written before durable operation claims existed.
+ * It intentionally carries no synthetic approval or action hash.
+ */
+export interface LegacyUncertainManagedExecution
+  extends ManagedExecutionMarkerBase {
+  claim: 'legacy-untracked'
+  phase: 'uncertain'
+  interruptedAt: string
+}
+
+export type ManagedExecutionMarker =
+  | StartedManagedExecution
+  | CompletedManagedExecution
+  | UncertainManagedExecution
+  | LegacyUncertainManagedExecution
+
+export interface BeginManagedExecutionInput {
+  taskId: string
+  itemId: string
+  runId: string
+  callId: string
+  toolName: string
+  kind: ManagedExecutionKind
+  actionSha256: string
+  approvalSha256: string
+  startedAt: string
+}
+
+export interface CompleteManagedExecutionInput {
+  taskId: string
+  itemId: string
+  operationId: string
+  actionSha256: string
+  status: Extract<ActivityStatus, 'success' | 'error'>
+  result: string
+  durationMs: number
+  completedAt: string
+}
+
 export interface MessageItem {
   id: string
   kind: 'message'
@@ -211,10 +289,21 @@ export interface ActivityItem {
   durationMs?: number
   historyOnly?: boolean
   callId?: string
+  managedExecution?: ManagedExecutionMarker
   provider?: ProviderAttribution
 }
 
 export type TaskItem = MessageItem | ActivityItem
+
+/**
+ * Renderer-safe activity projection. Managed execution claims are owned by the
+ * main process and are never exposed over IPC.
+ */
+export type DesktopActivityItem = Omit<ActivityItem, 'managedExecution'> & {
+  managedExecution?: never
+}
+
+export type DesktopTaskItem = MessageItem | DesktopActivityItem
 
 export interface Task {
   id: string
@@ -255,7 +344,7 @@ export interface DesktopTask {
   archivedAt?: string
   createdAt: string
   updatedAt: string
-  items: TaskItem[]
+  items: DesktopTaskItem[]
 }
 
 export interface AppSettings {
@@ -354,7 +443,7 @@ export interface AppSnapshot {
    * events are included because streamed assistant text is committed
    * transactionally at a response boundary rather than on every token.
    */
-  activeRunEvents?: RunEventEnvelope[]
+  activeRunEvents?: DesktopRunEventEnvelope[]
 }
 
 export interface StartRunInput {
@@ -418,6 +507,60 @@ export type RunEvent =
 export interface RunEventEnvelope {
   revision: number
   event: RunEvent
+}
+
+export type DesktopRunEvent =
+  | {
+      type: 'run-started'
+      taskId: string
+      runId: string
+    }
+  | {
+      type: 'item-added'
+      taskId: string
+      runId: string
+      item: DesktopTaskItem
+    }
+  | {
+      type: 'text-delta'
+      taskId: string
+      runId: string
+      itemId: string
+      delta: string
+      offset?: number
+    }
+  | {
+      type: 'item-updated'
+      taskId: string
+      runId: string
+      item: DesktopTaskItem
+    }
+  | {
+      type: 'approval-requested'
+      taskId: string
+      runId: string
+      item: DesktopActivityItem
+    }
+  | {
+      type: 'run-completed'
+      taskId: string
+      runId: string
+    }
+  | {
+      type: 'run-stopped'
+      taskId: string
+      runId: string
+    }
+  | {
+      type: 'run-error'
+      taskId: string
+      runId: string
+      message: string
+    }
+
+export interface DesktopRunEventEnvelope {
+  revision: number
+  event: DesktopRunEvent
 }
 
 export interface TaskPatch {
@@ -560,7 +703,9 @@ export interface DesktopApi {
   startRun: (input: StartRunInput) => Promise<{ runId: string }>
   stopRun: (taskId: string) => Promise<void>
   resolveApproval: (runId: string, approvalId: string, approved: boolean) => Promise<void>
-  onRunEvent: (listener: (envelope: RunEventEnvelope) => void) => () => void
+  onRunEvent: (
+    listener: (envelope: DesktopRunEventEnvelope) => void
+  ) => () => void
   listTerminals: (taskId: string) => Promise<TerminalSessionInfo[]>
   createTerminal: (
     taskId: string,

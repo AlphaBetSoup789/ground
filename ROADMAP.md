@@ -61,6 +61,8 @@ are not necessarily release-certified.
 - [x] Put new terminal creation behind a native exact-launch confirmation
 - [x] Move write, command, and MCP-call approval behind a native user-presence
   surface
+- [x] Persist exact managed-action start/completion claims and recover interrupted
+  writes, commands, and MCP calls as outcome unknown without automatic replay
 - [x] Add Git status/diff/history, selected-path staging/unstaging, exact-tree
   commits, and clean managed-worktree create/remove
 - [ ] Add a recoverable revert workflow

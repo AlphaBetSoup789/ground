@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import type {
   AppSnapshot,
@@ -9,6 +10,7 @@ import {
   type McpManagerStore,
   type McpServiceCoordinator
 } from './mcp-manager'
+import { prepareMcpExecutionCall } from './execution-binding'
 import type {
   McpConnectOptions,
   McpExecuteOptions,
@@ -20,6 +22,21 @@ import type {
 
 const FINGERPRINT_A = 'a'.repeat(64)
 const FINGERPRINT_B = 'b'.repeat(64)
+const CONNECTION_FINGERPRINT_A = 'c'.repeat(64)
+
+function fakeConnectionFingerprint(config: McpServerConfig): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        transport: config.transport,
+        namespace: config.namespace ?? config.id,
+        ...(config.transport === 'streamable-http'
+          ? { url: new URL(config.url).toString() }
+          : { command: config.command, args: config.args ?? [] })
+      })
+    )
+    .digest('hex')
+}
 
 function profile(
   overrides: Partial<McpServerProfile> = {}
@@ -41,7 +58,8 @@ function profile(
 function tool(
   serverId = 'server-one',
   fingerprint = FINGERPRINT_A,
-  trustStatus: 'approved' | 'pending' | 'changed' = 'pending'
+  trustStatus: 'approved' | 'pending' | 'changed' = 'pending',
+  connectionFingerprint = CONNECTION_FINGERPRINT_A
 ): McpExposedTool {
   return {
     definition: {
@@ -61,6 +79,7 @@ function tool(
       approvalRequired: true,
       serverId,
       serverName: serverId,
+      connectionFingerprint,
       originalName: 'read_file',
       fingerprint,
       trustStatus
@@ -75,7 +94,8 @@ function serverSnapshot(
   const exposed = tool(
     config.id,
     Object.values(fingerprints)[0] ?? FINGERPRINT_A,
-    Object.keys(fingerprints).length ? 'approved' : 'pending'
+    Object.keys(fingerprints).length ? 'approved' : 'pending',
+    fakeConnectionFingerprint(config)
   )
   const keyedFingerprints = Object.keys(fingerprints).length
     ? { ...fingerprints }
@@ -283,6 +303,20 @@ class FakeService implements McpServiceCoordinator {
     options?: McpExecuteOptions
   ): Promise<McpToolExecutionResult> {
     this.executeCalls.push({ name: namespacedName, input, options })
+    if (options?.approvalGranted === true) {
+      const current = this.snapshots
+        .get(options.expectedServerId)
+        ?.tools.find((item) => item.definition.name === namespacedName)
+      if (
+        current?.metadata.connectionFingerprint !==
+        options.expectedConnectionFingerprint
+      ) {
+        throw Object.assign(
+          new Error('The approved MCP server configuration changed before dispatch'),
+          { code: 'tool-drift' as const }
+        )
+      }
+    }
     return {
       serverId: 'server-one',
       toolName: namespacedName,
@@ -693,20 +727,79 @@ describe('MCP manager trust and execution', () => {
     const service = new FakeService()
     const manager = new McpManager(store, service)
     await manager.connect(stored.id)
-    expect(manager.listApprovedTools()).toHaveLength(1)
+    const approvedTool = manager.listApprovedTools()[0]
+    expect(approvedTool).toBeDefined()
+    if (!approvedTool) throw new Error('Expected approved MCP tool fixture')
+    const input = { path: 'README.md' }
+    const prepared = prepareMcpExecutionCall(approvedTool, input)
+    const options: McpExecuteOptions = {
+      approvalGranted: true,
+      expectedServerId: prepared.serverId,
+      expectedConnectionFingerprint: prepared.connectionFingerprint,
+      expectedOriginalName: prepared.originalName,
+      expectedToolFingerprint: prepared.toolFingerprint,
+      expectedArgumentsSha256: prepared.argumentsSha256,
+      timeoutMs: 500
+    }
     const result = await manager.executeTool(
       exposedName,
-      { path: 'README.md' },
-      { approvalGranted: true, timeoutMs: 500 }
+      input,
+      options
     )
     expect(result.result).toEqual({ ok: true })
     expect(service.executeCalls).toEqual([
       {
         name: exposedName,
-        input: { path: 'README.md' },
-        options: { approvalGranted: true, timeoutMs: 500 }
+        input,
+        options
       }
     ])
+  })
+
+  it('cannot dispatch an approved call after the same server is reconfigured to another URL', async () => {
+    const exposedName = 'mcp__server_one__read_file'
+    const stored = profile({
+      url: 'https://mcp-a.example.com/rpc',
+      trustedFingerprints: { [exposedName]: FINGERPRINT_A }
+    })
+    const store = new FakeStore([stored])
+    const service = new FakeService()
+    const manager = new McpManager(store, service)
+    await manager.connect(stored.id)
+    const approvedTool = manager.listApprovedTools()[0]
+    if (!approvedTool) throw new Error('Expected approved MCP tool fixture')
+    const input = { path: 'README.md' }
+    const prepared = prepareMcpExecutionCall(approvedTool, input)
+    const approvedOptions: McpExecuteOptions = {
+      approvalGranted: true,
+      expectedServerId: prepared.serverId,
+      expectedConnectionFingerprint: prepared.connectionFingerprint,
+      expectedOriginalName: prepared.originalName,
+      expectedToolFingerprint: prepared.toolFingerprint,
+      expectedArgumentsSha256: prepared.argumentsSha256
+    }
+
+    service.connectDelayMs = 25
+    const reconfiguring = manager.save({
+      id: stored.id,
+      name: stored.name,
+      namespace: stored.namespace,
+      enabled: true,
+      transport: 'streamable-http',
+      url: 'https://mcp-b.example.com/rpc'
+    })
+    const blockedExecution = expect(
+      manager.executeTool(
+        prepared.namespacedName,
+        prepared.arguments,
+        approvedOptions
+      )
+    ).rejects.toMatchObject({ code: 'tool-drift' })
+    await reconfiguring
+    expect(
+      service.inspectServer(stored.id).tools[0]?.metadata.connectionFingerprint
+    ).not.toBe(prepared.connectionFingerprint)
+    await blockedExecution
   })
 
   it('closes the underlying service once and marks runtime state disconnected', async () => {

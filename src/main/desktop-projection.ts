@@ -1,12 +1,66 @@
 import type {
+  ActivityItem,
   AppSnapshot,
+  DesktopActivityItem,
+  DesktopRunEvent,
+  DesktopRunEventEnvelope,
   DesktopTask,
+  DesktopTaskItem,
+  RunEvent,
+  RunEventEnvelope,
   Task
 } from '../shared/types'
 import type { StateSnapshot } from './store'
 import type { WorkspaceGrantRegistry } from './trust-boundary'
 
 type MaybePromise<Value> = Value | PromiseLike<Value>
+
+export function toDesktopActivityItem(
+  item: Readonly<ActivityItem>
+): DesktopActivityItem {
+  const {
+    managedExecution: _managedExecution,
+    ...desktopItem
+  } = item
+  return structuredClone(desktopItem)
+}
+
+export function toDesktopTaskItem(
+  item: Readonly<Task['items'][number]>
+): DesktopTaskItem {
+  return item.kind === 'activity'
+    ? toDesktopActivityItem(item)
+    : structuredClone(item)
+}
+
+export function toDesktopRunEvent(
+  event: Readonly<RunEvent>
+): DesktopRunEvent {
+  switch (event.type) {
+    case 'item-added':
+    case 'item-updated':
+      return structuredClone({
+        ...event,
+        item: toDesktopTaskItem(event.item)
+      })
+    case 'approval-requested':
+      return structuredClone({
+        ...event,
+        item: toDesktopActivityItem(event.item)
+      })
+    default:
+      return structuredClone(event)
+  }
+}
+
+export function toDesktopRunEventEnvelope(
+  envelope: Readonly<RunEventEnvelope>
+): DesktopRunEventEnvelope {
+  return {
+    revision: envelope.revision,
+    event: toDesktopRunEvent(envelope.event)
+  }
+}
 
 export function toDesktopTask(
   task: Readonly<Task>,
@@ -28,7 +82,7 @@ export function toDesktopTask(
     ...(task.archivedAt ? { archivedAt: task.archivedAt } : {}),
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
-    items: task.items
+    items: task.items.map(toDesktopTaskItem)
   })
 }
 

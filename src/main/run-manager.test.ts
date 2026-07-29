@@ -29,6 +29,7 @@ import {
   providerCredentialReference,
   providerCredentialReferenceFor
 } from './provider-credentials'
+import { agentApprovalFingerprint } from './native-agent-approval'
 import { ProviderOperationGate } from './provider-operation-gate'
 import { SecretVault } from './secrets'
 import { StateStore } from './store'
@@ -156,9 +157,10 @@ function credentialVault(initial: Iterable<[string, string]> = []): {
 async function* toolCallResponse(
   request: ModelRequest,
   name: string,
-  input: JsonObject
+  input: JsonObject,
+  fixedCallId?: string
 ): AsyncIterable<ModelEvent> {
-  const callId = `${request.requestId}:call`
+  const callId = fixedCallId ?? `${request.requestId}:call`
   const rawArguments = JSON.stringify(input)
   yield { type: 'response.started', servingModel: request.model }
   yield {
@@ -179,6 +181,73 @@ async function* toolCallResponse(
       name,
       rawArguments,
       arguments: input
+    }
+  }
+  yield {
+    type: 'response.completed',
+    messageId: `${request.requestId}:assistant`,
+    stopReason: 'tool-calls'
+  }
+}
+
+async function* multipleToolCallResponse(
+  request: ModelRequest,
+  calls: ReadonlyArray<{
+    name: string
+    input: JsonObject
+  }>
+): AsyncIterable<ModelEvent> {
+  yield { type: 'response.started', servingModel: request.model }
+  for (const [index, call] of calls.entries()) {
+    const callId = `${request.requestId}:call:${index + 1}`
+    const rawArguments = JSON.stringify(call.input)
+    yield {
+      type: 'part.started',
+      part: { kind: 'tool-call', partId: callId, callId, name: call.name }
+    }
+    yield {
+      type: 'part.completed',
+      partId: callId,
+      part: {
+        kind: 'tool-call',
+        callId,
+        name: call.name,
+        rawArguments,
+        arguments: call.input
+      }
+    }
+  }
+  yield {
+    type: 'response.completed',
+    messageId: `${request.requestId}:assistant`,
+    stopReason: 'tool-calls'
+  }
+}
+
+async function* duplicateToolCallResponse(
+  request: ModelRequest,
+  name: string,
+  input: JsonObject
+): AsyncIterable<ModelEvent> {
+  const callId = `${request.requestId}:duplicate`
+  const rawArguments = JSON.stringify(input)
+  yield { type: 'response.started', servingModel: request.model }
+  for (const suffix of ['first', 'second']) {
+    const partId = `${callId}:${suffix}`
+    yield {
+      type: 'part.started',
+      part: { kind: 'tool-call', partId, callId, name }
+    }
+    yield {
+      type: 'part.completed',
+      partId,
+      part: {
+        kind: 'tool-call',
+        callId,
+        name,
+        rawArguments,
+        arguments: input
+      }
     }
   }
   yield {
@@ -256,6 +325,20 @@ function terminalEvents(
   }
 }
 
+async function approvePending(
+  manager: RunManager,
+  runId: string,
+  approvalId: string
+): Promise<void> {
+  const pending = manager.getPendingApproval(runId, approvalId)
+  await manager.resolveApproval(
+    runId,
+    approvalId,
+    true,
+    agentApprovalFingerprint(pending)
+  )
+}
+
 async function harness(
   scripts: ModelScript[],
   mcp?: McpRuntime,
@@ -331,6 +414,95 @@ describe('RunManager model runtime', () => {
     expect(run.events).toEqual([])
     expect(run.store.getTask(run.taskId).items).toEqual([])
     expect(run.manager.isTaskActive(run.taskId)).toBe(false)
+  })
+
+  it('reserves a task while asynchronous workspace authorization is pending', async () => {
+    let releaseWorkspace: () => void = () => undefined
+    const workspaceGate = new Promise<void>((resolve) => {
+      releaseWorkspace = resolve
+    })
+    const authorizeWorkspace = vi.fn(async (candidate: string) => {
+      await workspaceGate
+      return realpath(candidate)
+    })
+    const run = await harness(
+      [(request) => textResponse(request, 'Only one run started.')],
+      undefined,
+      { authorizeWorkspace }
+    )
+
+    const first = run.manager.start(run.taskId, 'First prompt')
+    await vi.waitFor(() => expect(authorizeWorkspace).toHaveBeenCalledTimes(1))
+    await expect(
+      run.manager.start(run.taskId, 'Concurrent prompt')
+    ).rejects.toThrow(/already has a run in progress/i)
+
+    releaseWorkspace()
+    await expect(first).resolves.toMatch(/^run_/)
+    expect((await run.terminal).type).toBe('run-completed')
+    expect(authorizeWorkspace).toHaveBeenCalledTimes(1)
+    expect(run.requests).toHaveLength(1)
+    expect(
+      run.store
+        .getTask(run.taskId)
+        .items.filter((item) => item.kind === 'message' && item.role === 'user')
+        .map((item) => (item.kind === 'message' ? item.content : ''))
+    ).toEqual(['First prompt'])
+  })
+
+  it('rechecks unresolved managed claims in the atomic run-start mutation', async () => {
+    let releaseWorkspace: () => void = () => undefined
+    const workspaceGate = new Promise<void>((resolve) => {
+      releaseWorkspace = resolve
+    })
+    const run = await harness(
+      [(request) => textResponse(request, 'Must not be requested.')],
+      undefined,
+      {
+        authorizeWorkspace: async (candidate) => {
+          await workspaceGate
+          return realpath(candidate)
+        }
+      }
+    )
+
+    const starting = run.manager.start(run.taskId, 'Must not be recorded')
+    await run.store.mutateTask(run.taskId, (task) => {
+      task.runStatus = 'running'
+      task.items.push({
+        id: 'unresolved-operation',
+        kind: 'activity',
+        runId: 'earlier-run',
+        activityType: 'tool',
+        title: 'Earlier write',
+        status: 'running',
+        toolName: 'write_file',
+        callId: 'earlier-call',
+        createdAt: '2026-07-28T12:00:00.000Z',
+        managedExecution: {
+          version: 1,
+          operationId: 'unresolved-operation',
+          claim: 'approved',
+          kind: 'workspace-write',
+          actionSha256: 'a'.repeat(64),
+          approvalSha256: 'b'.repeat(64),
+          phase: 'started',
+          startedAt: '2026-07-28T12:00:00.000Z'
+        }
+      })
+    })
+    releaseWorkspace()
+
+    await expect(starting).rejects.toThrow(/unresolved outcome/i)
+    expect(run.requests).toEqual([])
+    expect(
+      run.store
+        .getTask(run.taskId)
+        .items.some(
+          (item) =>
+            item.kind === 'message' && item.content === 'Must not be recorded'
+        )
+    ).toBe(false)
   })
 
   it('refuses to start archived tasks even when called outside the desktop IPC boundary', async () => {
@@ -470,6 +642,107 @@ describe('RunManager model runtime', () => {
     })
     expect(run.manager.isTaskActive(run.taskId)).toBe(false)
     expect(run.manager.isProviderActive(providerId)).toBe(false)
+  })
+
+  it('does not strand an approval when stopped before pending registration', async () => {
+    const run = await harness([
+      (request) =>
+        toolCallResponse(request, 'write_file', {
+          path: 'README.md',
+          content: 'Ground updated'
+        })
+    ])
+    await writeFile(path.join(run.workspace, 'README.md'), 'Ground')
+
+    const originalAddItem = run.store.addItem.bind(run.store)
+    let releaseApprovalPersistence: () => void = () => undefined
+    const approvalPersistenceReleased = new Promise<void>((resolve) => {
+      releaseApprovalPersistence = resolve
+    })
+    let announceApprovalPersistence: () => void = () => undefined
+    const approvalPersistenceStarted = new Promise<void>((resolve) => {
+      announceApprovalPersistence = resolve
+    })
+    const addItem = vi
+      .spyOn(run.store, 'addItem')
+      .mockImplementation(async (taskId, item) => {
+        if (
+          item.kind === 'activity' &&
+          item.activityType === 'approval' &&
+          item.status === 'pending'
+        ) {
+          announceApprovalPersistence()
+          await approvalPersistenceReleased
+        }
+        return originalAddItem(taskId, item)
+      })
+
+    try {
+      await run.manager.start(run.taskId, 'Prepare a write')
+      await approvalPersistenceStarted
+      const stopping = run.manager.stopTask(run.taskId)
+      releaseApprovalPersistence()
+
+      await stopping
+      await expect(run.terminal).resolves.toMatchObject({
+        type: 'run-stopped',
+        taskId: run.taskId
+      })
+      expect(run.manager.isTaskActive(run.taskId)).toBe(false)
+      expect(
+        run.store
+          .getTask(run.taskId)
+          .items.some(
+            (item) =>
+              item.kind === 'activity' &&
+              item.activityType === 'approval' &&
+              item.status === 'pending'
+          )
+      ).toBe(false)
+    } finally {
+      releaseApprovalPersistence()
+      addItem.mockRestore()
+    }
+  })
+
+  it('stops before dispatching a second approval call from the same response', async () => {
+    const run = await harness([
+      (request) =>
+        multipleToolCallResponse(request, [
+          {
+            name: 'write_file',
+            input: {
+              path: 'first.txt',
+              content: 'first'
+            }
+          },
+          {
+            name: 'write_file',
+            input: {
+              path: 'second.txt',
+              content: 'second'
+            }
+          }
+        ])
+    ])
+
+    await run.manager.start(run.taskId, 'Prepare two writes')
+    await run.approval
+    await run.manager.stopTask(run.taskId)
+
+    await expect(run.terminal).resolves.toMatchObject({
+      type: 'run-stopped',
+      taskId: run.taskId
+    })
+    expect(
+      run.events.filter((event) => event.type === 'approval-requested')
+    ).toHaveLength(1)
+    await expect(
+      readFile(path.join(run.workspace, 'first.txt'), 'utf8')
+    ).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(
+      readFile(path.join(run.workspace, 'second.txt'), 'utf8')
+    ).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('waits for active provider cleanup before stopAll returns', async () => {
@@ -1348,6 +1621,147 @@ describe('RunManager model runtime', () => {
     })
   })
 
+  it('rejects duplicate tool-call identifiers before running any tool in the response', async () => {
+    const run = await harness([
+      (request) =>
+        duplicateToolCallResponse(request, 'write_file', {
+          path: 'must-not-exist.txt',
+          content: 'unsafe replay\n'
+        })
+    ])
+
+    await run.manager.start(run.taskId, 'Do not replay duplicate calls')
+    const terminal = await run.terminal
+
+    expect(terminal).toMatchObject({
+      type: 'run-error',
+      message: expect.stringMatching(/repeated a tool-call identifier/i)
+    })
+    expect(
+      run.events.some((event) => event.type === 'approval-requested')
+    ).toBe(false)
+    await expect(
+      readFile(path.join(run.workspace, 'must-not-exist.txt'), 'utf8')
+    ).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('rejects a tool-call identifier repeated across model rounds', async () => {
+    const run = await harness([
+      (request) =>
+        toolCallResponse(
+          request,
+          'read_file',
+          { path: 'existing.txt' },
+          'provider-repeated-call'
+        ),
+      (request) =>
+        toolCallResponse(
+          request,
+          'write_file',
+          {
+            path: 'must-not-be-written.txt',
+            content: 'replayed\n'
+          },
+          'provider-repeated-call'
+        )
+    ])
+    await writeFile(path.join(run.workspace, 'existing.txt'), 'read once\n')
+
+    await run.manager.start(run.taskId, 'Reject a repeated call')
+    expect(await run.terminal).toMatchObject({
+      type: 'run-error',
+      message: expect.stringMatching(/repeated a tool-call identifier/i)
+    })
+    expect(run.requests).toHaveLength(2)
+    expect(
+      run.events.some((event) => event.type === 'approval-requested')
+    ).toBe(false)
+    await expect(
+      readFile(path.join(run.workspace, 'must-not-be-written.txt'), 'utf8')
+    ).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('seeds replay protection from durable completed managed claims', async () => {
+    const run = await harness([
+      (request) =>
+        toolCallResponse(
+          request,
+          'write_file',
+          {
+            path: 'must-not-replay.txt',
+            content: 'duplicate side effect\n'
+          },
+          'durably-completed-call'
+        )
+    ])
+    await run.store.mutateTask(run.taskId, (task) => {
+      task.items.push({
+        id: 'completed-operation',
+        kind: 'activity',
+        runId: 'earlier-run',
+        activityType: 'tool',
+        title: 'Earlier write',
+        status: 'success',
+        toolName: 'write_file',
+        callId: 'durably-completed-call',
+        result: 'Wrote the file.',
+        durationMs: 5,
+        createdAt: '2026-07-28T12:00:00.000Z',
+        managedExecution: {
+          version: 1,
+          operationId: 'completed-operation',
+          claim: 'approved',
+          kind: 'workspace-write',
+          actionSha256: 'c'.repeat(64),
+          approvalSha256: 'd'.repeat(64),
+          phase: 'completed',
+          startedAt: '2026-07-28T12:00:00.000Z',
+          completedAt: '2026-07-28T12:00:01.000Z'
+        }
+      })
+    })
+
+    await run.manager.start(run.taskId, 'Do not replay the earlier call')
+    expect(await run.terminal).toMatchObject({
+      type: 'run-error',
+      message: expect.stringMatching(/repeated a tool-call identifier/i)
+    })
+    expect(
+      run.events.some((event) => event.type === 'approval-requested')
+    ).toBe(false)
+    await expect(
+      readFile(path.join(run.workspace, 'must-not-replay.txt'), 'utf8')
+    ).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('rejects a positive renderer decision without the exact native approval fingerprint', async () => {
+    const run = await harness([
+      (request) =>
+        toolCallResponse(request, 'write_file', {
+          path: 'native-only.txt',
+          content: 'must remain pending\n'
+        }),
+      (request) => textResponse(request, 'The write was denied.')
+    ])
+
+    const runId = await run.manager.start(run.taskId, 'Require native approval')
+    const approval = await run.approval
+    const approvalId = approval.item.approvalId as string
+
+    await expect(
+      run.manager.resolveApproval(runId, approvalId, true)
+    ).rejects.toThrow(/exact native approval fingerprint/i)
+    expect(run.manager.getPendingApproval(runId, approvalId)).toMatchObject({
+      runId,
+      approvalId
+    })
+    await run.manager.resolveApproval(runId, approvalId, false)
+    expect((await run.terminal).type).toBe('run-completed')
+    await expect(
+      readFile(path.join(run.workspace, 'native-only.txt'), 'utf8')
+    ).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   it('executes the exact write envelope that was approved', async () => {
     const run = await harness([
       (request) =>
@@ -1378,7 +1792,11 @@ describe('RunManager model runtime', () => {
     })
 
     await writeFile(target, 'concurrent user edit\n')
-    await run.manager.resolveApproval(runId, approval.item.approvalId as string, true)
+    await approvePending(
+      run.manager,
+      runId,
+      approval.item.approvalId as string
+    )
     const terminal = await run.terminal
 
     expect(terminal.type).toBe('run-completed')
@@ -1399,6 +1817,89 @@ describe('RunManager model runtime', () => {
         })
       ])
     )
+  })
+
+  it('never performs a managed write when the durable start claim cannot be saved', async () => {
+    const run = await harness([
+      (request) =>
+        toolCallResponse(request, 'write_file', {
+          path: 'not-started.txt',
+          content: 'must not be written\n'
+        })
+    ])
+    const begin = vi
+      .spyOn(run.store, 'beginManagedExecution')
+      .mockRejectedValueOnce(new Error('simulated durable start failure'))
+
+    const runId = await run.manager.start(run.taskId, 'Fail before execution')
+    const approval = await run.approval
+    await approvePending(
+      run.manager,
+      runId,
+      approval.item.approvalId as string
+    )
+
+    expect(await run.terminal).toMatchObject({
+      type: 'run-error',
+      message: expect.stringMatching(/simulated durable start failure/i)
+    })
+    expect(begin).toHaveBeenCalledTimes(1)
+    expect(run.requests).toHaveLength(1)
+    await expect(
+      readFile(path.join(run.workspace, 'not-started.txt'), 'utf8')
+    ).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('stops without model continuation or replay when outcome persistence fails after a write', async () => {
+    const run = await harness([
+      (request) =>
+        toolCallResponse(request, 'write_file', {
+          path: 'outcome-unknown.txt',
+          content: 'the side effect happened\n'
+        }),
+      (request) => textResponse(request, 'Must not be requested.')
+    ])
+    const complete = vi
+      .spyOn(run.store, 'completeManagedExecution')
+      .mockRejectedValueOnce(new Error('simulated durable completion failure'))
+
+    const runId = await run.manager.start(
+      run.taskId,
+      'Stop if the completion record fails'
+    )
+    const approval = await run.approval
+    await approvePending(
+      run.manager,
+      runId,
+      approval.item.approvalId as string
+    )
+
+    expect(await run.terminal).toMatchObject({
+      type: 'run-error',
+      message: expect.stringMatching(/simulated durable completion failure/i)
+    })
+    expect(complete).toHaveBeenCalledTimes(1)
+    expect(run.requests).toHaveLength(1)
+    expect(
+      await readFile(path.join(run.workspace, 'outcome-unknown.txt'), 'utf8')
+    ).toBe('the side effect happened\n')
+
+    const unresolved = run.store
+      .getTask(run.taskId)
+      .items.find((item) => item.id === approval.item.id)
+    expect(unresolved).toMatchObject({
+      kind: 'activity',
+      status: 'running',
+      managedExecution: {
+        operationId: approval.item.id,
+        phase: 'started',
+        claim: 'approved'
+      }
+    })
+    await expect(
+      run.manager.start(run.taskId, 'Do not replay the uncertain action')
+    ).rejects.toThrow(/unresolved outcome/i)
+    expect(run.requests).toHaveLength(1)
   })
 
   it.runIf(process.platform !== 'win32')(
@@ -1445,6 +1946,55 @@ describe('RunManager model runtime', () => {
     }
   )
 
+  it.runIf(process.platform !== 'win32')(
+    'durably claims and completes an approved command before model continuation',
+    async () => {
+      const run = await harness([
+        (request) =>
+          toolCallResponse(request, 'run_command', {
+            command: './durable-command'
+          }),
+        (request) => textResponse(request, 'The command completed.')
+      ])
+      const executable = path.join(run.workspace, 'durable-command')
+      await writeFile(executable, '#!/bin/sh\nprintf durable-command-result\n')
+      await chmod(executable, 0o755)
+
+      const runId = await run.manager.start(run.taskId, 'Run it once')
+      const approval = await run.approval
+      const nativeApproval = run.manager.getPendingApproval(
+        runId,
+        approval.item.approvalId as string
+      )
+      await approvePending(
+        run.manager,
+        runId,
+        approval.item.approvalId as string
+      )
+      expect((await run.terminal).type).toBe('run-completed')
+
+      expect(
+        run.store
+          .getTask(run.taskId)
+          .items.find((item) => item.id === approval.item.id)
+      ).toMatchObject({
+        kind: 'activity',
+        activityType: 'command',
+        status: 'success',
+        result: expect.stringContaining('durable-command-result'),
+        managedExecution: {
+          operationId: approval.item.id,
+          claim: 'approved',
+          kind: 'command',
+          phase: 'completed',
+          approvalSha256: agentApprovalFingerprint(nativeApproval),
+          actionSha256: expect.stringMatching(/^[a-f0-9]{64}$/)
+        }
+      })
+      expect(run.requests).toHaveLength(2)
+    }
+  )
+
   it('shows and executes the exact localized edit envelope that was approved', async () => {
     const run = await harness([
       (request) =>
@@ -1463,11 +2013,15 @@ describe('RunManager model runtime', () => {
     expect(approval.item.title).toBe('Edit tracked.txt')
     expect(approval.item.detail).toContain('-line before line')
     expect(approval.item.detail).toContain('+line after line')
-
-    await run.manager.resolveApproval(
+    const nativeApproval = run.manager.getPendingApproval(
       runId,
-      approval.item.approvalId as string,
-      true
+      approval.item.approvalId as string
+    )
+
+    await approvePending(
+      run.manager,
+      runId,
+      approval.item.approvalId as string
     )
     expect((await run.terminal).type).toBe('run-completed')
     expect(await readFile(target, 'utf8')).toBe('line after line\n')
@@ -1482,9 +2036,27 @@ describe('RunManager model runtime', () => {
         })
       ]
     })
+    expect(
+      run.store
+        .getTask(run.taskId)
+        .items.find((item) => item.id === approval.item.id)
+    ).toMatchObject({
+      kind: 'activity',
+      activityType: 'tool',
+      status: 'success',
+      managedExecution: {
+        operationId: approval.item.id,
+        claim: 'approved',
+        kind: 'workspace-write',
+        phase: 'completed',
+        approvalSha256: agentApprovalFingerprint(nativeApproval),
+        actionSha256: expect.stringMatching(/^[a-f0-9]{64}$/)
+      }
+    })
   })
 
   it('shows exact MCP arguments and definition identity before every call', async () => {
+    const connectionFingerprint = 'b'.repeat(64)
     const executeTool = vi.fn(async () => ({
       serverId: 'demo',
       toolName: 'mcp__demo__lookup',
@@ -1511,6 +2083,7 @@ describe('RunManager model runtime', () => {
             approvalRequired: true,
             serverId: 'demo',
             serverName: 'Demo server',
+            connectionFingerprint,
             originalName: 'lookup',
             fingerprint: 'a'.repeat(64),
             trustStatus: 'approved'
@@ -1532,22 +2105,32 @@ describe('RunManager model runtime', () => {
 
     const runId = await run.manager.start(run.taskId, 'Use the demo lookup')
     const approval = await run.approval
+    const nativeApproval = run.manager.getPendingApproval(
+      runId,
+      approval.item.approvalId as string
+    )
 
     expect(executeTool).not.toHaveBeenCalled()
     expect(approval.item.detail).toContain('Server: Demo server')
+    expect(approval.item.detail).toContain(
+      `Connection SHA-256: ${connectionFingerprint}`
+    )
     expect(approval.item.detail).toContain(`Definition SHA-256: ${'a'.repeat(64)}`)
     expect(approval.item.detail).toContain('"query": "meaning of life"')
-    await run.manager.resolveApproval(
+    await approvePending(
+      run.manager,
       runId,
-      approval.item.approvalId as string,
-      true
+      approval.item.approvalId as string
     )
     expect((await run.terminal).type).toBe('run-completed')
 
     expect(executeTool).toHaveBeenCalledWith(
       'mcp__demo__lookup',
       { query: 'meaning of life' },
-      expect.objectContaining({ approvalGranted: true })
+      expect.objectContaining({
+        approvalGranted: true,
+        expectedConnectionFingerprint: connectionFingerprint
+      })
     )
     expect(run.requests[0]?.tools).toEqual(
       expect.arrayContaining([
@@ -1558,6 +2141,23 @@ describe('RunManager model runtime', () => {
       kind: 'tool-result',
       name: 'mcp__demo__lookup',
       isError: false
+    })
+    expect(
+      run.store
+        .getTask(run.taskId)
+        .items.find((item) => item.id === approval.item.id)
+    ).toMatchObject({
+      kind: 'activity',
+      activityType: 'tool',
+      status: 'success',
+      managedExecution: {
+        operationId: approval.item.id,
+        claim: 'approved',
+        kind: 'mcp',
+        phase: 'completed',
+        approvalSha256: agentApprovalFingerprint(nativeApproval),
+        actionSha256: expect.stringMatching(/^[a-f0-9]{64}$/)
+      }
     })
   })
 })

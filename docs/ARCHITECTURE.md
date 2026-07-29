@@ -50,6 +50,8 @@ stored secret, prepared action envelope, or tool implementation. Main projects a
 explicit task allowlist that replaces canonical paths and provider/runtime sessions
 with a fresh process-scoped workspace grant ID plus a path-free display label
 derived from the basename. Colliding labels receive an ordinal suffix.
+That projection also removes durable managed-execution markers and their action
+and approval hashes from task items and live/replayed run events.
 Renderer requests resolve that ID back through the live main-process registry.
 Workspace-bearing task mutations and privileged operations pass through one
 serialized lifecycle gate, including the full duration of native terminal and Git
@@ -182,6 +184,14 @@ bind provider revision, workspace, mode, and—when available—runtime session.
 Built-in model adapters resume from normalized history; provider-owned message-part
 state is replayed only through its owning adapter.
 
+Ground-managed writes, commands, and MCP calls use a two-record execution
+protocol. Before dispatch, `StateStore.beginManagedExecution` atomically consumes
+the pending approval and persists a started marker with the activity/operation ID,
+prepared-action SHA-256, and exact native-approval SHA-256. After dispatch,
+`completeManagedExecution` accepts only that exact started claim. The run loop does
+not create a model tool result or another model request until completion persists.
+If completion persistence fails, the started marker remains and the run stops.
+
 ## Local workspace services
 
 ### Terminal
@@ -256,9 +266,12 @@ set; refresh detects new or changed tools and blocks them pending reapproval.
 Changing the namespace or connection/launch identity clears persisted trust.
 
 Definition trust and execution authority are separate. Every MCP call is presented
-with its server, tool, definition fingerprint, and complete JSON arguments, and the
-main-process service rejects execution without explicit approval. Results are
-JSON-normalized, bounded, and stripped of MCP Apps/UI material.
+with its server, tool, connection/config fingerprint, definition fingerprint, and
+complete JSON arguments. The prepared envelope binds the canonical remote URL and
+namespace or exact stdio invocation and namespace; the main-process service checks
+it after refresh and synchronously at dispatch. Same-server execution and
+reconfiguration share one serialized manager queue. Results are JSON-normalized,
+bounded, and stripped of MCP Apps/UI material.
 
 This slice is tool-only. It does not implement remote headers/OAuth, resources,
 prompts, Apps/UI, or elicitation.
@@ -309,6 +322,15 @@ single backup when possible, quarantines unreadable files, and reports backup
 restore or clean-state fallback through an ephemeral renderer banner. This is
 crash recovery, not a transactional event log, multi-version backup system, or
 user-driven restore browser.
+
+Startup converts any unresolved approved started marker to uncertain while
+preserving its operation and hashes. It reports the outcome as unknown and adds at
+most one bounded interruption summary per affected run. Summary insertion is
+capped at 256 entries per task and further limited by the task's remaining capacity
+under the persisted 100,000-item ceiling. Recovery clears native runtime sessions
+and provider checkpoints while retaining normalized conversation, and does not
+replay the action. Older running mutators receive an explicit legacy-untracked
+marker without invented action or approval hashes. Recovery is idempotent.
 
 `SecretVault` separately bounds and validates the encrypted credential map, rejects
 symlink/non-regular vault files, uses private exclusive atomic replacement, and

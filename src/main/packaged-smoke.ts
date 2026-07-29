@@ -13,6 +13,7 @@ import {
   parsePackagedSmokeArgument,
   type PackagedSmokeScope
 } from '../shared/packaged-smoke'
+import { prepareMcpExecutionCall } from './execution-binding'
 import {
   GitWorkspaceService,
   resolveGitExecutable
@@ -779,13 +780,19 @@ async function smokeMcpAndCancellation(
       connected.id,
       connected.fingerprints
     )
-    const toolName = trusted.tools[0]?.definition.name
-    if (!toolName) throw new Error('Packaged MCP fixture exposed no tool')
+    const tool = trusted.tools[0]
+    if (!tool) throw new Error('Packaged MCP fixture exposed no tool')
+    const prepared = prepareMcpExecutionCall(tool, {})
     const result = await service.executeTool(
-      toolName,
-      {},
+      prepared.namespacedName,
+      prepared.arguments,
       {
         approvalGranted: true,
+        expectedServerId: prepared.serverId,
+        expectedConnectionFingerprint: prepared.connectionFingerprint,
+        expectedOriginalName: prepared.originalName,
+        expectedToolFingerprint: prepared.toolFingerprint,
+        expectedArgumentsSha256: prepared.argumentsSha256,
         timeoutMs: 10_000
       }
     )

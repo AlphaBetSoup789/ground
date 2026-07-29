@@ -6,7 +6,7 @@ import {
 } from '../shared/packaged-smoke'
 import type {
   DesktopApi,
-  RunEventEnvelope,
+  DesktopRunEventEnvelope,
   TerminalEvent
 } from '../shared/types'
 
@@ -37,7 +37,7 @@ const api: DesktopApi = {
   onRunEvent: (listener) => {
     const wrapped = (
       _event: Electron.IpcRendererEvent,
-      envelope: RunEventEnvelope
+      envelope: DesktopRunEventEnvelope
     ): void => {
       listener(envelope)
     }

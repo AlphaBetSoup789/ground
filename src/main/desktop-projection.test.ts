@@ -2,15 +2,50 @@ import { mkdtemp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
+import type {
+  ActivityItem,
+  RunEvent,
+  Task
+} from '../shared/types'
 import type { StateSnapshot } from './store'
 import {
   projectDesktopTaskOperation,
+  toDesktopRunEventEnvelope,
   toDesktopSnapshot,
   toDesktopTask
 } from './desktop-projection'
 import { WorkspaceGrantRegistry } from './trust-boundary'
 
-function stateTask(workspacePath: string) {
+const ACTION_SHA256 = 'a'.repeat(64)
+const APPROVAL_SHA256 = 'b'.repeat(64)
+
+function managedActivity(): ActivityItem {
+  const timestamp = '2026-07-29T00:00:00.000Z'
+  return {
+    id: 'operation-secret',
+    kind: 'activity',
+    runId: 'run-1',
+    activityType: 'tool',
+    title: 'Write a file',
+    status: 'success',
+    createdAt: timestamp,
+    toolName: 'write_file',
+    callId: 'call-1',
+    managedExecution: {
+      version: 1,
+      claim: 'approved',
+      phase: 'completed',
+      operationId: 'operation-secret',
+      kind: 'workspace-write',
+      actionSha256: ACTION_SHA256,
+      approvalSha256: APPROVAL_SHA256,
+      startedAt: timestamp,
+      completedAt: timestamp
+    }
+  }
+}
+
+function stateTask(workspacePath: string): Task {
   const timestamp = '2026-07-29T00:00:00.000Z'
   return {
     id: 'task-1',
@@ -44,7 +79,7 @@ function stateTask(workspacePath: string) {
         updatedAt: timestamp
       }
     },
-    items: []
+    items: [managedActivity()]
   }
 }
 
@@ -66,9 +101,13 @@ describe('desktop task projection', () => {
     expect(projected).not.toHaveProperty('workspacePath')
     expect(projected).not.toHaveProperty('runtimeSessions')
     expect(projected).not.toHaveProperty('modelSessions')
+    expect(projected.items[0]).not.toHaveProperty('managedExecution')
     expect(serialized).not.toContain(workspacePath)
     expect(serialized).not.toContain('native-secret-session')
     expect(serialized).not.toContain('provider-owned')
+    expect(serialized).not.toContain(ACTION_SHA256)
+    expect(serialized).not.toContain(APPROVAL_SHA256)
+    expect(serialized).not.toContain('"operationId"')
   })
 
   it('uses the same process-scoped grant for shared paths and no authority for unrestored paths', async () => {
@@ -137,5 +176,46 @@ describe('desktop task projection', () => {
     expect(projected).not.toHaveProperty('modelSessions')
     expect(JSON.stringify(projected)).not.toContain('native-secret-session')
     await expect(projectedOperation(false)).resolves.toBeUndefined()
+  })
+
+  it('strips managed execution evidence from live and replayed run events', () => {
+    const activity = managedActivity()
+    const events: RunEvent[] = [
+      {
+        type: 'item-added',
+        taskId: 'task-1',
+        runId: activity.runId,
+        item: activity
+      },
+      {
+        type: 'item-updated',
+        taskId: 'task-1',
+        runId: activity.runId,
+        item: activity
+      },
+      {
+        type: 'approval-requested',
+        taskId: 'task-1',
+        runId: activity.runId,
+        item: activity
+      }
+    ]
+
+    for (const [index, event] of events.entries()) {
+      const projected = toDesktopRunEventEnvelope({
+        revision: index + 1,
+        event
+      })
+      const serialized = JSON.stringify(projected)
+      expect(projected.event).toHaveProperty('item')
+      expect(
+        (projected.event as { item: object }).item
+      ).not.toHaveProperty('managedExecution')
+      expect(serialized).not.toContain(ACTION_SHA256)
+      expect(serialized).not.toContain(APPROVAL_SHA256)
+      expect(serialized).not.toContain('"operationId"')
+    }
+
+    expect(activity.managedExecution).toBeDefined()
   })
 })

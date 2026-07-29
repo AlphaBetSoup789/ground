@@ -18,6 +18,7 @@ export interface PreparedMcpExecutionCall {
   readonly version: 1
   readonly namespacedName: string
   readonly serverId: string
+  readonly connectionFingerprint: string
   readonly originalName: string
   readonly toolFingerprint: string
   readonly arguments: JsonObject
@@ -242,6 +243,7 @@ function mcpActionPayload(call: Readonly<PreparedMcpExecutionCall>): object {
   if (!Object.isFrozen(call) || call.version !== 1) failIntegrity()
   requireNonEmptyString(call.namespacedName)
   requireNonEmptyString(call.serverId)
+  requireSha256(call.connectionFingerprint)
   requireNonEmptyString(call.originalName)
   requireSha256(call.toolFingerprint)
   requireSha256(call.argumentsSha256)
@@ -257,6 +259,7 @@ function mcpActionPayload(call: Readonly<PreparedMcpExecutionCall>): object {
     version: call.version,
     namespacedName: call.namespacedName,
     serverId: call.serverId,
+    connectionFingerprint: call.connectionFingerprint,
     originalName: call.originalName,
     toolFingerprint: call.toolFingerprint,
     argumentsSha256: call.argumentsSha256,
@@ -301,6 +304,7 @@ export function prepareMcpExecutionCall(
     tool.definition.name.length === 0 ||
     tool.metadata.serverId.length === 0 ||
     tool.metadata.originalName.length === 0 ||
+    !SHA256_PATTERN.test(tool.metadata.connectionFingerprint) ||
     !SHA256_PATTERN.test(tool.metadata.fingerprint)
   ) {
     failIntegrity()
@@ -310,6 +314,7 @@ export function prepareMcpExecutionCall(
     version: 1,
     namespacedName: tool.definition.name,
     serverId: tool.metadata.serverId,
+    connectionFingerprint: tool.metadata.connectionFingerprint,
     originalName: tool.metadata.originalName,
     toolFingerprint: tool.metadata.fingerprint,
     arguments: preparedArguments.value,

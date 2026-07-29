@@ -13,7 +13,8 @@ import {
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import type { ModelApiProvider } from '../shared/types'
+import type { ModelApiProvider, TaskItem } from '../shared/types'
+import { MAX_PERSISTED_TASK_ITEMS } from './state-schema'
 import { StateStore } from './store'
 import type { GroundTaskImportTemplate } from './task-portability'
 
@@ -287,6 +288,476 @@ describe('StateStore', () => {
           item.kind === 'activity' && item.title === 'Run interrupted'
       )
     ).toHaveLength(1)
+  })
+
+  it('atomically begins and completes an exact approved managed execution claim', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-store-'))
+    const filePath = path.join(directory, 'state.json')
+    const store = new StateStore(filePath)
+    await store.load()
+    const task = await store.createTask(directory)
+    const createdAt = '2026-07-28T12:00:00.000Z'
+    await store.mutateTask(task.id, (mutable) => {
+      mutable.runStatus = 'awaiting-approval'
+      mutable.items.push({
+        id: 'managed-write',
+        kind: 'activity',
+        runId: 'managed-run',
+        activityType: 'approval',
+        title: 'Write src/app.ts',
+        detail: 'Exact approved diff',
+        status: 'pending',
+        approvalId: 'approval-1',
+        toolName: 'write_file',
+        callId: 'call-1',
+        input: { path: 'src/app.ts', content: 'next' },
+        createdAt
+      })
+    })
+
+    const begin = {
+      taskId: task.id,
+      itemId: 'managed-write',
+      runId: 'managed-run',
+      callId: 'call-1',
+      toolName: 'write_file',
+      kind: 'workspace-write' as const,
+      actionSha256: 'a'.repeat(64),
+      approvalSha256: 'b'.repeat(64),
+      startedAt: '2026-07-28T12:00:01.000Z'
+    }
+    await expect(
+      store.beginManagedExecution({ ...begin, runId: 'wrong-run' })
+    ).rejects.toThrow(/identity/i)
+    expect(store.getTask(task.id).items[0]).toMatchObject({
+      status: 'pending',
+      approvalId: 'approval-1'
+    })
+    expect(store.getTask(task.id).items[0]).not.toHaveProperty(
+      'managedExecution'
+    )
+
+    const started = await store.beginManagedExecution(begin)
+    expect(started).toMatchObject({
+      id: 'managed-write',
+      activityType: 'tool',
+      status: 'running',
+      managedExecution: {
+        version: 1,
+        operationId: 'managed-write',
+        claim: 'approved',
+        kind: 'workspace-write',
+        actionSha256: 'a'.repeat(64),
+        approvalSha256: 'b'.repeat(64),
+        phase: 'started',
+        startedAt: '2026-07-28T12:00:01.000Z'
+      }
+    })
+    expect(started).not.toHaveProperty('approvalId')
+    expect(store.getTask(task.id).runStatus).toBe('running')
+    await expect(store.beginManagedExecution(begin)).rejects.toThrow(
+      /awaiting approval|unconsumed pending approval/i
+    )
+
+    const completion = {
+      taskId: task.id,
+      itemId: 'managed-write',
+      operationId: 'managed-write',
+      actionSha256: 'a'.repeat(64),
+      status: 'success' as const,
+      result: 'Wrote src/app.ts.',
+      durationMs: 42,
+      completedAt: '2026-07-28T12:00:02.000Z'
+    }
+    await expect(
+      store.completeManagedExecution({
+        ...completion,
+        actionSha256: 'c'.repeat(64)
+      })
+    ).rejects.toThrow(/action hash/i)
+    expect(
+      (
+        store.getTask(task.id).items[0] as {
+          managedExecution?: { phase?: string }
+        }
+      ).managedExecution?.phase
+    ).toBe('started')
+
+    const completed = await store.completeManagedExecution(completion)
+    expect(completed).toMatchObject({
+      status: 'success',
+      result: 'Wrote src/app.ts.',
+      durationMs: 42,
+      managedExecution: {
+        operationId: 'managed-write',
+        actionSha256: 'a'.repeat(64),
+        approvalSha256: 'b'.repeat(64),
+        phase: 'completed',
+        completedAt: '2026-07-28T12:00:02.000Z'
+      }
+    })
+    await expect(
+      store.completeManagedExecution(completion)
+    ).rejects.toThrow(/exact started claim/i)
+
+    await store.mutateTask(task.id, (mutable) => {
+      mutable.runStatus = 'idle'
+    })
+    const forked = await store.forkTask(task.id)
+    expect(forked.items[0]).not.toHaveProperty('managedExecution')
+
+    const reloaded = new StateStore(filePath)
+    await reloaded.load()
+    expect(reloaded.getTask(task.id).items[0]).toMatchObject({
+      managedExecution: {
+        phase: 'completed',
+        actionSha256: 'a'.repeat(64)
+      }
+    })
+  })
+
+  it('recovers an unresolved approved execution as outcome-unknown without retrying it', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-store-'))
+    const filePath = path.join(directory, 'state.json')
+    const first = new StateStore(filePath)
+    await first.load()
+    const task = await first.createTask(directory)
+    const timestamp = '2026-07-28T12:00:00.000Z'
+    await first.mutateTask(task.id, (mutable) => {
+      mutable.runStatus = 'awaiting-approval'
+      mutable.runtimeSessions = {
+        'ollama-local': {
+          adapter: 'codex',
+          sessionId: 'native-session',
+          providerRevision: timestamp,
+          workspacePath: directory,
+          mode: 'agent',
+          updatedAt: timestamp
+        }
+      }
+      mutable.modelSessions = {
+        'ollama-local': {
+          adapterId: 'openai.compatible',
+          providerRevision: timestamp,
+          model: 'llama3.2',
+          workspacePath: directory,
+          mode: 'agent',
+          conversation: [],
+          checkpoint: { responseId: 'provider-checkpoint' },
+          updatedAt: timestamp
+        }
+      }
+      mutable.items.push({
+        id: 'unresolved-command',
+        kind: 'activity',
+        runId: 'unresolved-run',
+        activityType: 'approval',
+        title: 'Run npm test',
+        status: 'pending',
+        approvalId: 'approval-command',
+        toolName: 'run_command',
+        callId: 'command-call',
+        input: { command: 'npm', args: ['test'] },
+        createdAt: timestamp
+      })
+    })
+    await first.beginManagedExecution({
+      taskId: task.id,
+      itemId: 'unresolved-command',
+      runId: 'unresolved-run',
+      callId: 'command-call',
+      toolName: 'run_command',
+      kind: 'command',
+      actionSha256: 'd'.repeat(64),
+      approvalSha256: 'e'.repeat(64),
+      startedAt: '2026-07-28T12:00:01.000Z'
+    })
+
+    const recovered = new StateStore(filePath)
+    await recovered.load()
+    const recoveredTask = recovered.getTask(task.id)
+    const recoveredItem = recoveredTask.items.find(
+      (item) => item.id === 'unresolved-command'
+    )
+    expect(recoveredTask.runStatus).toBe('failed')
+    expect(recoveredTask.runtimeSessions).toBeUndefined()
+    expect(
+      recoveredTask.modelSessions?.['ollama-local']
+    ).not.toHaveProperty('checkpoint')
+    expect(recoveredItem).toMatchObject({
+      kind: 'activity',
+      activityType: 'command',
+      status: 'error',
+      result: expect.stringMatching(/Outcome unknown.*will not retry/is),
+      managedExecution: {
+        operationId: 'unresolved-command',
+        claim: 'approved',
+        kind: 'command',
+        actionSha256: 'd'.repeat(64),
+        approvalSha256: 'e'.repeat(64),
+        phase: 'uncertain',
+        startedAt: '2026-07-28T12:00:01.000Z',
+        interruptedAt: expect.any(String)
+      }
+    })
+    expect(
+      recoveredTask.items.filter(
+        (item) =>
+          item.kind === 'activity' &&
+          item.runId === 'unresolved-run' &&
+          item.title === 'Run interrupted'
+      )
+    ).toHaveLength(1)
+    await expect(
+      recovered.completeManagedExecution({
+        taskId: task.id,
+        itemId: 'unresolved-command',
+        operationId: 'unresolved-command',
+        actionSha256: 'd'.repeat(64),
+        status: 'success',
+        result: 'must not be accepted',
+        durationMs: 1,
+        completedAt: new Date().toISOString()
+      })
+    ).rejects.toThrow(/outcome is unknown/i)
+
+    const recoveredMarker =
+      recoveredItem?.kind === 'activity'
+        ? structuredClone(recoveredItem.managedExecution)
+        : undefined
+    const loadedAgain = new StateStore(filePath)
+    await loadedAgain.load()
+    const loadedAgainTask = loadedAgain.getTask(task.id)
+    const loadedAgainItem = loadedAgainTask.items.find(
+      (item) => item.id === 'unresolved-command'
+    )
+    expect(
+      loadedAgainItem?.kind === 'activity'
+        ? loadedAgainItem.managedExecution
+        : undefined
+    ).toEqual(recoveredMarker)
+    expect(
+      loadedAgainTask.items.filter(
+        (item) =>
+          item.kind === 'activity' &&
+          item.runId === 'unresolved-run' &&
+          item.title === 'Run interrupted'
+      )
+    ).toHaveLength(1)
+  })
+
+  it('marks legacy running mutators uncertain without inventing approval hashes', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-store-'))
+    const filePath = path.join(directory, 'state.json')
+    const first = new StateStore(filePath)
+    await first.load()
+    const task = await first.createTask(directory)
+    const timestamp = '2026-07-28T12:00:00.000Z'
+    await first.mutateTask(task.id, (mutable) => {
+      mutable.runStatus = 'running'
+      mutable.items.push(
+        {
+          id: 'legacy-write',
+          kind: 'activity',
+          runId: 'legacy-write-run',
+          activityType: 'tool',
+          title: 'Writing a file',
+          toolName: 'edit_file',
+          callId: 'legacy-write-call',
+          status: 'running',
+          createdAt: timestamp
+        },
+        {
+          id: 'legacy-command',
+          kind: 'activity',
+          runId: 'legacy-command-run',
+          activityType: 'command',
+          title: 'Running a command',
+          toolName: 'run_command',
+          callId: 'legacy-command-call',
+          status: 'running',
+          createdAt: timestamp
+        },
+        {
+          id: 'legacy-mcp',
+          kind: 'activity',
+          runId: 'legacy-mcp-run',
+          activityType: 'tool',
+          title: 'Calling an MCP tool',
+          toolName: 'mcp__tracker__create_issue',
+          callId: 'legacy-mcp-call',
+          status: 'running',
+          createdAt: timestamp
+        },
+        {
+          id: 'legacy-read',
+          kind: 'activity',
+          runId: 'legacy-read-run',
+          activityType: 'tool',
+          title: 'Reading a file',
+          toolName: 'read_file',
+          callId: 'legacy-read-call',
+          status: 'running',
+          createdAt: timestamp
+        }
+      )
+    })
+
+    const recovered = new StateStore(filePath)
+    await recovered.load()
+    const restored = recovered.getTask(task.id)
+    for (const [itemId, kind] of [
+      ['legacy-write', 'workspace-write'],
+      ['legacy-command', 'command'],
+      ['legacy-mcp', 'mcp']
+    ] as const) {
+      const item = restored.items.find((candidate) => candidate.id === itemId)
+      expect(item).toMatchObject({
+        kind: 'activity',
+        status: 'error',
+        result: expect.stringMatching(/before durable execution claims.*will not retry/is),
+        managedExecution: {
+          version: 1,
+          operationId: itemId,
+          claim: 'legacy-untracked',
+          kind,
+          phase: 'uncertain',
+          startedAt: timestamp,
+          interruptedAt: expect.any(String)
+        }
+      })
+      expect(JSON.stringify(item)).not.toContain('actionSha256')
+      expect(JSON.stringify(item)).not.toContain('approvalSha256')
+    }
+    expect(
+      restored.items.find((item) => item.id === 'legacy-read')
+    ).not.toHaveProperty('managedExecution')
+    expect(
+      restored.items.filter(
+        (item) =>
+          item.kind === 'activity' && item.title === 'Run interrupted'
+      )
+    ).toHaveLength(4)
+
+    const loadedAgain = new StateStore(filePath)
+    await loadedAgain.load()
+    expect(
+      loadedAgain
+        .getTask(task.id)
+        .items.filter(
+          (item) =>
+            item.kind === 'activity' && item.title === 'Run interrupted'
+        )
+    ).toHaveLength(4)
+  })
+
+  it('bounds recovery summaries by the remaining persisted task-item capacity', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-store-'))
+    const filePath = path.join(directory, 'state.json')
+    const timestamp = '2026-07-28T12:00:00.000Z'
+    const fillerCount = MAX_PERSISTED_TASK_ITEMS - 3
+    const items: TaskItem[] = Array.from(
+      { length: fillerCount },
+      (_, index) => ({
+        id: `filler-${index}`,
+        kind: 'message' as const,
+        role: 'user' as const,
+        content: '',
+        createdAt: timestamp
+      })
+    )
+    items.push(
+      {
+        id: 'capacity-running-one',
+        kind: 'activity' as const,
+        runId: 'capacity-run-one',
+        activityType: 'tool' as const,
+        title: 'First interrupted read',
+        toolName: 'read_file',
+        status: 'running' as const,
+        createdAt: timestamp
+      },
+      {
+        id: 'capacity-running-two',
+        kind: 'activity' as const,
+        runId: 'capacity-run-two',
+        activityType: 'tool' as const,
+        title: 'Second interrupted read',
+        toolName: 'read_file',
+        status: 'running' as const,
+        createdAt: timestamp
+      }
+    )
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        version: 1,
+        providers: [
+          {
+            id: 'ollama-local',
+            name: 'Ollama · local',
+            kind: 'openai-compatible',
+            baseUrl: 'http://127.0.0.1:11434/v1',
+            model: 'llama3.2',
+            hasApiKey: false,
+            supportsTools: true,
+            createdAt: timestamp,
+            updatedAt: timestamp
+          }
+        ],
+        mcpServers: [],
+        tasks: [
+          {
+            id: 'capacity-task',
+            title: 'Capacity recovery',
+            providerId: 'ollama-local',
+            mode: 'agent',
+            runStatus: 'running',
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            items
+          }
+        ],
+        settings: {
+          selectedTaskId: 'capacity-task',
+          defaultProviderId: 'ollama-local',
+          sidebarCollapsed: false
+        }
+      })
+    )
+
+    const recovered = new StateStore(filePath)
+    await recovered.load()
+    const task = recovered.getTask('capacity-task')
+    expect(task.items).toHaveLength(MAX_PERSISTED_TASK_ITEMS)
+    expect(
+      task.items.filter(
+        (item) =>
+          item.kind === 'activity' && item.title === 'Run interrupted'
+      )
+    ).toHaveLength(1)
+    expect(
+      task.items
+        .flatMap(
+          (item) =>
+            item.kind === 'activity' &&
+            item.id.startsWith('capacity-running-')
+              ? [item.status]
+              : []
+        )
+    ).toEqual(['error', 'error'])
+    expect(task.runStatus).toBe('failed')
+    expect(
+      (await readdir(directory)).some((name) =>
+        name.startsWith('state.json.unreadable-')
+      )
+    ).toBe(false)
+
+    const loadedAgain = new StateStore(filePath)
+    await loadedAgain.load()
+    expect(loadedAgain.getTask('capacity-task').items).toHaveLength(
+      MAX_PERSISTED_TASK_ITEMS
+    )
   })
 
   it('does not expose mutable references to persisted task state', async () => {

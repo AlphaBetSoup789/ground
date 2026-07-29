@@ -6,6 +6,9 @@ import { TextDecoder } from 'node:util'
 import type {
   ActivityItem,
   AppSettings,
+  BeginManagedExecutionInput,
+  CompleteManagedExecutionInput,
+  ManagedExecutionKind,
   McpServerProfile,
   ModelApiProvider,
   ProviderAttribution,
@@ -17,7 +20,11 @@ import type {
   TaskItem
 } from '../shared/types'
 import { createId, nowIso } from './lib/ids'
-import { parsePersistedState, type PersistedStateData } from './state-schema'
+import {
+  MAX_PERSISTED_TASK_ITEMS,
+  parsePersistedState,
+  type PersistedStateData
+} from './state-schema'
 import type {
   GroundConversationItem,
   GroundProviderAttribution,
@@ -50,6 +57,12 @@ const IMPORT_FIELD_LIMITS = Object.freeze({
 
 const MAX_STATE_FILE_BYTES = 128 * 1024 * 1024
 const STATE_READ_CHUNK_BYTES = 64 * 1024
+const SHA256_PATTERN = /^[a-f0-9]{64}$/u
+const MANAGED_EXECUTION_OUTCOME_UNKNOWN =
+  'Outcome unknown: Ground closed after this action started. Review the workspace or external system before deciding what to do next. Ground will not retry this action automatically.'
+const LEGACY_MANAGED_EXECUTION_OUTCOME_UNKNOWN =
+  'Outcome unknown: Ground closed while this mutating action was running before durable execution claims were available. Review the workspace or external system before deciding what to do next. Ground will not retry this action automatically.'
+const MAX_INTERRUPTED_RUN_SUMMARIES = 256
 
 class InvalidStateFileError extends Error {
   constructor(message: string, cause?: unknown) {
@@ -143,6 +156,41 @@ function isTaskActive(task: Task): boolean {
   return task.runStatus === 'running' || task.runStatus === 'awaiting-approval'
 }
 
+function managedExecutionKind(
+  item: Readonly<ActivityItem>
+): ManagedExecutionKind | undefined {
+  if (item.toolName === 'write_file' || item.toolName === 'edit_file') {
+    return 'workspace-write'
+  }
+  if (item.toolName === 'run_command') return 'command'
+  if (item.toolName?.startsWith('mcp__')) return 'mcp'
+  return undefined
+}
+
+function requireSha256(value: string, label: string): void {
+  if (!SHA256_PATTERN.test(value)) {
+    throw new Error(`${label} must be a lowercase SHA-256 digest`)
+  }
+}
+
+function managedStartedAt(
+  createdAt: string,
+  recoveryTimestamp: string
+): string {
+  const parsed = Date.parse(createdAt)
+  return Number.isFinite(parsed)
+    ? new Date(parsed).toISOString()
+    : recoveryTimestamp
+}
+
+function requireActivityItem(task: Task, itemId: string): ActivityItem {
+  const item = task.items.find((candidate) => candidate.id === itemId)
+  if (!item || item.kind !== 'activity') {
+    throw new Error('Managed execution activity was not found')
+  }
+  return item
+}
+
 interface ForkIds {
   itemIds: Map<string, string>
   runIds: Map<string, string>
@@ -177,6 +225,7 @@ function forkTimeline(items: TaskItem[], ids: ForkIds): TaskItem[] {
     const {
       approvalId: _approvalId,
       callId: _callId,
+      managedExecution: _managedExecution,
       ...history
     } = structuredClone(item)
     const status =
@@ -751,6 +800,161 @@ export class StateStore {
     )
   }
 
+  /**
+   * Atomically consumes one exact pending approval and persists the durable
+   * execution claim before its caller may perform the side effect.
+   */
+  async beginManagedExecution(
+    input: Readonly<BeginManagedExecutionInput>
+  ): Promise<ActivityItem> {
+    const claim = structuredClone(input)
+    requireSha256(claim.actionSha256, 'Action hash')
+    requireSha256(claim.approvalSha256, 'Approval hash')
+    return this.changeState(
+      (state) => {
+        const task = requireTask(state, claim.taskId)
+        if (task.archivedAt) {
+          throw new Error('Archived tasks cannot begin managed execution')
+        }
+        if (task.runStatus !== 'awaiting-approval') {
+          throw new Error(
+            'Managed execution requires the task to be awaiting approval'
+          )
+        }
+        const item = requireActivityItem(task, claim.itemId)
+        if (
+          item.status !== 'pending' ||
+          item.activityType !== 'approval' ||
+          !item.approvalId ||
+          item.managedExecution
+        ) {
+          throw new Error(
+            'Managed execution requires an unconsumed pending approval'
+          )
+        }
+        if (
+          item.runId !== claim.runId ||
+          item.callId !== claim.callId ||
+          item.toolName !== claim.toolName
+        ) {
+          throw new Error(
+            'Managed execution identity does not match the pending approval'
+          )
+        }
+        if (item.historyOnly) {
+          throw new Error('Imported history cannot begin managed execution')
+        }
+        if (
+          managedExecutionKind(item) !== claim.kind
+        ) {
+          throw new Error(
+            'Managed execution kind does not match the pending activity'
+          )
+        }
+        for (const candidateTask of state.tasks) {
+          for (const candidate of candidateTask.items) {
+            if (
+              candidate.kind !== 'activity' ||
+              !candidate.managedExecution
+            ) {
+              continue
+            }
+            if (candidate.managedExecution.operationId === item.id) {
+              throw new Error('Managed execution operation already exists')
+            }
+            if (
+              candidate.managedExecution.claim === 'approved' &&
+              candidate.runId === claim.runId &&
+              candidate.callId === claim.callId
+            ) {
+              throw new Error(
+                'Managed execution call already has a durable claim'
+              )
+            }
+          }
+        }
+
+        item.status = 'running'
+        item.activityType =
+          claim.kind === 'command' ? 'command' : 'tool'
+        delete item.approvalId
+        delete item.result
+        delete item.durationMs
+        item.managedExecution = {
+          version: 1,
+          operationId: item.id,
+          claim: 'approved',
+          kind: claim.kind,
+          actionSha256: claim.actionSha256,
+          approvalSha256: claim.approvalSha256,
+          phase: 'started',
+          startedAt: claim.startedAt
+        }
+        task.runStatus = 'running'
+        task.updatedAt = nowIso()
+        return { taskId: task.id, itemId: item.id }
+      },
+      (state, started) =>
+        requireActivityItem(
+          requireTask(state, started.taskId),
+          started.itemId
+        )
+    )
+  }
+
+  /**
+   * Atomically records the known result of exactly one started claim. An
+   * uncertain or already completed operation can never pass this transition.
+   */
+  async completeManagedExecution(
+    input: Readonly<CompleteManagedExecutionInput>
+  ): Promise<ActivityItem> {
+    const completion = structuredClone(input)
+    requireSha256(completion.actionSha256, 'Action hash')
+    return this.changeState(
+      (state) => {
+        const task = requireTask(state, completion.taskId)
+        const item = requireActivityItem(task, completion.itemId)
+        const marker = item.managedExecution
+        if (
+          !marker ||
+          marker.operationId !== completion.operationId ||
+          marker.operationId !== item.id ||
+          marker.claim !== 'approved' ||
+          marker.phase !== 'started' ||
+          item.status !== 'running'
+        ) {
+          throw new Error(
+            marker?.phase === 'uncertain'
+              ? 'Managed execution outcome is unknown and cannot be completed or retried'
+              : 'Managed execution is not an exact started claim'
+          )
+        }
+        if (marker.actionSha256 !== completion.actionSha256) {
+          throw new Error(
+            'Managed execution action hash does not match the started claim'
+          )
+        }
+
+        item.status = completion.status
+        item.result = completion.result
+        item.durationMs = completion.durationMs
+        item.managedExecution = {
+          ...marker,
+          phase: 'completed',
+          completedAt: completion.completedAt
+        }
+        task.updatedAt = nowIso()
+        return { taskId: task.id, itemId: item.id }
+      },
+      (state, completed) =>
+        requireActivityItem(
+          requireTask(state, completed.taskId),
+          completed.itemId
+        )
+    )
+  }
+
   async addItem(taskId: string, item: TaskItem, persist = true): Promise<void> {
     // Capture the event at invocation time. Streaming callers intentionally
     // keep mutating their renderer-facing item after queueing the insertion.
@@ -1118,6 +1322,7 @@ async function quarantineCorruptFile(filePath: string): Promise<void> {
 
 function recoverInterruptedRuns(state: PersistedStateData): boolean {
   let recovered = false
+  const interruptedAt = nowIso()
   for (const task of state.tasks) {
     const taskWasActive = isTaskActive(task)
     const activeActivity = [...task.items]
@@ -1135,38 +1340,128 @@ function recoverInterruptedRuns(state: PersistedStateData): boolean {
             .find((item) => item.kind === 'message' && item.runId)?.runId ??
           createId('run')
     let activityRecovered = false
+    const recoveredRunIds = new Set<string>()
+    const outcomeUnknownRunIds = new Set<string>()
     for (const item of task.items) {
+      if (item.kind !== 'activity') continue
+      const marker = item.managedExecution
       if (
-        item.kind === 'activity' &&
-        (item.status === 'pending' || item.status === 'running')
+        marker?.claim === 'approved' &&
+        marker.phase === 'started'
       ) {
+        item.managedExecution = {
+          ...marker,
+          phase: 'uncertain',
+          interruptedAt
+        }
+        item.status = 'error'
+        item.result = MANAGED_EXECUTION_OUTCOME_UNKNOWN
+        delete item.approvalId
+        delete item.durationMs
+        activityRecovered = true
+        recoveredRunIds.add(item.runId)
+        outcomeUnknownRunIds.add(item.runId)
+        continue
+      }
+      if (item.status === 'running' && !marker) {
+        const legacyKind = managedExecutionKind(item)
+        if (legacyKind) {
+          item.activityType =
+            legacyKind === 'command' ? 'command' : 'tool'
+          item.managedExecution = {
+            version: 1,
+            operationId: item.id,
+            claim: 'legacy-untracked',
+            kind: legacyKind,
+            phase: 'uncertain',
+            startedAt: managedStartedAt(item.createdAt, interruptedAt),
+            interruptedAt
+          }
+          item.result = LEGACY_MANAGED_EXECUTION_OUTCOME_UNKNOWN
+          delete item.durationMs
+          outcomeUnknownRunIds.add(item.runId)
+        }
+      }
+      if (item.status === 'pending' || item.status === 'running') {
         item.status = 'error'
         delete item.approvalId
         activityRecovered = true
+        recoveredRunIds.add(item.runId)
       }
-    }
-    if (!taskWasActive) {
-      if (activityRecovered) {
-        task.updatedAt = nowIso()
-        recovered = true
-      }
-      continue
     }
 
-    recovered = true
-    task.items.push({
-      id: createId('activity'),
-      kind: 'activity',
-      runId: interruptedRunId,
-      activityType: 'error',
-      title: 'Run interrupted',
-      detail:
-        'Ground closed before this run reached a terminal state. Review the workspace before retrying.',
-      status: 'error',
-      createdAt: nowIso()
-    })
-    task.runStatus = 'failed'
-    task.updatedAt = nowIso()
+    const invalidatesContinuation =
+      taskWasActive || outcomeUnknownRunIds.size > 0
+    let continuationCleared = false
+    if (invalidatesContinuation && task.runtimeSessions) {
+      delete task.runtimeSessions
+      continuationCleared = true
+    }
+    if (invalidatesContinuation && task.modelSessions) {
+      for (const session of Object.values(task.modelSessions)) {
+        if (Object.hasOwn(session, 'checkpoint')) {
+          delete session.checkpoint
+          continuationCleared = true
+        }
+      }
+    }
+
+    const summaryRunIds = new Set<string>()
+    if (taskWasActive) {
+      for (const runId of recoveredRunIds) summaryRunIds.add(runId)
+      if (!summaryRunIds.size) summaryRunIds.add(interruptedRunId)
+    } else {
+      for (const runId of outcomeUnknownRunIds) summaryRunIds.add(runId)
+    }
+    let summariesAdded = 0
+    const summaryLimit = Math.min(
+      MAX_INTERRUPTED_RUN_SUMMARIES,
+      Math.max(0, MAX_PERSISTED_TASK_ITEMS - task.items.length)
+    )
+    for (const runId of summaryRunIds) {
+      if (summariesAdded >= summaryLimit) break
+      if (
+        task.items.some(
+          (item) =>
+            item.kind === 'activity' &&
+            item.runId === runId &&
+            item.activityType === 'error' &&
+            item.title === 'Run interrupted'
+        )
+      ) {
+        continue
+      }
+      const outcomeUnknown = outcomeUnknownRunIds.has(runId)
+      task.items.push({
+        id: createId('activity'),
+        kind: 'activity',
+        runId,
+        activityType: 'error',
+        title: 'Run interrupted',
+        detail: outcomeUnknown
+          ? 'Ground closed after a mutating action started. Its outcome is unknown, Ground did not retry it, and any native runtime continuation or model checkpoint was cleared. Review the workspace or external system before continuing.'
+          : 'Ground closed before this run reached a terminal state. Review the workspace before retrying.',
+        status: 'error',
+        createdAt: interruptedAt
+      })
+      summariesAdded += 1
+    }
+
+    if (
+      taskWasActive ||
+      outcomeUnknownRunIds.size > 0
+    ) {
+      task.runStatus = 'failed'
+    }
+    if (
+      activityRecovered ||
+      taskWasActive ||
+      continuationCleared ||
+      summariesAdded > 0
+    ) {
+      task.updatedAt = interruptedAt
+      recovered = true
+    }
   }
   return recovered
 }

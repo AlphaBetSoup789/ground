@@ -104,6 +104,7 @@ function mcpTool(
       approvalRequired: true,
       serverId: 'files',
       serverName: 'Files',
+      connectionFingerprint: '5'.repeat(64),
       originalName: 'move',
       fingerprint: '3'.repeat(64),
       trustStatus: 'approved',
@@ -212,12 +213,17 @@ describe('execution bindings', () => {
       mcpTool({ fingerprint: '4'.repeat(64) }),
       { value: 'approved' }
     )
+    const changedConnection = prepareMcpExecutionCall(
+      mcpTool({ connectionFingerprint: '6'.repeat(64) }),
+      { value: 'approved' }
+    )
     const baseline = fingerprintPreparedMcpCall(base)
 
     expect(fingerprintPreparedMcpCall(changedArguments)).not.toBe(baseline)
     expect(fingerprintPreparedMcpCall(changedTool)).not.toBe(
       baseline
     )
+    expect(fingerprintPreparedMcpCall(changedConnection)).not.toBe(baseline)
   })
 
   it('rejects untrusted or unsafe MCP calls without echoing sensitive input', () => {
