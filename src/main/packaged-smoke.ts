@@ -23,6 +23,7 @@ import {
 } from './mcp-service'
 import { terminateProcessTree } from './process-tree'
 import {
+  resolveDefaultTerminalShell,
   TerminalService,
   type TerminalPtyFactory
 } from './terminal-service'
@@ -211,15 +212,30 @@ async function smokeTerminal(workspace: string): Promise<void> {
     "process.stdout.write('ground-packaged-pty-ready\\n');",
     'setInterval(() => {}, 1000);'
   ].join('\n')
+  const shell =
+    process.platform === 'win32'
+      ? await resolveDefaultTerminalShell('win32', process.env)
+      : {
+          executable: packagedExecutable,
+          args: ['-e', program]
+        }
+  const windowsShellName = path.win32
+    .basename(shell.executable)
+    .toLowerCase()
+  const input =
+    process.platform !== 'win32'
+      ? 'ground-packaged-pty-input\r'
+      : windowsShellName === 'powershell.exe'
+        ? "Write-Output ('ground-packaged-pty-' + 'ok'); exit 0\r"
+        : 'echo ground-packaged-pty-o^k & exit /b 0\r'
   const ptyFactory = async (): Promise<TerminalPtyFactory> => {
     const nodePty = await import('node-pty')
     return {
       spawn: (executable, args, options) => {
         if (
-          !samePath(executable, packagedExecutable) ||
-          args.length !== 2 ||
-          args[0] !== '-e' ||
-          args[1] !== program
+          !samePath(executable, shell.executable) ||
+          args.length !== shell.args.length ||
+          args.some((argument, index) => argument !== shell.args[index])
         ) {
           throw new Error('Packaged PTY smoke refused an unexpected invocation')
         }
@@ -227,7 +243,9 @@ async function smokeTerminal(workspace: string): Promise<void> {
           ...options,
           env: {
             ...options.env,
-            ELECTRON_RUN_AS_NODE: '1'
+            ...(process.platform === 'win32'
+              ? {}
+              : { ELECTRON_RUN_AS_NODE: '1' })
           }
         })
       }
@@ -241,10 +259,7 @@ async function smokeTerminal(workspace: string): Promise<void> {
       }
       return canonicalWorkspace
     },
-    shellResolver: async () => ({
-      executable: packagedExecutable,
-      args: ['-e', program]
-    }),
+    shellResolver: async () => shell,
     ptyFactory,
     maxSessions: 1
   })
@@ -275,7 +290,13 @@ async function smokeTerminal(workspace: string): Promise<void> {
     const subscription = service.subscribe(session.id, {
       onData: (event) => {
         output = `${output}${event.data}`.slice(-16_384)
-        if (output.includes('ground-packaged-pty-ready')) resolveReady?.()
+        if (
+          process.platform === 'win32'
+            ? event.data.length > 0
+            : output.includes('ground-packaged-pty-ready')
+        ) {
+          resolveReady?.()
+        }
         if (output.includes('ground-packaged-pty-ok')) resolveMarker?.()
       },
       onExit: (event) => {
@@ -299,7 +320,7 @@ async function smokeTerminal(workspace: string): Promise<void> {
     })
     try {
       await waitFor('Packaged PTY readiness', ready, 12_000)
-      service.sendInput(session.id, 'ground-packaged-pty-input\r')
+      service.sendInput(session.id, input)
       await waitFor(
         'Packaged PTY marker and exit',
         Promise.all([marker, exited]),
