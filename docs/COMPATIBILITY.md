@@ -300,8 +300,13 @@ Windows/Linux signing policy remains undefined.
 
 The current local macOS arm64 build has passed the packaged launch scope, the native
 identity/secure-storage/dialog/PTY/Git/MCP/cancellation scope, and that same native
-scope from its extracted ZIP. That is one host/architecture result, not evidence
-for macOS x64, Windows x64, or Linux x64.
+scope from its extracted ZIP. Separately, the native
+[four-target Package previews run](https://github.com/AlphaBetSoup789/ground/actions/runs/30473714099)
+completed the required macOS arm64, macOS x64, Windows x64, and Linux x64 jobs for
+source commit `a3073a8`, with artifact-bound runtime evidence. Those records are
+commit-specific unsigned preview evidence, not evidence for later source. They do
+not certify signing, notarization, DMG/DEB installation, renderer accessibility,
+live providers/CLIs, or supported distribution.
 
 The six-scenario renderer interaction suite runs the built browser-preview React
 renderer in Electron through Playwright Core. Its current local result is 6/6:

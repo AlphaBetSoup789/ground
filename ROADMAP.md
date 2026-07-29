@@ -143,13 +143,12 @@ are not necessarily release-certified.
 - Complete cross-platform accessibility and packaged-app compatibility matrix
 - Optional team/sync features that never become mandatory for local use
 
-## Non-goals
+## Product non-goals
 
-- Requiring a Ground account or hosted model relay
-- Treating every OpenAI-shaped endpoint as feature-equivalent
-- Claiming control over actions performed internally by an arbitrary native CLI
-- Storing a provider credential in renderer-accessible state
-- Making readable task history depend solely on provider-owned continuation data
+The durable product non-goals are owned by
+[docs/PRD.md](docs/PRD.md#non-goals). Roadmap proposals must remain inside that
+contract unless a public design issue and maintainer-approved PR update the PRD
+first.
 
 Once the repository is published, roadmap work should be represented by linked
 issues or milestones rather than silently changing this file.

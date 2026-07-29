@@ -1,0 +1,114 @@
+name: Build-plan work item
+description: Claim or propose a scoped item from the Ground build plan
+title: "[Build plan]: "
+labels:
+  - enhancement
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for accepted or proposed work derived from
+        `docs/BUILD-PLAN.md`. An issue creates no implementation authority by
+        itself. Security-sensitive or material contract decisions still follow
+        `GOVERNANCE.md` and require maintainer review.
+
+  - type: input
+    id: build_plan_id
+    attributes:
+      label: Build-plan ID
+      description: Use the stable section ID, such as M1.1 or M4.2.
+      placeholder: "M1.1"
+    validations:
+      required: true
+
+  - type: input
+    id: prd_requirements
+    attributes:
+      label: PRD requirements
+      description: List the stable Ground requirement IDs this advances, or use "N/A — project operations" when the plan explicitly does.
+      placeholder: "GR-2.5, GR-8.5"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Proposed priority
+      description: Match the priority defined in the build plan.
+      options:
+        - P0 — public-alpha or authority/data blocker
+        - P1 — dependable daily-driver beta
+        - P2 — important expansion
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: User or contributor outcome
+      description: Describe the observable result and who benefits.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: In scope
+      description: List the smallest coherent behavior this issue should deliver.
+    validations:
+      required: true
+
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope
+      description: State adjacent work this issue deliberately will not absorb.
+    validations:
+      required: true
+
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Authority, data, and compatibility boundaries
+      description: Note affected IPC, secrets, storage, workspace, provider/runtime, MCP, Git, terminal, platform, privacy, or accessibility boundaries.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Use observable, testable outcomes tied to the build-plan gate.
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Required verification evidence
+      description: Name the focused, cross-platform, compatibility, native, security, or manual evidence required.
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies and sequencing
+      description: Link blocking issues or explain why the build-plan dependency order permits this work now.
+
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks and open decisions
+      description: Link any required public design issue and state residual risk.
+
+  - type: checkboxes
+    id: readiness
+    attributes:
+      label: Readiness check
+      options:
+        - label: I checked the PRD, roadmap, build plan, and existing issues for conflicts or duplication.
+          required: true
+        - label: I removed credentials, private source, transcripts, absolute local paths, and account data.
+          required: true
