@@ -16,6 +16,26 @@ It connects directly to the endpoint or executable you choose.
 
 ![Ground workspace with a coding-agent task, provider switcher, and Git panel](docs/images/ground-workspace.jpg)
 
+## Project documents
+
+Ground is designed so contributors and coding agents can continue the project
+without private conversation history:
+
+- [Product requirements](docs/PRD.md) define the durable user problems, product
+  principles, requirements, acceptance criteria, and non-goals.
+- [Build plan](docs/BUILD-PLAN.md) defines delivery order, workstreams, and
+  milestone gates.
+- [Roadmap](ROADMAP.md) records milestone outcomes and broad delivery status.
+- [Agent guide](AGENTS.md) is the provider-neutral repository onboarding and
+  source-of-truth index.
+- [Contributing](CONTRIBUTING.md), [architecture](docs/ARCHITECTURE.md), and the
+  [threat model](docs/THREAT-MODEL.md) define the engineering and security
+  boundaries.
+
+GitHub issues and milestones own live task status and assignment. The committed
+documents explain why the product exists, how it must behave, and in what order
+major work should proceed.
+
 ## What works today
 
 | Connection | How it runs | Status |
@@ -652,9 +672,12 @@ accessibility, live-provider/CLI, signing, notarization, or distribution
 certification.
 
 On the current branch, a local macOS arm64 package passes launch scope, the full
-native scope, and that same native scope after extracting its ZIP. The other three
-target records still require matching native workflow runs; the repository does
-not infer them from this one result.
+native scope, and that same native scope after extracting its ZIP. Separately, the
+native
+[four-target Package previews run](https://github.com/AlphaBetSoup789/ground/actions/runs/30473714099)
+completed the required macOS arm64, macOS x64, Windows x64, and Linux x64 jobs for
+source commit `a3073a8`. Those artifact-bound records are commit-specific unsigned
+preview evidence, not evidence for later source or a supported distribution.
 
 Linux credentials require a working Secret Service/libsecret backend and an
 unlocked desktop keyring. Ground refuses Electron’s insecure `basic_text` fallback.
@@ -721,10 +744,8 @@ official artifact has been published or certified. Read
 - There is no automatic updater, signed update channel, compatibility guarantee,
   OAuth/account system, or official supported binary.
 
-## Project documents
+## Policies and integration references
 
-- [Roadmap](ROADMAP.md)
-- [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 - [Privacy](PRIVACY.md)
 - [Governance](GOVERNANCE.md)

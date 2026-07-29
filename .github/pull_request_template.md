@@ -8,10 +8,12 @@ Summarize the implementation and important alternatives.
 
 ## Verification
 
-- [ ] `npm run verify`
-- [ ] `npm audit --audit-level=high`
+- [ ] I completed the change-appropriate checks in the
+      [`AGENTS.md` verification matrix](https://github.com/AlphaBetSoup789/ground/blob/main/AGENTS.md#verification).
 
-Add focused test names, manual checks, screenshots, or fixture versions:
+Commands and results:
+
+Checks not run, with the reason they were not applicable:
 
 ## Risk and compatibility
 

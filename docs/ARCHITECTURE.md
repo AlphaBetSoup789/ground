@@ -560,8 +560,13 @@ runtime checks, not signing, notarization, DMG/DEB installation, renderer,
 accessibility, live-provider/CLI, or distribution certification.
 
 The current local macOS arm64 package passes launch, native, and extracted-ZIP
-native scope. The remaining architecture records require their own native workflow
-runs.
+native scope. Separately, the native
+[four-target Package previews run](https://github.com/AlphaBetSoup789/ground/actions/runs/30473714099)
+completed the required macOS arm64, macOS x64, Windows x64, and Linux x64 jobs for
+source commit `a3073a8`, with artifact-bound runtime evidence. Those records are
+commit-specific unsigned preview evidence, not evidence for later source. They do
+not certify signing, notarization, DMG/DEB installation, renderer accessibility,
+live providers/CLIs, or supported distribution.
 
 The next storage boundary is a transactional, append-only event store with schema
 migrations and materialized task views. Stronger OS-specific confinement,
