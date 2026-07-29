@@ -528,27 +528,25 @@ function codexActivity(event: Record<string, unknown>): CliActivity | undefined 
   }
   const item = asRecord(event.item)
   if (!item || item.type === 'agent_message' || item.type === 'reasoning') return undefined
+  // Codex exec serializes non-fatal warnings, configuration notices, and
+  // deprecations as completed `error` items. Terminal failures use the
+  // top-level `error` or `turn.failed` events handled above.
+  if (event.type === 'item.completed' && item.type === 'error') return undefined
   const complete = event.type === 'item.completed'
   const itemType = typeof item.type === 'string' ? item.type : 'activity'
   const isCommand = itemType === 'command_execution'
-  const isError = itemType === 'error'
   const exitCode = asFiniteNumber(item.exit_code)
   let title = itemType.replaceAll('_', ' ')
   if (typeof item.name === 'string') title = item.name
   if (typeof item.command === 'string') title = item.command
-  if (isError) title = 'Codex reported an error'
   return {
     runtimeId: cliActivityRuntimeId('codex', item.id),
-    activityType: isError ? 'error' : isCommand ? 'command' : 'tool',
+    activityType: isCommand ? 'command' : 'tool',
     title,
-    detail:
-      isError && typeof item.message === 'string'
-        ? item.message
-        : compactJson(item.aggregated_output ?? item.changes ?? item),
+    detail: compactJson(item.aggregated_output ?? item.changes ?? item),
     status:
       complete &&
-      (isError ||
-        item.status === 'failed' ||
+      (item.status === 'failed' ||
         item.status === 'declined' ||
         (exitCode !== undefined && exitCode !== 0))
         ? 'error'
@@ -732,6 +730,20 @@ function extractDiagnostic(
   adapter: CliAdapter,
   event: Record<string, unknown>
 ): Extract<CliRuntimeEvent, { type: 'diagnostic' }> | undefined {
+  const codexItem = adapter === 'codex' ? asRecord(event.item) : undefined
+  if (
+    adapter === 'codex' &&
+    event.type === 'item.completed' &&
+    codexItem?.type === 'error'
+  ) {
+    return {
+      type: 'diagnostic',
+      detail:
+        typeof codexItem.message === 'string'
+          ? codexItem.message
+          : compactJson(codexItem) ?? 'Codex reported a notice'
+    }
+  }
   if (
     adapter === 'gemini' &&
     event.type === 'error' &&

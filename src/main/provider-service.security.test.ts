@@ -1625,6 +1625,48 @@ describe('persisted provider readiness', () => {
 })
 
 describe('provider model discovery', () => {
+  it.each([
+    ['openai-compatible' as const, ''],
+    ['openai' as const, 'draft-secret']
+  ])(
+    'explains a refused loopback connection for a %s provider',
+    async (kind, apiKey) => {
+      const unavailableServer = createServer()
+      await new Promise<void>((resolve) =>
+        unavailableServer.listen(0, '127.0.0.1', resolve)
+      )
+      const address = unavailableServer.address() as AddressInfo
+      const endpoint = `http://127.0.0.1:${address.port}/v1`
+      await new Promise<void>((resolve, reject) => {
+        unavailableServer.close((error) => {
+          if (error) reject(error)
+          else resolve()
+        })
+      })
+      const harness = createHarness(apiProvider(endpoint, kind), '')
+
+      const result = await harness.service.test({
+        name: 'Unavailable local endpoint',
+        kind,
+        baseUrl: endpoint,
+        model: 'model-one',
+        ...(apiKey ? { apiKey } : {})
+      })
+
+      expect(result).toMatchObject({
+        ok: false,
+        title: 'Could not connect',
+        detail: expect.stringContaining(
+          `No service is listening at ${endpoint}`
+        )
+      })
+      expect(result.detail).toMatch(/ECONNREFUSED/iu)
+      expect(result.detail).toMatch(/Start Ollama or LM Studio/iu)
+      expect(result.detail).toMatch(/correct the Base URL/iu)
+      expect(result.detail).not.toMatch(/fetch failed/iu)
+    }
+  )
+
   it.each<{
     kind: ModelProviderKind
     response: string
@@ -1848,6 +1890,8 @@ describe('provider model discovery', () => {
     })
     expect(result.detail).toContain('[redacted]')
     expect(result.detail).not.toContain(secret)
+    expect(result.detail).toContain(`${endpoint}/models`)
+    expect(result.detail).toContain(`${endpoint}/chat/completions`)
   })
 
   it('refuses redirects for model listing and generation probes', async () => {

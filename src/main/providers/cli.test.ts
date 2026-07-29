@@ -716,17 +716,30 @@ describe('CLI adapter', () => {
         item: {
           id: 'warning-1',
           type: 'error',
-          message: 'An optional MCP server did not start'
+          message:
+            'Skill descriptions were shortened to fit the 2% skills context budget.'
         }
+      })
+    ).toEqual([
+      {
+        type: 'diagnostic',
+        detail:
+          'Skill descriptions were shortened to fit the 2% skills context budget.'
+      }
+    ])
+
+    expect(
+      parseCliRuntimeEvent('codex', {
+        type: 'error',
+        message: 'The model request failed'
       })
     ).toEqual([
       {
         type: 'activity',
         activity: {
-          runtimeId: 'codex:warning-1',
           activityType: 'error',
           title: 'Codex reported an error',
-          detail: 'An optional MCP server did not start',
+          detail: '"The model request failed"',
           status: 'error'
         }
       }
@@ -1535,6 +1548,54 @@ describe('CLI adapter', () => {
     expect(diagnostics[0]?.length).toBeLessThanOrEqual(4_001)
     expect(diagnostics[0]).toContain(REDACTION_MARKER)
     expect(JSON.stringify(diagnostics)).not.toContain(secret)
+  })
+
+  it('keeps Codex notices non-fatal while preserving a successful turn', async () => {
+    const warning =
+      'Skill descriptions were shortened to fit the 2% skills context budget. Codex can still see every skill, but some descriptions are shorter.'
+    const output: string[] = []
+    const diagnostics: string[] = []
+    const activities: Array<{ title: string; status: string }> = []
+    const source = [
+      'const emit=(value)=>process.stdout.write(JSON.stringify(value)+"\\n");',
+      `emit({type:"item.completed",item:{id:"item_0",type:"error",message:${JSON.stringify(warning)}}});`,
+      'emit({type:"item.completed",item:{id:"item_1",type:"agent_message",text:"GROUND_CODEX_OK"}});',
+      'emit({type:"turn.completed",usage:{input_tokens:12,cached_input_tokens:0,output_tokens:4}});'
+    ].join('')
+
+    await runCli(
+      provider({
+        cliAdapter: 'codex',
+        model: '',
+        args: ['-e', source, 'exec', '-'],
+        outputMode: 'ndjson'
+      }),
+      'hello',
+      process.cwd(),
+      new AbortController().signal,
+      {
+        onText: (value) => output.push(value),
+        onDiagnostic: (value) => diagnostics.push(value),
+        onActivity: (activity) => activities.push(activity)
+      },
+      runOptions('codex'),
+      authorizeFixture
+    )
+
+    expect(output.join('')).toBe('GROUND_CODEX_OK')
+    expect(diagnostics.join('')).toContain(warning)
+    expect(activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: 'Codex turn',
+          status: 'success'
+        })
+      ])
+    )
+    expect(activities.some((activity) => activity.status === 'error')).toBe(false)
+    expect(
+      activities.some((activity) => activity.title === 'Codex reported an error')
+    ).toBe(false)
   })
 
   it('uses a collision-free marker that cannot recreate another secret', async () => {

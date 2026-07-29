@@ -41,6 +41,7 @@ export default function App(): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<AppSnapshot>()
   const [snapshotError, setSnapshotError] = useState<string>()
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsProviderId, setSettingsProviderId] = useState<string>()
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
   const [taskDrafts, setTaskDrafts] = useState<TaskDrafts>({})
   const [sidebarOpen, setSidebarOpen] = useState(true)
@@ -76,6 +77,11 @@ export default function App(): React.JSX.Element {
   const showError = useCallback((error: unknown) => {
     showToast(readableError(error), 'error', 6_000)
   }, [showToast])
+
+  const openSettings = useCallback((providerId?: string) => {
+    setSettingsProviderId(providerId)
+    setSettingsOpen(true)
+  }, [])
 
   const openSidebar = useCallback((focusSearch = false) => {
     setSidebarOpen(true)
@@ -463,7 +469,7 @@ export default function App(): React.JSX.Element {
         description: 'Connect an API, local model, or agent CLI',
         keywords: ['models', 'credentials', 'mcp', 'codex', 'claude', 'gemini'],
         shortcut: '⌘/Ctrl ,',
-        perform: () => setSettingsOpen(true)
+        perform: () => openSettings()
       },
       {
         id: 'toggle-sidebar',
@@ -484,6 +490,7 @@ export default function App(): React.JSX.Element {
       createTask,
       importTask,
       openSidebar,
+      openSettings,
       sidebarOpen
     ]
   )
@@ -510,7 +517,7 @@ export default function App(): React.JSX.Element {
       }
       if (event.key === ',') {
         event.preventDefault()
-        setSettingsOpen(true)
+        openSettings()
       }
       if (
         event.key.toLowerCase() === 'k'
@@ -521,7 +528,7 @@ export default function App(): React.JSX.Element {
     }
     window.addEventListener('keydown', handleShortcut)
     return () => window.removeEventListener('keydown', handleShortcut)
-  }, [createTask, openSidebar])
+  }, [createTask, openSettings, openSidebar])
 
   if (!snapshot) {
     if (snapshotError) {
@@ -566,7 +573,7 @@ export default function App(): React.JSX.Element {
         onChooseWorkspace={() => void chooseWorkspace()}
         onImportTask={() => void importTask()}
         onOpenCommands={() => setCommandPaletteOpen(true)}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={() => openSettings()}
         onClose={closeSidebar}
       />
       {sidebarOpen && (
@@ -649,7 +656,7 @@ export default function App(): React.JSX.Element {
             onStartRun={startRun}
             onStopRun={stopRun}
             onResolveApproval={resolveApproval}
-            onOpenSettings={() => setSettingsOpen(true)}
+            onOpenSettings={openSettings}
             onImportTask={() => void importTask()}
             onForkTask={() => void forkTask()}
             onSetArchived={(archived) => void setTaskArchived(archived)}
@@ -664,7 +671,7 @@ export default function App(): React.JSX.Element {
             onChooseWorkspace={() => void chooseWorkspace()}
             onNewTask={() => void createTask(false)}
             onImportTask={() => void importTask()}
-            onOpenSettings={() => setSettingsOpen(true)}
+            onOpenSettings={() => openSettings()}
           />
         )}
       </section>
@@ -673,6 +680,7 @@ export default function App(): React.JSX.Element {
         <ProviderModal
           providers={snapshot.providers}
           mcpServers={snapshot.mcpServers}
+          initialProviderId={settingsProviderId}
           onClose={() => setSettingsOpen(false)}
           onSaved={async () => {
             await refresh()

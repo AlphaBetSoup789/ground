@@ -41,7 +41,11 @@ import {
   StatePersistenceError,
   StateStore
 } from './store'
-import { canonicalProviderEndpoint, CliTrustRegistry } from './trust-boundary'
+import {
+  canonicalProviderEndpoint,
+  CliTrustRegistry,
+  isLiteralLoopbackUrl
+} from './trust-boundary'
 import { parseProviderDraft } from './validation'
 
 const MAX_MODEL_DISCOVERY_BYTES = 2_000_000
@@ -354,16 +358,82 @@ function redactKnownSecret(value: string, secret: string | undefined): string {
     : value
 }
 
+function safeNetworkErrorCode(error: unknown): string | undefined {
+  const pending: unknown[] = [error]
+  const visited = new Set<object>()
+  while (pending.length > 0 && visited.size < 32) {
+    const candidate = pending.shift()
+    if (
+      (typeof candidate !== 'object' || candidate === null) &&
+      typeof candidate !== 'function'
+    ) {
+      continue
+    }
+    if (visited.has(candidate)) continue
+    visited.add(candidate)
+
+    try {
+      const code = (candidate as { code?: unknown }).code
+      if (
+        typeof code === 'string' &&
+        /^[A-Z][A-Z0-9_]{1,63}$/u.test(code)
+      ) {
+        return code
+      }
+      const cause = (candidate as { cause?: unknown }).cause
+      if (cause !== undefined) pending.push(cause)
+      if (candidate instanceof AggregateError) {
+        pending.push(...candidate.errors)
+      }
+    } catch {
+      // Treat unexpected accessors as opaque rather than exposing their output.
+    }
+  }
+  return undefined
+}
+
+function loopbackConnectionRefusedDetail(
+  endpoint: string,
+  errors: readonly unknown[]
+): string | undefined {
+  let url: URL
+  try {
+    url = new URL(endpoint)
+  } catch {
+    return undefined
+  }
+  if (
+    !isLiteralLoopbackUrl(url) ||
+    errors.length === 0 ||
+    !errors.every((error) => safeNetworkErrorCode(error) === 'ECONNREFUSED')
+  ) {
+    return undefined
+  }
+  return (
+    `No service is listening at ${endpoint} (connection refused, ECONNREFUSED). ` +
+    'Start Ollama or LM Studio and ensure its local API server is running, ' +
+    'or correct the Base URL in Ground.'
+  )
+}
+
 function conciseProbeError(
   error: unknown,
   apiKey: string | undefined,
-  timeoutMs: number
+  timeoutMs: number,
+  endpoint: string
 ): string {
-  const detail =
+  const baseDetail =
     error instanceof Error && error.name === 'AbortError'
       ? `timed out after ${timeoutMs / 1_000} seconds`
       : redactKnownSecret(readableError(error), apiKey)
-  const normalized = detail.replace(/\s+/gu, ' ').trim()
+  const code = safeNetworkErrorCode(error)
+  const detail =
+    code && !baseDetail.includes(code)
+      ? `${baseDetail} (${code})`
+      : baseDetail
+  const normalized = `request to ${endpoint}: ${detail}`
+    .replace(/\s+/gu, ' ')
+    .trim()
   return normalized.length > 800
     ? `${normalized.slice(0, 797)}...`
     : normalized || 'unknown error'
@@ -999,9 +1069,13 @@ export class ProviderService {
       () => discoveryController.abort(),
       PROVIDER_DISCOVERY_TIMEOUT_MS
     )
+    const discoveryEndpoint = modelDiscoveryEndpoint(
+      draft.kind,
+      endpoint
+    )
     let discoveryError: unknown
     try {
-      const response = await fetch(modelDiscoveryEndpoint(draft.kind, endpoint), {
+      const response = await fetch(discoveryEndpoint, {
         headers: discoveryHeaders(draft.kind, apiKey),
         redirect: 'error',
         signal: discoveryController.signal
@@ -1047,14 +1121,20 @@ export class ProviderService {
     }
 
     if (draft.kind !== 'openai-compatible') {
+      const connectionRefused = loopbackConnectionRefusedDetail(endpoint, [
+        discoveryError
+      ])
       return {
         ok: false,
         title: 'Could not connect',
         detail:
-          discoveryError instanceof Error &&
-          discoveryError.name === 'AbortError'
-            ? 'The endpoint did not respond within 10 seconds.'
-            : redactKnownSecret(readableError(discoveryError), apiKey)
+          connectionRefused ??
+          conciseProbeError(
+            discoveryError,
+            apiKey,
+            PROVIDER_DISCOVERY_TIMEOUT_MS,
+            discoveryEndpoint
+          )
       }
     }
 
@@ -1063,8 +1143,9 @@ export class ProviderService {
       () => generationController.abort(),
       COMPATIBLE_GENERATION_TIMEOUT_MS
     )
+    const generationEndpoint = compatibleChatEndpoint(endpoint)
     try {
-      const response = await fetch(compatibleChatEndpoint(endpoint), {
+      const response = await fetch(generationEndpoint, {
         method: 'POST',
         headers: {
           ...discoveryHeaders(draft.kind, apiKey),
@@ -1112,21 +1193,29 @@ export class ProviderService {
         models: []
       }
     } catch (generationError) {
+      const connectionRefused = loopbackConnectionRefusedDetail(endpoint, [
+        discoveryError,
+        generationError
+      ])
       return {
         ok: false,
         title: 'Could not connect',
-        detail: [
-          `Model listing failed: ${conciseProbeError(
-            discoveryError,
-            apiKey,
-            PROVIDER_DISCOVERY_TIMEOUT_MS
-          )}`,
-          `Generation probe failed: ${conciseProbeError(
-            generationError,
-            apiKey,
-            COMPATIBLE_GENERATION_TIMEOUT_MS
-          )}`
-        ].join(' ')
+        detail:
+          connectionRefused ??
+          [
+            `Model listing failed: ${conciseProbeError(
+              discoveryError,
+              apiKey,
+              PROVIDER_DISCOVERY_TIMEOUT_MS,
+              discoveryEndpoint
+            )}`,
+            `Generation probe failed: ${conciseProbeError(
+              generationError,
+              apiKey,
+              COMPATIBLE_GENERATION_TIMEOUT_MS,
+              generationEndpoint
+            )}`
+          ].join(' ')
       }
     } finally {
       clearTimeout(generationTimer)
