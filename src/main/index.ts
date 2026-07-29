@@ -12,6 +12,7 @@ import type {
   GitOverview,
   RunEvent,
   RunEventEnvelope,
+  Task,
   TaskExportFormat,
   TerminalSessionInfo
 } from '../shared/types'
@@ -48,10 +49,14 @@ import {
   parseNonEmptyId,
   parsePrompt,
   parseTaskPatch,
-  parseWorkspacePath
+  parseWorkspaceGrantId
 } from './validation'
 import { migrateLegacyData } from './migration'
 import { agentApprovalDialogOptions } from './native-agent-approval'
+import {
+  projectDesktopTaskOperation,
+  toDesktopSnapshot
+} from './desktop-projection'
 import {
   preparePackagedSmokeDirectory,
   resolvePackagedSmokeConfig,
@@ -63,9 +68,11 @@ import {
   CliTrustRegistry,
   type CliTrustRequest,
   isExpectedRendererUrl,
+  revealWorkspacePath,
   resolveRendererTarget,
   WorkspaceGrantRegistry
 } from './trust-boundary'
+import { WorkspaceLifecycleGate } from './workspace-lifecycle-gate'
 
 let mainWindow: BrowserWindow | undefined
 let runManager: RunManager | undefined
@@ -180,6 +187,11 @@ type TrustedIpcHandler = (
   event: Electron.IpcMainInvokeEvent,
   ...args: unknown[]
 ) => unknown
+
+type TrustedTaskIpcHandler = (
+  event: Electron.IpcMainInvokeEvent,
+  ...args: unknown[]
+) => Task | undefined | PromiseLike<Task | undefined>
 
 function handleTrusted(channel: string, handler: TrustedIpcHandler): void {
   ipcMain.handle(channel, async (event, ...args) => {
@@ -494,6 +506,33 @@ function registerIpc(
   const terminalSenderCleanupInstalled = new Set<number>()
   const gitServices = new Map<string, Promise<GitWorkspaceService>>()
   const nativeApprovalPrompts = new Set<string>()
+  const workspaceLifecycle = new WorkspaceLifecycleGate()
+  const handleWorkspaceLifecycle = (
+    channel: string,
+    handler: TrustedIpcHandler
+  ): void => {
+    handleTrusted(channel, (event, ...args) =>
+      workspaceLifecycle.run(() => handler(event, ...args))
+    )
+  }
+  const handleTaskResult = (
+    channel: string,
+    handler: TrustedTaskIpcHandler
+  ): void => {
+    handleTrusted(
+      channel,
+      projectDesktopTaskOperation(workspaceGrants, handler)
+    )
+  }
+  const handleWorkspaceTaskResult = (
+    channel: string,
+    handler: TrustedTaskIpcHandler
+  ): void => {
+    const projected = projectDesktopTaskOperation(workspaceGrants, handler)
+    handleTrusted(channel, (event, ...args) =>
+      workspaceLifecycle.run(() => projected(event, ...args))
+    )
+  }
 
   const requireTaskWorkspace = async (
     rawTaskId: unknown
@@ -506,7 +545,9 @@ function registerIpc(
     if (!task.workspacePath) throw new Error('Choose a workspace first')
     return {
       taskId,
-      workspacePath: await workspaceGrants.require(task.workspacePath)
+      workspacePath: await workspaceGrants.requireStoredPath(
+        task.workspacePath
+      )
     }
   }
 
@@ -565,6 +606,33 @@ function registerIpc(
         `\\u{${character.codePointAt(0)?.toString(16).padStart(4, '0')}}`
     )
 
+  const tasksUsingWorkspace = (storedPath: string) => {
+    const targetGrant = workspaceGrants.describeStoredPath(storedPath)
+    return store.snapshot().tasks.filter((task) => {
+      if (task.workspacePath === storedPath) return true
+      if (!targetGrant || !task.workspacePath) return false
+      return (
+        workspaceGrants.describeStoredPath(task.workspacePath)?.id ===
+        targetGrant.id
+      )
+    })
+  }
+
+  const revokeWorkspaceIfUnused = async (
+    storedPath: string | undefined
+  ): Promise<void> => {
+    if (!storedPath) return
+    const grant = workspaceGrants.describeStoredPath(storedPath)
+    if (!grant) return
+    if (tasksUsingWorkspace(storedPath).length > 0) return
+    const canonical = await workspaceGrants
+      .require(grant.id)
+      .catch(() => undefined)
+    workspaceGrants.revoke(grant.id)
+    gitServices.delete(storedPath)
+    if (canonical) gitServices.delete(canonical)
+  }
+
   handleTrusted(IPC.getSnapshot, async () => {
     // Capture the event boundary before queueing the snapshot. RunManager
     // queues each streaming state mutation before emitting its event, so the
@@ -575,21 +643,26 @@ function registerIpc(
     )
     const snapshot = await store.settledSnapshot()
     return {
-      ...snapshot,
+      ...toDesktopSnapshot(snapshot, workspaceGrants),
       runEventRevision: revision,
       activeRunEvents: activeEvents
     }
   })
 
-  handleTrusted(IPC.createTask, async (_event, workspacePath?: unknown) => {
-    const canonical =
-      workspacePath === undefined
-        ? undefined
-        : await workspaceGrants.require(parseWorkspacePath(workspacePath))
-    return store.createTask(canonical)
-  })
+  handleWorkspaceTaskResult(
+    IPC.createTask,
+    async (_event, workspaceGrantId?: unknown) => {
+      const canonical =
+        workspaceGrantId === undefined
+          ? undefined
+          : await workspaceGrants.require(
+              parseWorkspaceGrantId(workspaceGrantId)
+            )
+      return store.createTask(canonical)
+    }
+  )
 
-  handleTrusted(IPC.forkTask, async (_event, rawTaskId: unknown) => {
+  handleWorkspaceTaskResult(IPC.forkTask, async (_event, rawTaskId: unknown) => {
     const taskId = parseNonEmptyId(rawTaskId, 'Task identifier')
     if (runs.isTaskActive(taskId)) {
       throw new Error('Stop this task before forking it')
@@ -597,7 +670,7 @@ function registerIpc(
     return store.forkTask(taskId)
   })
 
-  handleTrusted(
+  handleWorkspaceTaskResult(
     IPC.setTaskArchived,
     async (_event, rawTaskId: unknown, rawArchived: unknown) => {
       const taskId = parseNonEmptyId(rawTaskId, 'Task identifier')
@@ -613,7 +686,7 @@ function registerIpc(
     }
   )
 
-  handleTrusted(IPC.importTaskBundle, async (event) => {
+  handleTaskResult(IPC.importTaskBundle, async (event) => {
     const options: Electron.OpenDialogOptions = {
       title: 'Import a Ground task',
       buttonLabel: 'Import task',
@@ -675,97 +748,124 @@ function registerIpc(
     }
   )
 
-  handleTrusted(IPC.deleteTask, async (event, rawTaskId: unknown) => {
-    const taskId = parseNonEmptyId(rawTaskId, 'Task identifier')
-    const task = store.getTask(taskId)
-    if (task.runStatus === 'running' || task.runStatus === 'awaiting-approval') {
-      throw new Error('Stop this task before deleting it')
-    }
-    const options: Electron.MessageBoxOptions = {
-      type: 'warning',
-      buttons: ['Cancel', 'Delete task'],
-      defaultId: 0,
-      cancelId: 0,
-      noLink: true,
-      title: 'Delete task',
-      message: `Delete ${JSON.stringify(task.title)}?`,
-      detail:
-        'This removes the task and its local conversation history from Ground. Open terminals for this task will close; workspace files are not changed.'
-    }
-    const owner = BrowserWindow.fromWebContents(event.sender) ?? mainWindow
-    const result = owner
-      ? await dialog.showMessageBox(owner, options)
-      : await dialog.showMessageBox(options)
-    if (result.response !== 1) return false
-    await store.deleteTask(taskId)
-    for (const sessionId of terminalAccess.removeTask(taskId)) {
-      terminals.kill(sessionId)
-    }
-    return true
-  })
-
-  handleTrusted(IPC.selectTask, async (_event, taskId: unknown) => {
-    await store.selectTask(parseNonEmptyId(taskId, 'Task identifier'))
-  })
-
-  handleTrusted(IPC.updateTask, async (event, taskId: unknown, rawPatch: unknown) => {
-    const id = parseNonEmptyId(taskId, 'Task identifier')
-    const patch = parseTaskPatch(rawPatch)
-    const currentTask = store.getTask(id)
-    if (currentTask.archivedAt) {
-      throw new Error('Restore this task before changing it')
-    }
-    if (
-      runs.isTaskActive(id) &&
-      (patch.workspacePath !== undefined ||
-        patch.providerId !== undefined ||
-        patch.mode !== undefined ||
-        patch.includeImportedHistory !== undefined)
-    ) {
-      throw new Error(
-        'Stop the active run before changing its workspace, provider, mode, or imported-history context'
-      )
-    }
-    if (patch.providerId) store.getProvider(patch.providerId)
-    if (patch.workspacePath) {
-      patch.workspacePath = await workspaceGrants.require(patch.workspacePath)
-    }
-    if (
-      patch.includeImportedHistory === true &&
-      currentTask.includeImportedHistory !== true
-    ) {
-      const provider = store.getProvider(
-        patch.providerId ?? currentTask.providerId
-      )
+  handleWorkspaceLifecycle(
+    IPC.deleteTask,
+    async (event, rawTaskId: unknown) => {
+      const taskId = parseNonEmptyId(rawTaskId, 'Task identifier')
+      const task = store.getTask(taskId)
+      if (
+        task.runStatus === 'running' ||
+        task.runStatus === 'awaiting-approval'
+      ) {
+        throw new Error('Stop this task before deleting it')
+      }
       const options: Electron.MessageBoxOptions = {
         type: 'warning',
-        buttons: ['Keep excluded', 'Include imported history'],
+        buttons: ['Cancel', 'Delete task'],
         defaultId: 0,
         cancelId: 0,
         noLink: true,
-        title: 'Include untrusted imported history?',
-        message: 'Allow imported content into future model context?',
-        detail: [
-          `Task: ${reviewValue(currentTask.title)}`,
-          `Current provider: ${reviewValue(provider.name)}`,
-          '',
-          'Imported transcripts are untrusted. They can contain prompt injection, private text, or misleading tool results.',
-          'If this task uses a Ground-managed model API, its imported history will be sent to that configured provider on the next run.',
-          'Imported history never restores workspace, credential, executable, session, or approval authority.',
-          '',
-          'You can exclude it again before a later run.'
-        ].join('\n')
+        title: 'Delete task',
+        message: `Delete ${JSON.stringify(task.title)}?`,
+        detail:
+          'This removes the task and its local conversation history from Ground. Open terminals for this task will close; workspace files are not changed.'
       }
       const owner = BrowserWindow.fromWebContents(event.sender) ?? mainWindow
       const result = owner
         ? await dialog.showMessageBox(owner, options)
         : await dialog.showMessageBox(options)
-      if (result.response !== 1) return currentTask
+      if (result.response !== 1) return false
+      await store.deleteTask(taskId)
+      for (const sessionId of terminalAccess.removeTask(taskId)) {
+        terminals.kill(sessionId)
+      }
+      await revokeWorkspaceIfUnused(task.workspacePath)
+      return true
     }
-    return store.mutateTask(id, (task) => Object.assign(task, patch))
+  )
+
+  handleTrusted(IPC.selectTask, async (_event, taskId: unknown) => {
+    await store.selectTask(parseNonEmptyId(taskId, 'Task identifier'))
   })
 
-  handleTrusted(IPC.chooseWorkspace, async () => {
+  handleWorkspaceTaskResult(
+    IPC.updateTask,
+    async (event, taskId: unknown, rawPatch: unknown) => {
+      const id = parseNonEmptyId(taskId, 'Task identifier')
+      const patch = parseTaskPatch(rawPatch)
+      const currentTask = store.getTask(id)
+      if (currentTask.archivedAt) {
+        throw new Error('Restore this task before changing it')
+      }
+      if (
+        runs.isTaskActive(id) &&
+        (patch.workspaceGrantId !== undefined ||
+          patch.providerId !== undefined ||
+          patch.mode !== undefined ||
+          patch.includeImportedHistory !== undefined)
+      ) {
+        throw new Error(
+          'Stop the active run before changing its workspace, provider, mode, or imported-history context'
+        )
+      }
+      if (patch.providerId) store.getProvider(patch.providerId)
+      const workspacePath =
+        patch.workspaceGrantId === undefined
+          ? undefined
+          : await workspaceGrants.require(patch.workspaceGrantId)
+      if (
+        patch.includeImportedHistory === true &&
+        currentTask.includeImportedHistory !== true
+      ) {
+        const provider = store.getProvider(
+          patch.providerId ?? currentTask.providerId
+        )
+        const options: Electron.MessageBoxOptions = {
+          type: 'warning',
+          buttons: ['Keep excluded', 'Include imported history'],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true,
+          title: 'Include untrusted imported history?',
+          message: 'Allow imported content into future model context?',
+          detail: [
+            `Task: ${reviewValue(currentTask.title)}`,
+            `Current provider: ${reviewValue(provider.name)}`,
+            '',
+            'Imported transcripts are untrusted. They can contain prompt injection, private text, or misleading tool results.',
+            'If this task uses a Ground-managed model API, its imported history will be sent to that configured provider on the next run.',
+            'Imported history never restores workspace, credential, executable, session, or approval authority.',
+            '',
+            'You can exclude it again before a later run.'
+          ].join('\n')
+        }
+        const owner = BrowserWindow.fromWebContents(event.sender) ?? mainWindow
+        const result = owner
+          ? await dialog.showMessageBox(owner, options)
+          : await dialog.showMessageBox(options)
+        if (result.response !== 1) {
+          return currentTask
+        }
+      }
+      const { workspaceGrantId: _workspaceGrantId, ...taskPatch } = patch
+      const updated = await store.mutateTask(id, (task) => {
+        Object.assign(task, taskPatch)
+        if (workspacePath !== undefined) task.workspacePath = workspacePath
+      })
+      if (
+        workspacePath !== undefined &&
+        currentTask.workspacePath !== workspacePath
+      ) {
+        for (const sessionId of terminalAccess.removeTask(id)) {
+          terminals.kill(sessionId)
+        }
+        await revokeWorkspaceIfUnused(currentTask.workspacePath)
+      }
+      return updated
+    }
+  )
+
+  handleWorkspaceLifecycle(IPC.chooseWorkspace, async () => {
     const options: Electron.OpenDialogOptions = {
       title: 'Choose a workspace',
       properties: ['openDirectory', 'createDirectory']
@@ -777,11 +877,17 @@ function registerIpc(
     return workspaceGrants.grant(result.filePaths[0])
   })
 
-  handleTrusted(IPC.revealWorkspace, async (_event, rawPath: unknown) => {
-    const workspacePath = await workspaceGrants.require(parseWorkspacePath(rawPath))
-    const error = await shell.openPath(workspacePath)
-    if (error) throw new Error(error)
-  })
+  handleWorkspaceLifecycle(
+    IPC.revealWorkspace,
+    async (_event, rawGrantId: unknown) => {
+      const workspacePath = await workspaceGrants.require(
+        parseWorkspaceGrantId(rawGrantId)
+      )
+      await revealWorkspacePath(workspacePath, (candidate) =>
+        shell.openPath(candidate)
+      )
+    }
+  )
 
   handleTrusted(IPC.saveProvider, (_event, draft: unknown) => providers.save(draft))
   handleTrusted(IPC.deleteProvider, async (_event, providerId: unknown) => {
@@ -790,7 +896,7 @@ function registerIpc(
   handleTrusted(IPC.testProvider, (_event, draft: unknown) => providers.test(draft))
   handleTrusted(IPC.detectClis, () => providers.detectClis())
 
-  handleTrusted(IPC.startRun, async (_event, input: unknown) => {
+  handleWorkspaceLifecycle(IPC.startRun, async (_event, input: unknown) => {
     const record =
       input && typeof input === 'object' ? (input as Record<string, unknown>) : {}
     const taskId = parseNonEmptyId(record.taskId, 'Task identifier')
@@ -867,7 +973,7 @@ function registerIpc(
       )
   })
 
-  handleTrusted(
+  handleWorkspaceLifecycle(
     IPC.createTerminal,
     async (event, rawTaskId: unknown, rawDimensions: unknown) => {
       const { taskId, workspacePath } = await requireTaskWorkspace(rawTaskId)
@@ -926,46 +1032,52 @@ function registerIpc(
     }
   )
 
-  handleTrusted(IPC.attachTerminal, (event, rawTaskId: unknown, rawSessionId: unknown) => {
-    const taskId = parseNonEmptyId(rawTaskId, 'Task identifier')
-    const sessionId = parseNonEmptyId(rawSessionId, 'Terminal session identifier')
-    store.getTask(taskId)
-    terminalAccess.assertOwnedByTask(sessionId, taskId)
+  handleWorkspaceLifecycle(
+    IPC.attachTerminal,
+    (event, rawTaskId: unknown, rawSessionId: unknown) => {
+      const taskId = parseNonEmptyId(rawTaskId, 'Task identifier')
+      const sessionId = parseNonEmptyId(
+        rawSessionId,
+        'Terminal session identifier'
+      )
+      store.getTask(taskId)
+      terminalAccess.assertOwnedByTask(sessionId, taskId)
 
-    const sender = event.sender
-    const senderId = sender.id
-    const attachmentId = terminalAccess.attach(
-      sessionId,
-      taskId,
-      senderId,
-      () =>
-        terminals.subscribe(
-          sessionId,
-          {
-            onData: (terminalEvent) => {
-              if (!sender.isDestroyed()) {
-                sender.send(IPC.terminalEvent, terminalEvent)
+      const sender = event.sender
+      const senderId = sender.id
+      const attachmentId = terminalAccess.attach(
+        sessionId,
+        taskId,
+        senderId,
+        () =>
+          terminals.subscribe(
+            sessionId,
+            {
+              onData: (terminalEvent) => {
+                if (!sender.isDestroyed()) {
+                  sender.send(IPC.terminalEvent, terminalEvent)
+                }
+              },
+              onExit: (terminalEvent) => {
+                terminalAccess.remove(sessionId)
+                if (!sender.isDestroyed()) {
+                  sender.send(IPC.terminalEvent, terminalEvent)
+                }
               }
             },
-            onExit: (terminalEvent) => {
-              terminalAccess.remove(sessionId)
-              if (!sender.isDestroyed()) {
-                sender.send(IPC.terminalEvent, terminalEvent)
-              }
-            }
-          },
-          true
-        )
-    )
-    if (!terminalSenderCleanupInstalled.has(senderId)) {
-      terminalSenderCleanupInstalled.add(senderId)
-      sender.once('destroyed', () => {
-        terminalAccess.releaseSender(senderId)
-        terminalSenderCleanupInstalled.delete(senderId)
-      })
+            true
+          )
+      )
+      if (!terminalSenderCleanupInstalled.has(senderId)) {
+        terminalSenderCleanupInstalled.add(senderId)
+        sender.once('destroyed', () => {
+          terminalAccess.releaseSender(senderId)
+          terminalSenderCleanupInstalled.delete(senderId)
+        })
+      }
+      return { attachmentId }
     }
-    return { attachmentId }
-  })
+  )
 
   handleTrusted(
     IPC.detachTerminal,
@@ -1053,7 +1165,7 @@ function registerIpc(
     }
   )
 
-  handleTrusted(IPC.getGitOverview, async (_event, rawTaskId: unknown) => {
+  handleWorkspaceLifecycle(IPC.getGitOverview, async (_event, rawTaskId: unknown) => {
     const taskId = parseNonEmptyId(rawTaskId, 'Task identifier')
     const task = store.getTask(taskId)
     if (!task.workspacePath) {
@@ -1067,7 +1179,9 @@ function registerIpc(
     }
 
     try {
-      const workspacePath = await workspaceGrants.require(task.workspacePath)
+      const workspacePath = await workspaceGrants.requireStoredPath(
+        task.workspacePath
+      )
       const { service } = await gitServiceFor(workspacePath)
       const [status, identity, unstagedDiff, stagedDiff, history, worktrees] =
         await Promise.all([
@@ -1113,7 +1227,7 @@ function registerIpc(
     }
   })
 
-  handleTrusted(
+  handleWorkspaceTaskResult(
     IPC.createGitWorktree,
     async (event, rawTaskId: unknown, rawInput: unknown) => {
       const { taskId, workspacePath } = await requireTaskWorkspace(rawTaskId)
@@ -1160,19 +1274,24 @@ function registerIpc(
       })
 
       let taskCreated = false
+      let createdGrantId: string | undefined
       try {
-        const createdWorkspace = await workspaceGrants.grant(
+        const createdGrant = await workspaceGrants.grant(
           path.join(worktreeRoot, relativePath)
         )
+        createdGrantId = createdGrant.id
+        const createdWorkspace = await workspaceGrants.require(createdGrant.id)
         const created = await store.createTask(createdWorkspace)
         taskCreated = true
-        return store.mutateTask(created.id, (task) => {
+        const updated = await store.mutateTask(created.id, (task) => {
           task.title = branch
           task.providerId = sourceTask.providerId
           task.mode = sourceTask.mode
         })
+        return updated
       } catch (error) {
         if (!taskCreated) {
+          if (createdGrantId) workspaceGrants.revoke(createdGrantId)
           await service.removeWorktree({ relativePath }).catch(() => undefined)
         }
         throw error
@@ -1180,7 +1299,7 @@ function registerIpc(
     }
   )
 
-  handleTrusted(
+  handleWorkspaceLifecycle(
     IPC.stageGitPaths,
     async (event, rawTaskId: unknown, rawPaths: unknown) => {
       const { workspacePath } = await requireTaskWorkspace(rawTaskId)
@@ -1213,7 +1332,7 @@ function registerIpc(
     }
   )
 
-  handleTrusted(
+  handleWorkspaceLifecycle(
     IPC.unstageGitPaths,
     async (event, rawTaskId: unknown, rawPaths: unknown) => {
       const { workspacePath } = await requireTaskWorkspace(rawTaskId)
@@ -1246,7 +1365,7 @@ function registerIpc(
     }
   )
 
-  handleTrusted(
+  handleWorkspaceLifecycle(
     IPC.commitGitChanges,
     async (event, rawTaskId: unknown, rawInput: unknown) => {
       const { workspacePath } = await requireTaskWorkspace(rawTaskId)
@@ -1318,7 +1437,7 @@ function registerIpc(
     }
   )
 
-  handleTrusted(
+  handleWorkspaceLifecycle(
     IPC.removeGitWorktree,
     async (event, rawTaskId: unknown, rawRelativePath: unknown) => {
       const { workspacePath } = await requireTaskWorkspace(rawTaskId)
@@ -1338,9 +1457,7 @@ function registerIpc(
       }
 
       const managedWorkspace = path.join(worktreeRoot, relativePath)
-      const linkedTasks = store
-        .snapshot()
-        .tasks.filter((task) => task.workspacePath === managedWorkspace)
+      const linkedTasks = tasksUsingWorkspace(managedWorkspace)
       if (
         linkedTasks.some(
           (task) =>
@@ -1373,9 +1490,7 @@ function registerIpc(
       })
       if (!approved) return undefined
 
-      const currentLinkedTasks = store
-        .snapshot()
-        .tasks.filter((task) => task.workspacePath === managedWorkspace)
+      const currentLinkedTasks = tasksUsingWorkspace(managedWorkspace)
       if (
         currentLinkedTasks.some(
           (task) =>
@@ -1391,7 +1506,9 @@ function registerIpc(
           terminals.kill(sessionId)
         }
       }
-      workspaceGrants.revoke(managedWorkspace)
+      const managedGrant =
+        workspaceGrants.describeStoredPath(managedWorkspace)
+      if (managedGrant) workspaceGrants.revoke(managedGrant.id)
       gitServices.delete(managedWorkspace)
       for (const task of currentLinkedTasks) {
         await store.mutateTask(task.id, (record) => {
@@ -1453,7 +1570,8 @@ if (!ownsInstance) {
       undefined,
       mcpManager,
       (request) => cliTrust.authorizeInvocation(request),
-      providerOperations
+      providerOperations,
+      (candidate) => workspaceGrants.requireStoredPath(candidate)
     )
     runManager = runs
     const providers = new ProviderService(
@@ -1464,7 +1582,8 @@ if (!ownsInstance) {
       providerOperations
     )
     terminalService = new TerminalService({
-      authorizeWorkspace: (candidate) => workspaceGrants.require(candidate)
+      authorizeWorkspace: (candidate) =>
+        workspaceGrants.requireStoredPath(candidate)
     })
     registerIpc(
       store,

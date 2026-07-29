@@ -121,12 +121,13 @@ async function runCliFixture(
   terminal: RunEvent
 }> {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-cli-run-'))
-  const workspace = path.join(directory, 'workspace')
+  const workspaceCandidate = path.join(directory, 'workspace')
   const fixture = path.join(directory, 'runtime-fixture.mjs')
   await Promise.all([
-    mkdir(workspace),
+    mkdir(workspaceCandidate),
     writeFile(fixture, FIXTURE_SOURCE, { mode: 0o600 })
   ])
+  const workspace = await realpath(workspaceCandidate)
 
   const store = new StateStore(path.join(directory, 'state.json'))
   await store.load()
@@ -225,7 +226,9 @@ async function runCliFixture(
     async (request) => {
       authorizationArgs.push([...request.displayArgs])
       return authorizeFixture(request)
-    }
+    },
+    undefined,
+    (candidate) => realpath(candidate)
   )
 
   await manager.start(task.id, 'Inspect the workspace')

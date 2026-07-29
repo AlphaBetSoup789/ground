@@ -1,8 +1,8 @@
 import type {
   AppSnapshot,
+  DesktopTask,
   RunEvent,
-  RunEventEnvelope,
-  Task
+  RunEventEnvelope
 } from '../../../shared/types'
 
 export function applyRunEvent(
@@ -13,7 +13,7 @@ export function applyRunEvent(
     (candidate) => candidate.id === event.taskId
   )
   if (taskIndex === -1) return snapshot
-  const currentTask = snapshot.tasks[taskIndex] as Task
+  const currentTask = snapshot.tasks[taskIndex] as DesktopTask
   let task = currentTask
 
   switch (event.type) {

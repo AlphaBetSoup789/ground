@@ -19,13 +19,12 @@ import {
 } from 'lucide-react'
 import type {
   ActivityItem,
+  DesktopTask,
   ProviderProfile,
   RunMode,
-  Task,
   TaskExportFormat,
   TaskPatch
 } from '../../../shared/types'
-import { compactPath } from '../lib/format'
 import { Composer } from './Composer'
 import { GitPanel } from './GitPanel'
 import { TerminalPanel } from './TerminalPanel'
@@ -34,7 +33,7 @@ import { Timeline } from './Timeline'
 type WorkspacePanel = 'git' | 'terminal'
 
 interface TaskViewProps {
-  task: Task
+  task: DesktopTask
   providers: ProviderProfile[]
   sidebarOpen: boolean
   onCloseSidebar: () => void
@@ -50,7 +49,7 @@ interface TaskViewProps {
   onSetArchived: (archived: boolean) => void
   onExportTask: (format: TaskExportFormat) => void
   onDeleteTask: () => void
-  onTaskCreated: (task: Task) => void
+  onTaskCreated: (task: DesktopTask) => void
   onWorkspaceTasksChanged: () => void
   onError: (error: unknown) => void
 }
@@ -186,12 +185,16 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
             <button
               className="workspace-path"
               type="button"
-              title={props.task.workspacePath ?? 'Choose a workspace'}
-              onClick={props.task.workspacePath ? props.onRevealWorkspace : props.onChooseWorkspace}
-              disabled={isArchived && !props.task.workspacePath}
+              title={props.task.workspace?.name ?? 'Choose a workspace'}
+              onClick={
+                props.task.workspace
+                  ? props.onRevealWorkspace
+                  : props.onChooseWorkspace
+              }
+              disabled={isArchived && !props.task.workspace}
             >
               <Folder size={11} />
-              {compactPath(props.task.workspacePath)}
+              {props.task.workspace?.name ?? 'Choose workspace'}
             </button>
           </div>
         </div>
@@ -476,13 +479,13 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
           {workspacePanel === 'terminal' ? (
             <TerminalPanel
               taskId={props.task.id}
-              workspaceReady={Boolean(props.task.workspacePath)}
+              workspaceReady={Boolean(props.task.workspace)}
               onError={props.onError}
             />
           ) : (
             <GitPanel
               taskId={props.task.id}
-              workspaceReady={Boolean(props.task.workspacePath)}
+              workspaceReady={Boolean(props.task.workspace)}
               onTaskCreated={props.onTaskCreated}
               onWorkspaceTasksChanged={props.onWorkspaceTasksChanged}
               onError={props.onError}

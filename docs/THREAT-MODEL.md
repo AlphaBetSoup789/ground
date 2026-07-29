@@ -115,6 +115,9 @@ therefore retains the current account’s OS authority.
 - Context isolation, restricted navigation, a narrow preload bridge, and strict IPC
   caller validation reduce renderer authority.
 - Workspace grants and CLI authorization are created in the main process.
+  Renderer task DTOs contain only fresh process-scoped grant IDs and sanitized
+  path-free labels; canonical paths, runtime sessions, and model continuation
+  state are projected out through an explicit allowlist.
 - Endpoint credentials are bound to a provider kind and canonical endpoint, kept
   out of renderer state, stored under boundary-specific opaque references, and
   saved only when Electron secure storage is genuinely available. Interrupted
@@ -209,7 +212,6 @@ therefore retains the current account’s OS authority.
 
 - Further narrow same-user preview/execution races with handle-based or
   platform-specific file and executable authority.
-- Replace renderer-visible workspace paths with opaque, revocable grant IDs.
 - Persist executable trust by code signature or equivalent platform identity and
   run external runtimes in a dedicated constrained helper where practical.
 - Replace JSON snapshots with a transactional, sequenced event log and add a

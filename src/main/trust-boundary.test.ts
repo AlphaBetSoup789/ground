@@ -1,4 +1,10 @@
-import { mkdtemp, mkdir, realpath } from 'node:fs/promises'
+import {
+  mkdtemp,
+  mkdir,
+  realpath,
+  rename,
+  rm
+} from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -10,6 +16,7 @@ import {
   type CliTrustRequest,
   isExpectedRendererUrl,
   isLoopbackRendererUrl,
+  revealWorkspacePath,
   resolveRendererTarget,
   WorkspaceGrantRegistry
 } from './trust-boundary'
@@ -92,7 +99,30 @@ describe('provider endpoint identity', () => {
 })
 
 describe('workspace grants', () => {
-  it('accepts only directories granted by the main process', async () => {
+  it('does not disclose a workspace path through reveal failures', async () => {
+    const workspace = path.resolve(os.tmpdir(), 'ground-private-workspace')
+    const returnedFailure = vi.fn(async () => `Cannot open ${workspace}`)
+    const thrownFailure = vi.fn(async () => {
+      throw new Error(`Cannot open ${workspace}`)
+    })
+
+    await expect(
+      revealWorkspacePath(workspace, returnedFailure)
+    ).rejects.toThrow('Ground could not reveal this workspace')
+    await expect(
+      revealWorkspacePath(workspace, thrownFailure)
+    ).rejects.toThrow('Ground could not reveal this workspace')
+    for (const operation of [returnedFailure, thrownFailure]) {
+      expect(operation).toHaveBeenCalledWith(workspace)
+      try {
+        await revealWorkspacePath(workspace, operation)
+      } catch (error) {
+        expect((error as Error).message).not.toContain(workspace)
+      }
+    }
+  })
+
+  it('accepts only opaque IDs granted by the main process', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'ground-grants-'))
     const allowed = path.join(root, 'allowed')
     const denied = path.join(root, 'denied')
@@ -100,20 +130,141 @@ describe('workspace grants', () => {
     const grants = new WorkspaceGrantRegistry()
 
     await expect(grants.require(allowed)).rejects.toThrow(/choose this workspace/i)
-    const canonical = await grants.grant(allowed)
-    await expect(grants.require(allowed)).resolves.toBe(canonical)
+    const grant = await grants.grant(allowed)
+    expect(grant.id).toMatch(/^workspace_/u)
+    expect(grant.id).not.toContain(allowed)
+    expect(grant).not.toHaveProperty('path')
+    await expect(grants.require(grant.id)).resolves.toBe(await realpath(allowed))
     await expect(grants.require(denied)).rejects.toThrow(/choose this workspace/i)
-    grants.revoke(canonical)
-    await expect(grants.require(allowed)).rejects.toThrow(/choose this workspace/i)
-    expect(() => grants.revoke('relative/path')).toThrow(/absolute canonical path/i)
+    grants.revoke(grant.id)
+    await expect(grants.require(grant.id)).rejects.toThrow(/choose this workspace/i)
   })
 
-  it('can restore grants from previously persisted tasks', async () => {
+  it('deduplicates a path in one process and issues a fresh ID after restart restoration', async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), 'ground-grants-'))
+    const firstRegistry = new WorkspaceGrantRegistry()
+    const concurrent = await Promise.all(
+      Array.from({ length: 8 }, () => firstRegistry.grant(workspace))
+    )
+    const first = concurrent[0]
+    if (!first) throw new Error('Expected a workspace grant')
+    expect(concurrent).toEqual(Array.from({ length: 8 }, () => first))
+    expect(await firstRegistry.grant(workspace)).toEqual(first)
+
+    const restoredRegistry = new WorkspaceGrantRegistry()
+    await restoredRegistry.restore([undefined, workspace])
+    const restored = restoredRegistry.describeStoredPath(workspace)
+    expect(restored).toBeDefined()
+    expect(restored?.id).not.toBe(first.id)
+    await expect(
+      restoredRegistry.require(restored?.id as string)
+    ).resolves.toBe(await realpath(workspace))
+    await expect(restoredRegistry.require(first.id)).rejects.toThrow(
+      /choose this workspace/i
+    )
+  })
+
+  it('issues path-free unique labels for duplicate folder basenames', async () => {
+    const firstRoot = await mkdtemp(
+      path.join(os.tmpdir(), 'ground-label-first-')
+    )
+    const secondRoot = await mkdtemp(
+      path.join(os.tmpdir(), 'ground-label-second-')
+    )
+    const firstWorkspace = path.join(firstRoot, 'project')
+    const secondWorkspace = path.join(secondRoot, 'project')
+    await Promise.all([mkdir(firstWorkspace), mkdir(secondWorkspace)])
+    const grants = new WorkspaceGrantRegistry()
+
+    const first = await grants.grant(firstWorkspace)
+    const second = await grants.grant(secondWorkspace)
+
+    expect(first.name).toBe('project')
+    expect(second.name).toBe('project · 2')
+    expect(second.name).not.toContain(firstRoot)
+    expect(second.name).not.toContain(secondRoot)
+  })
+
+  it('expires a missing directory without disclosing its path', async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), 'ground-grants-'))
     const grants = new WorkspaceGrantRegistry()
-    await grants.restore([undefined, workspace])
-    await expect(grants.require(workspace)).resolves.toBe(await realpath(workspace))
+    const grant = await grants.grant(workspace)
+    await rm(workspace, { recursive: true })
+
+    let error: unknown
+    try {
+      await grants.require(grant.id)
+    } catch (candidate) {
+      error = candidate
+    }
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toMatch(/choose this workspace/i)
+    expect((error as Error).message).not.toContain(workspace)
+    expect(grants.describeStoredPath(workspace)).toBeUndefined()
   })
+
+  it('expires a grant when another directory replaces the authorized path', async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), 'ground-grants-'))
+    const moved = `${workspace}-moved`
+    const grants = new WorkspaceGrantRegistry()
+    const grant = await grants.grant(workspace)
+    await rename(workspace, moved)
+    await mkdir(workspace)
+
+    await expect(grants.require(grant.id)).rejects.toThrow(
+      /choose this workspace/i
+    )
+    expect(grants.describeStoredPath(workspace)).toBeUndefined()
+    const replacementGrant = await grants.grant(workspace)
+    expect(replacementGrant.id).not.toBe(grant.id)
+    await expect(grants.require(replacementGrant.id)).resolves.toBe(
+      await realpath(workspace)
+    )
+  })
+
+  it('does not finish an in-flight authorization after its grant is revoked', async () => {
+    const identity = {
+      canonicalPath: path.resolve(os.tmpdir(), 'ground-virtual-workspace'),
+      device: 42,
+      inode: 84
+    }
+    let release: (value: typeof identity) => void = () => undefined
+    const blocked = new Promise<typeof identity>((resolve) => {
+      release = resolve
+    })
+    const resolver = vi
+      .fn()
+      .mockResolvedValueOnce(identity)
+      .mockReturnValueOnce(blocked)
+    const grants = new WorkspaceGrantRegistry(resolver)
+    const grant = await grants.grant(identity.canonicalPath)
+
+    const authorization = grants.require(grant.id)
+    grants.revoke(grant.id)
+    release(identity)
+
+    await expect(authorization).rejects.toThrow(/choose this workspace/i)
+  })
+
+  it.each([
+    ['bidirectional override', '\u202e', '\\u{202e}'],
+    ['Arabic letter mark', '\u061c', '\\u{061c}'],
+    ['left-to-right mark', '\u200e', '\\u{200e}'],
+    ['C1 control', '\u0085', '\\u{0085}'],
+    ['line separator', '\u2028', '\\u{2028}']
+  ])(
+    'visibly escapes %s in the display-only folder name',
+    async (_label, control, escaped) => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'ground-grants-'))
+      const workspace = path.join(root, `safe${control}name`)
+      await mkdir(workspace)
+      const grants = new WorkspaceGrantRegistry()
+      const grant = await grants.grant(workspace)
+
+      expect(grant.name).toBe(`safe${escaped}name`)
+      expect(grant.name).not.toContain(control)
+    }
+  )
 })
 
 describe('CLI invocation grants', () => {

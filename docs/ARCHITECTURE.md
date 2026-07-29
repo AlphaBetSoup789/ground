@@ -46,13 +46,21 @@ Privileged desktop      ▼
 ```
 
 The renderer is never the authority for a workspace path, CLI executable identity,
-stored secret, prepared action envelope, or tool implementation. It requests
-actions and presents main-process state. Approval requests and terminal input
-cross trusted IPC, but every positive write, command, and MCP-call decision must
-also cross a main-process-owned native dialog bound to the exact immutable
-approval envelope. New terminal creation has a separate native exact-launch
-confirmation; later terminal input remains renderer-driven through a short-lived
-opaque attachment capability.
+stored secret, prepared action envelope, or tool implementation. Main projects an
+explicit task allowlist that replaces canonical paths and provider/runtime sessions
+with a fresh process-scoped workspace grant ID plus a path-free display label
+derived from the basename. Colliding labels receive an ordinal suffix.
+Renderer requests resolve that ID back through the live main-process registry.
+Workspace-bearing task mutations and privileged operations pass through one
+serialized lifecycle gate, including the full duration of native terminal and Git
+confirmations, so a workspace cannot be detached or revoked underneath a pending
+operation.
+
+Approval requests and terminal input cross trusted IPC, but every positive write,
+command, and MCP-call decision must also cross a main-process-owned native dialog
+bound to the exact immutable approval envelope. New terminal creation has a
+separate native exact-launch confirmation; later terminal input remains
+renderer-driven through a short-lived opaque attachment capability.
 
 ## Two adapter classes
 
@@ -179,9 +187,9 @@ state is replayed only through its owning adapter.
 ### Terminal
 
 `TerminalService` owns real `node-pty` sessions in the main process. A terminal can
-start only after the workspace grant registry authorizes and canonicalizes its
-working directory and a native dialog confirms the exact fixed system shell,
-arguments, and cwd. The preload exposes bounded
+start only after the workspace grant registry revalidates the main-owned canonical
+directory behind the task's opaque grant and a native dialog confirms the exact
+fixed system shell, arguments, and cwd. The preload exposes bounded
 create/list/attach/detach/input/resize/close operations; output is sequenced and a
 bounded UTF-8 scrollback tail can be replayed when the renderer reattaches.
 

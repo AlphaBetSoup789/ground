@@ -1,11 +1,11 @@
 import type {
   AppSnapshot,
+  DesktopTask,
   DesktopApi,
   ProviderDraft,
   ProviderProfile,
   RunEvent,
   RunEventEnvelope,
-  Task,
   TaskPatch,
   TerminalEvent,
   TerminalSessionInfo
@@ -17,6 +17,14 @@ const terminalListeners = new Set<(event: TerminalEvent) => void>()
 const mockTerminals = new Map<string, TerminalSessionInfo>()
 const mockTerminalAttachments = new Map<string, string>()
 const timestamp = new Date().toISOString()
+const previewWorkspace = {
+  id: 'workspace_00000000-0000-4000-8000-000000000001',
+  name: 'acme-dashboard'
+}
+const selectableWorkspace = {
+  id: 'workspace_00000000-0000-4000-8000-000000000002',
+  name: 'new-workspace'
+}
 let mockSnapshot: AppSnapshot = {
   runEventRevision: 0,
   providers: [
@@ -50,7 +58,7 @@ let mockSnapshot: AppSnapshot = {
     {
       id: 'preview-task',
       title: 'Refine the project dashboard',
-      workspacePath: '/Users/you/Projects/acme-dashboard',
+      workspace: previewWorkspace,
       providerId: 'codex-preview',
       mode: 'agent',
       runStatus: 'idle',
@@ -89,7 +97,7 @@ let mockSnapshot: AppSnapshot = {
     {
       id: 'preview-task-two',
       title: 'Explain the auth flow',
-      workspacePath: '/Users/you/Projects/acme-dashboard',
+      workspace: previewWorkspace,
       providerId: 'ollama-local',
       mode: 'ask',
       runStatus: 'idle',
@@ -130,7 +138,7 @@ function emitTerminal(event: TerminalEvent): void {
 
 const mockApi: DesktopApi = {
   getSnapshot: async () => clone(mockSnapshot),
-  createTask: async (workspacePath) => {
+  createTask: async (workspaceGrantId) => {
     const provider =
       mockSnapshot.providers.find(
         (candidate) =>
@@ -138,10 +146,21 @@ const mockApi: DesktopApi = {
       ) ?? mockSnapshot.providers[0]
     if (!provider) throw new Error('No provider')
     mockSnapshot.settings.defaultProviderId = provider.id
-    const task: Task = {
+    const workspace =
+      workspaceGrantId === undefined
+        ? undefined
+        : workspaceGrantId === selectableWorkspace.id
+          ? selectableWorkspace
+          : mockSnapshot.tasks.find(
+              (candidate) => candidate.workspace?.id === workspaceGrantId
+            )?.workspace
+    if (workspaceGrantId !== undefined && !workspace) {
+      throw new Error('Workspace access expired')
+    }
+    const task: DesktopTask = {
       id: crypto.randomUUID(),
       title: 'New task',
-      workspacePath,
+      ...(workspace ? { workspace: clone(workspace) } : {}),
       providerId: provider.id,
       mode: 'agent',
       runStatus: 'idle',
@@ -169,10 +188,10 @@ const mockApi: DesktopApi = {
       ids.set(sourceId, created)
       return created
     }
-    const task: Task = {
+    const task: DesktopTask = {
       id: crypto.randomUUID(),
       title: `${source.title.slice(0, 113).trimEnd()} (fork)`,
-      workspacePath: source.workspacePath,
+      workspace: source.workspace,
       providerId: source.providerId,
       mode: source.mode,
       includeImportedHistory: source.includeImportedHistory,
@@ -234,7 +253,7 @@ const mockApi: DesktopApi = {
       ) ?? mockSnapshot.providers[0]
     if (!provider) throw new Error('No provider')
     const importedAt = new Date().toISOString()
-    const task: Task = {
+    const task: DesktopTask = {
       id: crypto.randomUUID(),
       title: 'Imported task',
       providerId: provider.id,
@@ -295,13 +314,27 @@ const mockApi: DesktopApi = {
   updateTask: async (taskId, patch: TaskPatch) => {
     const task = mockSnapshot.tasks.find((candidate) => candidate.id === taskId)
     if (!task) throw new Error('Task not found')
-    Object.assign(task, patch)
+    const {
+      workspaceGrantId,
+      ...taskPatch
+    } = patch
+    Object.assign(task, taskPatch)
+    if (workspaceGrantId !== undefined) {
+      const workspace =
+        workspaceGrantId === selectableWorkspace.id
+          ? selectableWorkspace
+          : mockSnapshot.tasks.find(
+              (candidate) => candidate.workspace?.id === workspaceGrantId
+            )?.workspace
+      if (!workspace) throw new Error('Workspace access expired')
+      task.workspace = clone(workspace)
+    }
     if (patch.providerId) {
       mockSnapshot.settings.defaultProviderId = patch.providerId
     }
     return clone(task)
   },
-  chooseWorkspace: async () => '/Users/you/Projects/new-workspace',
+  chooseWorkspace: async () => clone(selectableWorkspace),
   revealWorkspace: async () => undefined,
   saveProvider: async (draft: ProviderDraft) => {
     const existing = draft.id
@@ -618,11 +651,14 @@ const mockApi: DesktopApi = {
   createGitWorktree: async (taskId, input) => {
     const source = mockSnapshot.tasks.find((candidate) => candidate.id === taskId)
     if (!source) throw new Error('Task not found')
-    const created: Task = {
+    const created: DesktopTask = {
       ...clone(source),
       id: crypto.randomUUID(),
       title: input.branch,
-      workspacePath: `/Users/you/.ground/worktrees/${input.branch}`,
+      workspace: {
+        id: `workspace_${crypto.randomUUID()}`,
+        name: input.branch
+      },
       runStatus: 'idle',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),

@@ -75,6 +75,7 @@ export interface ModelRuntime<C = unknown> {
 }
 
 export type ModelRuntimeFactory = (provider: ApiProvider) => ModelRuntime
+export type WorkspaceAuthorizer = (storedPath: string) => Promise<string>
 
 export interface ModelAdapterBinding {
   adapterId: string
@@ -183,7 +184,10 @@ export class RunManager {
     private readonly modelRuntimeFactory: ModelRuntimeFactory = createModelRuntime,
     private readonly mcp?: McpRuntime,
     private readonly authorizeCliInvocation?: CliInvocationAuthorizer,
-    private readonly providerOperations?: ProviderOperationGate
+    private readonly providerOperations?: ProviderOperationGate,
+    private readonly authorizeWorkspace: WorkspaceAuthorizer = async () => {
+      throw new Error('Workspace access is unavailable')
+    }
   ) {}
 
   async start(taskId: string, prompt: string): Promise<string> {
@@ -198,7 +202,10 @@ export class RunManager {
     if (this.providerOperations?.isMutationReserved(provider.id)) {
       throw new Error('Wait for the provider change to finish before starting a run')
     }
-    if (provider.kind === 'cli' && !task.workspacePath) {
+    const workspacePath = task.workspacePath
+      ? await this.authorizeWorkspace(task.workspacePath)
+      : undefined
+    if (provider.kind === 'cli' && !workspacePath) {
       throw new Error('Choose a workspace before running a CLI agent')
     }
 
@@ -213,7 +220,7 @@ export class RunManager {
         kind: provider.kind,
         model: provider.model
       },
-      workspacePath: task.workspacePath,
+      workspacePath,
       mode: task.mode,
       includeImportedHistory: task.includeImportedHistory === true,
       controller: new AbortController(),
@@ -710,6 +717,7 @@ export class RunManager {
     let activity: ActivityItem
     let preparedWrite: PreparedWriteAction | undefined
     let preparedCommand: PreparedCommandAction | undefined
+    let nativeApprovalDetail: string | undefined
     if (toolRequiresApproval(toolCall.name)) {
       const preview =
         toolCall.name === 'write_file' || toolCall.name === 'edit_file'
@@ -745,11 +753,12 @@ export class RunManager {
                 }
               })()
           : await previewTool(toolCall.name, input, workspacePath)
+      nativeApprovalDetail = preview.detail
       const approvalId = createId('approval')
       activity = await this.addActivity(run, {
         activityType: 'approval',
         title: preview.title,
-        detail: preview.detail,
+        detail: rendererSafeWorkspaceDetail(preview.detail, workspacePath),
         status: 'pending',
         approvalId,
         toolName: toolCall.name,
@@ -767,7 +776,12 @@ export class RunManager {
       })
       const approved = await new Promise<boolean>((resolve) => {
         run.pendingApprovals.set(approvalId, {
-          envelope: pendingApprovalEnvelope(run, activity, approvalId),
+          envelope: pendingApprovalEnvelope(
+            run,
+            activity,
+            approvalId,
+            nativeApprovalDetail
+          ),
           resolve
         })
       })
@@ -1392,17 +1406,36 @@ export class RunManager {
 function pendingApprovalEnvelope(
   run: ActiveRun,
   item: ActivityItem,
-  approvalId: string
+  approvalId: string,
+  nativeDetail = item.detail ?? ''
 ): PendingAgentApproval {
   return {
     runId: run.id,
     taskId: run.taskId,
     approvalId,
     title: item.title,
-    detail: item.detail ?? '',
+    detail: nativeDetail,
     toolName: item.toolName ?? 'unknown',
     ...(item.provider ? { provider: structuredClone(item.provider) } : {})
   }
+}
+
+function rendererSafeWorkspaceDetail(
+  detail: string,
+  workspacePath: string
+): string {
+  const candidates = new Set([
+    workspacePath,
+    workspacePath.replaceAll('\\', '/'),
+    workspacePath.replaceAll('/', '\\')
+  ])
+  let result = detail
+  for (const candidate of [...candidates].sort(
+    (left, right) => right.length - left.length
+  )) {
+    if (candidate) result = result.split(candidate).join('<workspace>')
+  }
+  return result
 }
 
 function statusTransitionToRunning(item: ActivityItem): void {

@@ -18,12 +18,12 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type {
   ActivityItem,
+  DesktopTask,
   ProviderProfile,
-  Task
 } from '../../../shared/types'
 
 interface TimelineProps {
-  task: Task
+  task: DesktopTask
   provider?: ProviderProfile
   suggestions: string[]
   onSuggestion: (prompt: string) => void

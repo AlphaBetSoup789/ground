@@ -25,12 +25,12 @@ import {
   Trash2
 } from 'lucide-react'
 import type {
+  DesktopTask,
   GitDiffResult,
   GitLogEntry,
   GitOverview,
   GitStatusSummary,
-  GitWorktreeSummary,
-  Task
+  GitWorktreeSummary
 } from '../../../shared/types'
 import { desktop } from '../lib/desktop'
 
@@ -39,7 +39,7 @@ type GitPanelTab = 'changes' | 'history' | 'worktrees'
 interface GitPanelProps {
   taskId: string
   workspaceReady: boolean
-  onTaskCreated: (task: Task) => void
+  onTaskCreated: (task: DesktopTask) => void
   onWorkspaceTasksChanged: () => void
   onError: (error: unknown) => void
 }

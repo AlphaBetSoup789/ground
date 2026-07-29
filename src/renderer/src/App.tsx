@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { PanelLeft, Settings2 } from 'lucide-react'
 import type {
   AppSnapshot,
+  DesktopTask,
   RunEventEnvelope,
-  Task,
   TaskExportFormat,
   TaskItem,
   TaskPatch
@@ -164,7 +164,7 @@ export default function App(): React.JSX.Element {
     async (withWorkspace = true) => {
       try {
         const task = await desktop.createTask(
-          withWorkspace ? selectedTask?.workspacePath : undefined
+          withWorkspace ? selectedTask?.workspace?.id : undefined
         )
         setSnapshot((current) =>
           current
@@ -179,7 +179,7 @@ export default function App(): React.JSX.Element {
         showError(error)
       }
     },
-    [selectedTask?.workspacePath, showError]
+    [selectedTask?.workspace?.id, showError]
   )
 
   const updateTask = useCallback(
@@ -208,7 +208,7 @@ export default function App(): React.JSX.Element {
     [showError]
   )
 
-  const acceptCreatedTask = useCallback((task: Task) => {
+  const acceptCreatedTask = useCallback((task: DesktopTask) => {
     setSnapshot((current) =>
       current
         ? {
@@ -292,12 +292,14 @@ export default function App(): React.JSX.Element {
 
   const chooseWorkspace = useCallback(async () => {
     try {
-      const workspacePath = await desktop.chooseWorkspace()
-      if (!workspacePath) return
+      const workspace = await desktop.chooseWorkspace()
+      if (!workspace) return
       if (selectedTask) {
-        await updateTask(selectedTask.id, { workspacePath })
+        await updateTask(selectedTask.id, {
+          workspaceGrantId: workspace.id
+        })
       } else {
-        const task = await desktop.createTask(workspacePath)
+        const task = await desktop.createTask(workspace.id)
         setSnapshot((current) =>
           current
             ? {
@@ -492,8 +494,10 @@ export default function App(): React.JSX.Element {
             onUpdateTask={(patch) => void updateTask(selectedTask.id, patch)}
             onChooseWorkspace={() => void chooseWorkspace()}
             onRevealWorkspace={() => {
-              if (selectedTask.workspacePath) {
-                void desktop.revealWorkspace(selectedTask.workspacePath).catch(showError)
+              if (selectedTask.workspace) {
+                void desktop
+                  .revealWorkspace(selectedTask.workspace.id)
+                  .catch(showError)
               }
             }}
             onStartRun={startRun}

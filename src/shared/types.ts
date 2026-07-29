@@ -232,6 +232,32 @@ export interface Task {
   items: TaskItem[]
 }
 
+export interface WorkspaceGrant {
+  id: string
+  /**
+   * Display-only, bounded folder basename. It is not filesystem authority.
+   */
+  name: string
+}
+
+/**
+ * Explicit renderer allowlist for a task. Main-only workspace paths, native
+ * runtime sessions, provider continuation state, and checkpoints are omitted.
+ */
+export interface DesktopTask {
+  id: string
+  title: string
+  workspace?: WorkspaceGrant
+  providerId: string
+  mode: RunMode
+  includeImportedHistory?: boolean
+  runStatus: RunStatus
+  archivedAt?: string
+  createdAt: string
+  updatedAt: string
+  items: TaskItem[]
+}
+
 export interface AppSettings {
   selectedTaskId?: string
   defaultProviderId: string
@@ -309,7 +335,7 @@ export interface McpServerStatus {
 export interface AppSnapshot {
   providers: ProviderProfile[]
   mcpServers: McpServerProfile[]
-  tasks: Task[]
+  tasks: DesktopTask[]
   settings: AppSettings
   /**
    * Ephemeral startup information. This is intentionally not persisted into the
@@ -398,7 +424,7 @@ export interface TaskPatch {
   title?: string
   providerId?: string
   mode?: RunMode
-  workspacePath?: string
+  workspaceGrantId?: string
   includeImportedHistory?: boolean
 }
 
@@ -517,16 +543,16 @@ export interface GitCommitInput {
 
 export interface DesktopApi {
   getSnapshot: () => Promise<AppSnapshot>
-  createTask: (workspacePath?: string) => Promise<Task>
-  forkTask: (taskId: string) => Promise<Task>
-  setTaskArchived: (taskId: string, archived: boolean) => Promise<Task>
-  importTaskBundle: () => Promise<Task | undefined>
+  createTask: (workspaceGrantId?: string) => Promise<DesktopTask>
+  forkTask: (taskId: string) => Promise<DesktopTask>
+  setTaskArchived: (taskId: string, archived: boolean) => Promise<DesktopTask>
+  importTaskBundle: () => Promise<DesktopTask | undefined>
   exportTask: (taskId: string, format: TaskExportFormat) => Promise<boolean>
   deleteTask: (taskId: string) => Promise<boolean>
   selectTask: (taskId: string) => Promise<void>
-  updateTask: (taskId: string, patch: TaskPatch) => Promise<Task>
-  chooseWorkspace: () => Promise<string | undefined>
-  revealWorkspace: (workspacePath: string) => Promise<void>
+  updateTask: (taskId: string, patch: TaskPatch) => Promise<DesktopTask>
+  chooseWorkspace: () => Promise<WorkspaceGrant | undefined>
+  revealWorkspace: (workspaceGrantId: string) => Promise<void>
   saveProvider: (draft: ProviderDraft) => Promise<ProviderProfile>
   deleteProvider: (providerId: string) => Promise<void>
   testProvider: (draft: ProviderDraft) => Promise<ProviderTestResult>
@@ -567,7 +593,7 @@ export interface DesktopApi {
   createGitWorktree: (
     taskId: string,
     input: CreateGitWorktreeInput
-  ) => Promise<Task | undefined>
+  ) => Promise<DesktopTask | undefined>
   stageGitPaths: (taskId: string, paths: string[]) => Promise<boolean>
   unstageGitPaths: (taskId: string, paths: string[]) => Promise<boolean>
   commitGitChanges: (

@@ -57,7 +57,7 @@ are not necessarily release-certified.
 
 - [x] Preserve one immutable approval envelope from preview through execution
 - [x] Bind approved commands to resolved executable identity and fingerprint
-- [ ] Replace path-bearing renderer DTOs with opaque workspace grants
+- [x] Replace path-bearing renderer DTOs with revocable opaque workspace grants
 - [x] Put new terminal creation behind a native exact-launch confirmation
 - [x] Move write, command, and MCP-call approval behind a native user-presence
   surface

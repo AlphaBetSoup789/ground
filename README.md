@@ -305,12 +305,14 @@ Ground distinguishes two execution models:
    its tools and permissions; Ground owns the workspace/task presentation and
    normalizes events.
 
-The renderer receives a narrow typed API. Secrets, workspace grants, filesystem
-operations, network credentials, process creation, pending approval state, and
-prepared side-effect envelopes stay in Electron’s main process. The renderer
-presents the exact approval card. A denial resolves immediately, while an
-allow-once request opens a main-process-owned native dialog bound to the same
-immutable action envelope before execution can continue.
+The renderer receives a narrow typed API. Canonical workspace paths, secrets,
+filesystem operations, network credentials, process creation, runtime/model
+sessions, pending approval state, and prepared side-effect envelopes stay in
+Electron’s main process. The renderer receives only a revocable process-scoped
+workspace grant ID and a path-free label derived from the basename; duplicates
+receive an ordinal suffix. It presents the exact approval card. A denial resolves
+immediately, while an allow-once request opens a main-process-owned native dialog
+bound to the same immutable action envelope before execution can continue.
 
 Read [SECURITY.md](SECURITY.md) and
 [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) before using Ground with important

@@ -5,7 +5,7 @@ import path from 'node:path'
 import { TextDecoder } from 'node:util'
 import type {
   ActivityItem,
-  AppSnapshot,
+  AppSettings,
   McpServerProfile,
   ModelApiProvider,
   ProviderAttribution,
@@ -24,6 +24,14 @@ import type {
   GroundProviderDescriptor,
   GroundTaskImportTemplate
 } from './task-portability'
+
+export interface StateSnapshot {
+  providers: ProviderProfile[]
+  mcpServers: McpServerProfile[]
+  tasks: Task[]
+  settings: AppSettings
+  recoveryNotice?: RecoveryNotice
+}
 
 const MODEL_ADAPTER_IDS: Record<ModelApiProvider['kind'], string> = {
   openai: 'openai.responses',
@@ -388,7 +396,7 @@ export class StateStore {
     })
   }
 
-  snapshot(): AppSnapshot {
+  snapshot(): StateSnapshot {
     return structuredClone({
       providers: this.state.providers,
       mcpServers: this.state.mcpServers,
@@ -831,7 +839,7 @@ export class StateStore {
     )
   }
 
-  async settledSnapshot(): Promise<AppSnapshot> {
+  async settledSnapshot(): Promise<StateSnapshot> {
     return this.enqueueTransaction(async () => this.snapshot())
   }
 

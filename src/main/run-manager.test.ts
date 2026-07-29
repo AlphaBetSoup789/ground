@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  writeFile
+} from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -256,6 +263,7 @@ async function harness(
     vault?: SecretVault
     runtimeFactory?: ModelRuntimeFactory
     providerOperations?: ProviderOperationGate
+    authorizeWorkspace?: (storedPath: string) => Promise<string>
   }
 ): Promise<{
   directory: string
@@ -269,8 +277,9 @@ async function harness(
   approval: Promise<Extract<RunEvent, { type: 'approval-requested' }>>
 }> {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-run-manager-'))
-  const workspace = path.join(directory, 'workspace')
-  await mkdir(workspace)
+  const workspaceCandidate = path.join(directory, 'workspace')
+  await mkdir(workspaceCandidate)
+  const workspace = await realpath(workspaceCandidate)
   const store = new StateStore(path.join(directory, 'state.json'))
   await store.load()
   const task = await store.createTask(workspace)
@@ -287,7 +296,8 @@ async function harness(
     options?.runtimeFactory ?? scriptedRuntime(scripts, requests),
     mcp,
     undefined,
-    options?.providerOperations
+    options?.providerOperations,
+    options?.authorizeWorkspace ?? ((candidate) => realpath(candidate))
   )
   return {
     directory,
@@ -303,6 +313,26 @@ async function harness(
 }
 
 describe('RunManager model runtime', () => {
+  it('fails before recording a run when the main process revokes the stored workspace', async () => {
+    const authorizeWorkspace = vi.fn(async () => {
+      throw new Error('Workspace access expired')
+    })
+    const run = await harness(
+      [(request) => textResponse(request, 'Must not run.')],
+      undefined,
+      { authorizeWorkspace }
+    )
+
+    await expect(
+      run.manager.start(run.taskId, 'Do not record this prompt')
+    ).rejects.toThrow(/workspace access expired/i)
+    expect(authorizeWorkspace).toHaveBeenCalledWith(run.workspace)
+    expect(run.requests).toEqual([])
+    expect(run.events).toEqual([])
+    expect(run.store.getTask(run.taskId).items).toEqual([])
+    expect(run.manager.isTaskActive(run.taskId)).toBe(false)
+  })
+
   it('refuses to start archived tasks even when called outside the desktop IPC boundary', async () => {
     const run = await harness([])
     await run.store.setTaskArchived(run.taskId, true)
@@ -1370,6 +1400,50 @@ describe('RunManager model runtime', () => {
       ])
     )
   })
+
+  it.runIf(process.platform !== 'win32')(
+    'keeps canonical command paths in the native approval envelope only',
+    async () => {
+      const run = await harness([
+        (request) =>
+          toolCallResponse(request, 'run_command', {
+            command: './approved-command'
+          }),
+        (request) => textResponse(request, 'The command was denied.')
+      ])
+      const executable = path.join(run.workspace, 'approved-command')
+      await writeFile(executable, '#!/bin/sh\nprintf approved\n')
+      await chmod(executable, 0o755)
+
+      const runId = await run.manager.start(
+        run.taskId,
+        'Run the workspace command'
+      )
+      const approval = await run.approval
+      expect(approval.item.detail).toContain('<workspace>')
+      expect(approval.item.detail).not.toContain(run.workspace)
+      expect(
+        run.manager.getPendingApproval(
+          runId,
+          approval.item.approvalId as string
+        ).detail
+      ).toContain(run.workspace)
+
+      await run.manager.resolveApproval(
+        runId,
+        approval.item.approvalId as string,
+        false
+      )
+      expect((await run.terminal).type).toBe('run-completed')
+      const persisted = run.store
+        .getTask(run.taskId)
+        .items.find((item) => item.id === approval.item.id)
+      if (!persisted || persisted.kind !== 'activity') {
+        throw new Error('Expected the persisted command activity')
+      }
+      expect(persisted.detail).not.toContain(run.workspace)
+    }
+  )
 
   it('shows and executes the exact localized edit envelope that was approved', async () => {
     const run = await harness([

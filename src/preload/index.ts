@@ -12,7 +12,8 @@ import type {
 
 const api: DesktopApi = {
   getSnapshot: () => ipcRenderer.invoke(IPC.getSnapshot),
-  createTask: (workspacePath) => ipcRenderer.invoke(IPC.createTask, workspacePath),
+  createTask: (workspaceGrantId) =>
+    ipcRenderer.invoke(IPC.createTask, workspaceGrantId),
   forkTask: (taskId) => ipcRenderer.invoke(IPC.forkTask, taskId),
   setTaskArchived: (taskId, archived) =>
     ipcRenderer.invoke(IPC.setTaskArchived, taskId, archived),
@@ -23,7 +24,8 @@ const api: DesktopApi = {
   selectTask: (taskId) => ipcRenderer.invoke(IPC.selectTask, taskId),
   updateTask: (taskId, patch) => ipcRenderer.invoke(IPC.updateTask, taskId, patch),
   chooseWorkspace: () => ipcRenderer.invoke(IPC.chooseWorkspace),
-  revealWorkspace: (workspacePath) => ipcRenderer.invoke(IPC.revealWorkspace, workspacePath),
+  revealWorkspace: (workspaceGrantId) =>
+    ipcRenderer.invoke(IPC.revealWorkspace, workspaceGrantId),
   saveProvider: (draft) => ipcRenderer.invoke(IPC.saveProvider, draft),
   deleteProvider: (providerId) => ipcRenderer.invoke(IPC.deleteProvider, providerId),
   testProvider: (draft) => ipcRenderer.invoke(IPC.testProvider, draft),

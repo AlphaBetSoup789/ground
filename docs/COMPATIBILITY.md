@@ -72,7 +72,7 @@ built-in adapter currently emits one.
 | Git commit | Exact prepared tree + conditional `HEAD` update | Integrated | Hooks/signing disabled; no amend/merge workflow |
 | Git history | Bounded local log parsing | Integrated | No signature verification or remote operations |
 | Managed worktrees | Dedicated Ground root, branch creation/new task, clean registered removal | Integrated | No dirty force-removal or arbitrary worktree deletion |
-| Agent `run_command` | Immutable content-hashed launch envelope + exact argv | Integrated | Inline approval; current-user permissions; Windows supports direct executables and recognized Node package shims |
+| Agent `run_command` | Immutable content-hashed launch envelope + exact argv | Integrated | Native exact-envelope confirmation; current-user permissions; Windows supports direct executables and recognized Node package shims |
 | Remote MCP | Streamable HTTP | Integrated, unauthenticated | HTTPS except loopback; no headers or OAuth |
 | Local MCP | Resolved stdio executable and argv | Integrated | Native exact-invocation confirmation; current-user OS permissions; not sandboxed |
 | MCP tools | Namespaced canonical definitions | Integrated | Tools only; no resources, prompts, Apps/UI, or elicitation |

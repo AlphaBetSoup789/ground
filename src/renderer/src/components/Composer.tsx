@@ -6,13 +6,12 @@ import {
   Square,
   TerminalSquare
 } from 'lucide-react'
-import type { ProviderProfile, Task } from '../../../shared/types'
-import { workspaceName } from '../lib/format'
+import type { DesktopTask, ProviderProfile } from '../../../shared/types'
 
 interface ComposerProps {
   draft: string
   onDraftChange: (value: string) => void
-  task: Task
+  task: DesktopTask
   provider?: ProviderProfile
   disabled?: boolean
   onChooseWorkspace: () => void
@@ -30,7 +29,7 @@ export function Composer(props: ComposerProps): React.JSX.Element {
   const isBusy = isRunning || sending
   const interactionDisabled = isBusy || Boolean(props.disabled)
   const needsWorkspace =
-    !props.disabled && props.provider?.kind === 'cli' && !props.task.workspacePath
+    !props.disabled && props.provider?.kind === 'cli' && !props.task.workspace
 
   useEffect(() => {
     const textarea = textareaRef.current
@@ -115,7 +114,7 @@ export function Composer(props: ComposerProps): React.JSX.Element {
               className="context-chip"
               type="button"
               onClick={props.onChooseWorkspace}
-              title={props.task.workspacePath}
+              title={props.task.workspace?.name}
               disabled={interactionDisabled}
             >
               <span className="context-chip-icon">
@@ -125,7 +124,7 @@ export function Composer(props: ComposerProps): React.JSX.Element {
                   <span className="tiny-diamond">◆</span>
                 )}
               </span>
-              {workspaceName(props.task.workspacePath)}
+              {props.task.workspace?.name ?? 'No workspace'}
             </button>
             <span className="permission-label">
               <ShieldCheck size={12} />

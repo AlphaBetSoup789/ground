@@ -3,8 +3,13 @@ import { realpath, stat } from 'node:fs/promises'
 import { isIP } from 'node:net'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import type { CliProvider, ProviderDraft } from '../shared/types'
+import type {
+  CliProvider,
+  ProviderDraft,
+  WorkspaceGrant
+} from '../shared/types'
 import { normalizeCliEnvironmentVariableNames } from './cli-environment'
+import { createId } from './lib/ids'
 import {
   createProcessLaunchEnvelope,
   revalidateProcessLaunchEnvelope,
@@ -125,6 +130,35 @@ export function canonicalProviderEndpoint(candidate: string): string {
   return `${url.origin}${pathname}`
 }
 
+export async function revealWorkspacePath(
+  canonicalPath: string,
+  openPath: (candidate: string) => Promise<string>
+): Promise<void> {
+  try {
+    const error = await openPath(canonicalPath)
+    if (error) throw new Error(error)
+  } catch {
+    throw new Error('Ground could not reveal this workspace')
+  }
+}
+
+interface WorkspaceGrantRecord {
+  canonicalPath: string
+  name: string
+  device: number
+  inode: number
+}
+
+export interface WorkspaceDirectoryIdentity {
+  canonicalPath: string
+  device: number
+  inode: number
+}
+
+export type WorkspaceDirectoryResolver = (
+  candidate: string
+) => Promise<WorkspaceDirectoryIdentity>
+
 async function canonicalDirectory(candidate: string): Promise<string> {
   const canonical = await realpath(candidate)
   const details = await stat(canonical)
@@ -132,13 +166,93 @@ async function canonicalDirectory(candidate: string): Promise<string> {
   return canonical
 }
 
-export class WorkspaceGrantRegistry {
-  private readonly grants = new Set<string>()
+async function resolveWorkspaceDirectory(
+  candidate: string
+): Promise<WorkspaceDirectoryIdentity> {
+  const canonicalPath = await canonicalDirectory(candidate)
+  const details = await stat(canonicalPath)
+  return {
+    canonicalPath,
+    device: details.dev,
+    inode: details.ino
+  }
+}
 
-  async grant(candidate: string): Promise<string> {
-    const canonical = await canonicalDirectory(candidate)
-    this.grants.add(canonical)
-    return canonical
+export class WorkspaceGrantRegistry {
+  private readonly grantsById = new Map<string, WorkspaceGrantRecord>()
+  private readonly grantIdsByPath = new Map<string, string>()
+  private readonly issuedDisplayNames = new Set<string>()
+  private readonly pendingGrantsByPath = new Map<
+    string,
+    Promise<WorkspaceGrant>
+  >()
+
+  constructor(
+    private readonly resolveDirectory: WorkspaceDirectoryResolver =
+      resolveWorkspaceDirectory
+  ) {}
+
+  async grant(candidate: string): Promise<WorkspaceGrant> {
+    const identity = await this.resolveDirectory(candidate).catch(() => {
+      throw unavailableWorkspaceGrant()
+    })
+    const canonical = identity.canonicalPath
+    const existingId = this.grantIdsByPath.get(canonical)
+    if (existingId) {
+      const existing = this.grantsById.get(existingId)
+      if (existing) {
+        const stillAuthorized = await this.revalidate(existingId, existing)
+          .then(() => true)
+          .catch(() => false)
+        if (stillAuthorized) {
+          this.grantIdsByPath.set(path.resolve(candidate), existingId)
+          return { id: existingId, name: existing.name }
+        }
+      }
+    }
+    const pending = this.pendingGrantsByPath.get(canonical)
+    if (pending) {
+      const grant = await pending
+      this.grantIdsByPath.set(path.resolve(candidate), grant.id)
+      return grant
+    }
+    const creation = this.createGrant(identity)
+    this.pendingGrantsByPath.set(canonical, creation)
+    try {
+      const grant = await creation
+      this.grantIdsByPath.set(path.resolve(candidate), grant.id)
+      return grant
+    } finally {
+      if (this.pendingGrantsByPath.get(canonical) === creation) {
+        this.pendingGrantsByPath.delete(canonical)
+      }
+    }
+  }
+
+  private async createGrant(
+    identity: Readonly<WorkspaceDirectoryIdentity>
+  ): Promise<WorkspaceGrant> {
+    const canonical = identity.canonicalPath
+    const id = createId('workspace')
+    const name = this.issueDisplayName(workspaceDisplayName(canonical))
+    this.grantsById.set(id, {
+      canonicalPath: canonical,
+      name,
+      device: identity.device,
+      inode: identity.inode
+    })
+    this.grantIdsByPath.set(canonical, id)
+    return { id, name }
+  }
+
+  private issueDisplayName(basename: string): string {
+    for (let ordinal = 1; ; ordinal += 1) {
+      const candidate =
+        ordinal === 1 ? basename : `${basename} · ${ordinal}`
+      if (this.issuedDisplayNames.has(candidate)) continue
+      this.issuedDisplayNames.add(candidate)
+      return candidate
+    }
   }
 
   async restore(candidates: Iterable<string | undefined>): Promise<void> {
@@ -148,24 +262,94 @@ export class WorkspaceGrantRegistry {
     }
   }
 
-  async require(candidate: string): Promise<string> {
-    const canonical = await canonicalDirectory(candidate)
-    if (!this.grants.has(canonical)) {
-      throw new Error('Choose this workspace through Ground before using it')
-    }
-    return canonical
+  async require(grantId: string): Promise<string> {
+    const record = this.grantsById.get(grantId)
+    if (!record) throw unavailableWorkspaceGrant()
+    return this.revalidate(grantId, record)
   }
 
-  revoke(canonicalCandidate: string): void {
+  async requireStoredPath(storedPath: string): Promise<string> {
     if (
-      typeof canonicalCandidate !== 'string' ||
-      !path.isAbsolute(canonicalCandidate) ||
-      canonicalCandidate.includes('\0')
+      typeof storedPath !== 'string' ||
+      !path.isAbsolute(storedPath) ||
+      storedPath.includes('\0')
     ) {
-      throw new Error('Workspace grant must be an absolute canonical path')
+      throw unavailableWorkspaceGrant()
     }
-    this.grants.delete(path.resolve(canonicalCandidate))
+    const canonicalCandidate = path.resolve(storedPath)
+    const grantId = this.grantIdsByPath.get(canonicalCandidate)
+    const record = grantId ? this.grantsById.get(grantId) : undefined
+    if (!grantId || !record) throw unavailableWorkspaceGrant()
+    return this.revalidate(grantId, record)
   }
+
+  describeStoredPath(storedPath: string): WorkspaceGrant | undefined {
+    if (
+      typeof storedPath !== 'string' ||
+      !path.isAbsolute(storedPath) ||
+      storedPath.includes('\0')
+    ) {
+      return undefined
+    }
+    const grantId = this.grantIdsByPath.get(path.resolve(storedPath))
+    const record = grantId ? this.grantsById.get(grantId) : undefined
+    return grantId && record
+      ? { id: grantId, name: record.name }
+      : undefined
+  }
+
+  revoke(grantId: string): void {
+    if (!this.grantsById.has(grantId)) return
+    this.grantsById.delete(grantId)
+    for (const [candidate, candidateGrantId] of this.grantIdsByPath) {
+      if (candidateGrantId === grantId) {
+        this.grantIdsByPath.delete(candidate)
+      }
+    }
+  }
+
+  private async revalidate(
+    grantId: string,
+    record: Readonly<WorkspaceGrantRecord>
+  ): Promise<string> {
+    try {
+      const current = await this.resolveDirectory(record.canonicalPath)
+      if (
+        current.canonicalPath !== record.canonicalPath ||
+        current.device !== record.device ||
+        current.inode !== record.inode ||
+        this.grantsById.get(grantId) !== record
+      ) {
+        throw unavailableWorkspaceGrant()
+      }
+      return current.canonicalPath
+    } catch {
+      this.revoke(grantId)
+      throw unavailableWorkspaceGrant()
+    }
+  }
+}
+
+function unavailableWorkspaceGrant(): Error {
+  return new Error(
+    'Workspace access expired; choose this workspace through Ground again'
+  )
+}
+
+function workspaceDisplayName(canonicalPath: string): string {
+  const basename = path.basename(canonicalPath)
+  const visible: string[] = []
+  let visibleLength = 0
+  for (const character of basename) {
+    const safeCharacter = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(character)
+      ? `\\u{${character.codePointAt(0)?.toString(16).padStart(4, '0')}}`
+      : character
+    const nextLength = [...safeCharacter].length
+    if (visibleLength + nextLength > 140) break
+    visible.push(safeCharacter)
+    visibleLength += nextLength
+  }
+  return visible.join('').trim() || 'Workspace'
 }
 
 function validatedCliEnvironmentAuthorization(

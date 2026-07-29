@@ -129,7 +129,13 @@ const taskPatchSchema = z
     title: z.string().trim().min(1).max(120).optional(),
     providerId: z.string().min(1).max(200).optional(),
     mode: z.enum(['ask', 'agent']).optional(),
-    workspacePath: z.string().min(1).max(8_192).optional(),
+    workspaceGrantId: z
+      .string()
+      .regex(
+        /^workspace_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+        'Invalid workspace grant'
+      )
+      .optional(),
     includeImportedHistory: z.boolean().optional()
   })
   .strict()
@@ -150,6 +156,12 @@ export function parsePrompt(value: unknown): string {
   return z.string().trim().min(1).max(1_000_000).parse(value)
 }
 
-export function parseWorkspacePath(value: unknown): string {
-  return z.string().min(1).max(8_192, 'Workspace path is too long').parse(value)
+export function parseWorkspaceGrantId(value: unknown): string {
+  return z
+    .string()
+    .regex(
+      /^workspace_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+      'Invalid workspace grant'
+    )
+    .parse(value)
 }

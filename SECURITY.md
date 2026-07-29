@@ -67,6 +67,14 @@ before the first supported release.
   arguments, and main-process state.
 - New windows, navigation, webviews, and renderer permission requests are denied.
 - Workspace paths must come from a main-process picker or a restored grant.
+  Renderer snapshots receive only a process-scoped opaque grant ID and bounded
+  path-free display label derived from the folder basename. Duplicate basenames
+  receive an ordinal suffix; canonical paths and runtime/model session bindings
+  remain in main-owned state.
+- Task attachment/detachment, run start, workspace reveal, terminal launch, and
+  Git mutations share a serialized main-process workspace lifecycle. Revocation
+  therefore cannot interleave with a pending native dialog and leave a task bound
+  to expired authority.
 
 ### API connections and secrets
 
@@ -305,8 +313,14 @@ before the first supported release.
   Native confirmation also protects terminal creation, but the renderer remains
   the interactive terminal after launch and can drive an already attached task
   terminal.
-- Workspace grants are represented internally by canonical paths rather than opaque
-  capability handles.
+- Workspace grant IDs are process-scoped bearer capabilities, not an OS sandbox.
+  A compromised expected renderer can reuse a currently visible grant until it is
+  revoked or Ground exits, but cannot submit a new absolute workspace path.
+- The structural workspace boundary is not a text redactor. User prompts, model
+  input, terminal output, tool results, and imported history can still contain a
+  path as ordinary task content. Ground-generated command activity replaces the
+  canonical workspace prefix with `<workspace>` while retaining the full exact
+  path only in the native approval envelope.
 - Task history uses a JSON snapshot rather than a transactional, append-only event
   store and has a 128 MiB ceiling. The single rotating backup is not a versioned
   backup system or a user-selectable restore UI.

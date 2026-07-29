@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import type { AppSnapshot, RunEvent, Task } from '../../shared/types'
+import type {
+  AppSnapshot,
+  DesktopTask,
+  RunEvent
+} from '../../shared/types'
 import {
   applyRunEvent,
   applyRunEventEnvelope,
@@ -7,7 +11,7 @@ import {
   reconcileSnapshotWithEvents
 } from './lib/run-events'
 
-function task(id: string, content: string): Task {
+function task(id: string, content: string): DesktopTask {
   return {
     id,
     title: id,
@@ -128,7 +132,7 @@ describe('applyRunEvent', () => {
   it('materializes an active streamed item when a renderer reconnects', () => {
     const current = snapshot()
     current.tasks[0] = {
-      ...(current.tasks[0] as Task),
+      ...(current.tasks[0] as DesktopTask),
       items: []
     }
     current.runEventRevision = 8
@@ -213,7 +217,7 @@ describe('applyRunEvent', () => {
   it('replays an event delivered while a later snapshot refresh is in flight', () => {
     const stale = snapshot()
     stale.runEventRevision = 10
-    const selected = stale.tasks[0] as Task
+    const selected = stale.tasks[0] as DesktopTask
     selected.items = [
       {
         id: 'streamed',

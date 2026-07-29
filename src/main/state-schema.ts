@@ -1,12 +1,21 @@
 import { z } from 'zod'
-import type { AppSnapshot } from '../shared/types'
+import type {
+  AppSettings,
+  McpServerProfile,
+  ProviderProfile,
+  Task
+} from '../shared/types'
 import {
   assertSafeCliEnvironmentVariableName,
   normalizeCliEnvironmentVariableNames
 } from './cli-environment'
 
-export interface PersistedStateData extends AppSnapshot {
+export interface PersistedStateData {
   version: 1
+  providers: ProviderProfile[]
+  mcpServers: McpServerProfile[]
+  tasks: Task[]
+  settings: AppSettings
 }
 
 const timestamp = z.string().min(1).max(100)
