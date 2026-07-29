@@ -1,0 +1,253 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  CI: true
+
+jobs:
+  verify:
+    name: Verify release source
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install pinned npm
+        working-directory: ${{ runner.temp }}
+        run: npm install --global npm@11.16.0 --ignore-scripts
+
+      - name: Verify toolchain and install-script policy
+        run: npm run toolchain:check && npm run install-scripts:check
+
+      - name: Require protected tag from the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          test "$GITHUB_REF_PROTECTED" = "true"
+          git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"
+
+      - name: Require tag to match package version
+        run: >-
+          node -e "const expected = 'v' + require('./package.json').version;
+          if (process.env.GITHUB_REF_NAME !== expected) {
+            throw new Error('Release tag must be ' + expected);
+          }"
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Verify source
+        run: npm run verify
+
+      - name: Audit application, Electron, and build dependencies
+        run: npm audit --audit-level=high
+
+  package:
+    name: Build ${{ matrix.platform }}
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS
+            os: macos-latest
+            command: npm run dist:mac
+          - platform: Windows
+            os: windows-latest
+            command: npm run dist:win
+          - platform: Linux
+            os: ubuntu-latest
+            command: npm run dist:linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    environment:
+      name: release
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install pinned npm
+        working-directory: ${{ runner.temp }}
+        run: npm install --global npm@11.16.0 --ignore-scripts
+
+      - name: Verify toolchain and install-script policy
+        run: npm run toolchain:check && npm run install-scripts:check
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Install Linux packaged-launch smoke dependency
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install --no-install-recommends --yes xauth xvfb
+
+      - name: Build signed and notarized macOS artifacts
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.MACOS_CERTIFICATE }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          test -n "$CSC_LINK"
+          test -n "$CSC_KEY_PASSWORD"
+          test -n "$APPLE_ID"
+          test -n "$APPLE_APP_SPECIFIC_PASSWORD"
+          test -n "$APPLE_TEAM_ID"
+          npm run dist:mac
+
+      - name: Build release artifacts
+        if: runner.os != 'macOS'
+        run: ${{ matrix.command }}
+
+      - name: Smoke-test packaged main and preload startup
+        run: npm run smoke:package:launch
+
+      - name: Smoke-test packaged PTY, Git, local MCP, and cancellation
+        run: npm run smoke:package:native
+
+      - name: Inventory packages shipped in app.asar
+        run: >-
+          node scripts/generate-packaged-components.mjs
+          "release/ground-packaged-components-${{ runner.os }}.json"
+          release
+
+      - name: Attest build provenance
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
+        with:
+          subject-path: |
+            release/Ground-*.zip
+            release/Ground-*.dmg
+            release/Ground-*.exe
+            release/Ground-*.AppImage
+            release/Ground-*.deb
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: Ground-${{ matrix.platform }}
+          path: |
+            release/Ground-*.zip
+            release/Ground-*.dmg
+            release/Ground-*.exe
+            release/Ground-*.AppImage
+            release/Ground-*.deb
+            release/ground-packaged-components-*.json
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-draft:
+    name: Publish draft release
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install pinned npm
+        working-directory: ${{ runner.temp }}
+        run: npm install --global npm@11.16.0 --ignore-scripts
+
+      - name: Verify toolchain and install-script policy
+        run: npm run toolchain:check && npm run install-scripts:check
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: Ground-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate runtime-inclusive CycloneDX SBOM
+        shell: bash
+        run: node scripts/generate-release-sbom.mjs artifacts/ground-release-sbom.cdx.json artifacts
+
+      - name: Verify packaged-component and artifact SBOM coverage
+        shell: bash
+        run: node scripts/verify-release-sbom.mjs artifacts/ground-release-sbom.cdx.json artifacts
+
+      - name: Generate checksums
+        run: node scripts/generate-release-checksums.mjs artifacts/SHA256SUMS.txt artifacts
+
+      - name: Attest SBOM against release artifacts
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
+        with:
+          subject-path: |
+            artifacts/Ground-*.zip
+            artifacts/Ground-*.dmg
+            artifacts/Ground-*.exe
+            artifacts/Ground-*.AppImage
+            artifacts/Ground-*.deb
+          sbom-path: artifacts/ground-release-sbom.cdx.json
+
+      - name: Create draft prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: >-
+          gh release create "$GITHUB_REF_NAME" artifacts/*
+          --draft
+          --prerelease
+          --verify-tag
+          --generate-notes
+          --title "Ground ${GITHUB_REF_NAME#v}"

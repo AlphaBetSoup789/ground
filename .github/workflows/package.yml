@@ -1,0 +1,100 @@
+name: Package previews
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CI: true
+  CSC_IDENTITY_AUTO_DISCOVERY: false
+
+jobs:
+  package:
+    name: Package ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS
+            os: macos-latest
+            command: npm run dist:mac
+          - platform: Windows
+            os: windows-latest
+            command: npm run dist:win
+          - platform: Linux
+            os: ubuntu-latest
+            command: npm run dist:linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install pinned npm
+        working-directory: ${{ runner.temp }}
+        run: npm install --global npm@11.16.0 --ignore-scripts
+
+      - name: Verify toolchain and install-script policy
+        run: npm run toolchain:check && npm run install-scripts:check
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Check build-dependency compatibility
+        run: npm run build-deps:check
+
+      - name: Check production licenses
+        run: npm run licenses:check
+
+      - name: Audit application, Electron, and build dependencies
+        run: npm audit --audit-level=high
+
+      - name: Install Linux packaged-launch smoke dependency
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install --no-install-recommends --yes xauth xvfb
+
+      - name: Build unsigned preview
+        run: ${{ matrix.command }}
+
+      - name: Smoke-test packaged main and preload startup
+        run: npm run smoke:package:launch
+
+      - name: Smoke-test packaged PTY, Git, local MCP, and cancellation
+        run: npm run smoke:package:native
+
+      - name: Inventory packages shipped in app.asar
+        run: >-
+          node scripts/generate-packaged-components.mjs
+          "release/ground-packaged-components-${{ runner.os }}.json"
+          release
+
+      - name: Upload preview artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: Ground-${{ matrix.platform }}
+          path: |
+            release/Ground-*.zip
+            release/Ground-*.dmg
+            release/Ground-*.exe
+            release/Ground-*.AppImage
+            release/Ground-*.deb
+            release/ground-packaged-components-*.json
+          if-no-files-found: error
+          retention-days: 14

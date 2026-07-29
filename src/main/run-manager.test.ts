@@ -1,0 +1,1340 @@
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { describe, expect, it, vi } from 'vitest'
+import type { ModelApiProvider, RunEvent } from '../shared/types'
+import type {
+  AiSdkAdapterConfig,
+  JsonObject,
+  ModelAdapter,
+  ModelEvent,
+  ModelRequest
+} from './agent'
+import {
+  createModelRuntime,
+  modelRequestByteBudget,
+  RunManager,
+  selectModelContext,
+  type McpRuntime,
+  type ModelRuntimeFactory
+} from './run-manager'
+import {
+  providerCredentialReference,
+  providerCredentialReferenceFor
+} from './provider-credentials'
+import { ProviderOperationGate } from './provider-operation-gate'
+import { SecretVault } from './secrets'
+import { StateStore } from './store'
+
+type ModelScript = (request: ModelRequest) => AsyncIterable<ModelEvent>
+
+function scriptedRuntime(
+  scripts: ModelScript[],
+  requests: ModelRequest[]
+): ModelRuntimeFactory {
+  let index = 0
+  const adapter = {
+    id: 'test.model',
+    stream(request: ModelRequest): AsyncIterable<ModelEvent> {
+      requests.push(structuredClone(request))
+      const script = scripts[index]
+      index += 1
+      if (!script) throw new Error(`Unexpected model round ${index}`)
+      return script(request)
+    }
+  } as unknown as ModelAdapter<AiSdkAdapterConfig>
+  return () => ({
+    adapter,
+    config: {
+      protocol: 'openai-compatible',
+      baseUrl: 'http://127.0.0.1:11434/v1'
+    }
+  })
+}
+
+function credentialResolvingRuntime(
+  referenceFor: (provider: ModelApiProvider) => string,
+  observed: { secret?: string }
+): ModelRuntimeFactory {
+  return (provider) => {
+    const config: AiSdkAdapterConfig = {
+      protocol: 'openai-compatible',
+      baseUrl: provider.baseUrl,
+      apiKeyRef: referenceFor(provider)
+    }
+    const adapter = {
+      id: 'credential.test',
+      stream(
+        request: ModelRequest,
+        context: {
+          config: AiSdkAdapterConfig
+          secrets: { resolve(reference: string): Promise<string> }
+        }
+      ): AsyncIterable<ModelEvent> {
+        return (async function* () {
+          observed.secret = await context.secrets.resolve(
+            context.config.apiKeyRef as string
+          )
+          yield* textResponse(request, 'Credential resolved.')
+        })()
+      }
+    } as unknown as ModelAdapter<AiSdkAdapterConfig>
+    return { adapter, config }
+  }
+}
+
+function credentialFailingRuntime(
+  failure: (secret: string) => Error,
+  options?: {
+    beforeFailure?: Promise<void>
+    onCredentialResolved?: () => void
+  }
+): ModelRuntimeFactory {
+  return (provider) => {
+    const reference = providerCredentialReferenceFor(provider)
+    const config: AiSdkAdapterConfig = {
+      protocol: 'openai-compatible',
+      baseUrl: provider.baseUrl,
+      apiKeyRef: reference
+    }
+    const adapter = {
+      id: 'credential.failure-test',
+      stream(
+        _request: ModelRequest,
+        context: {
+          secrets: { resolve(reference: string): Promise<string> }
+        }
+      ): AsyncIterable<ModelEvent> {
+        return (async function* () {
+          const secret = await context.secrets.resolve(reference)
+          options?.onCredentialResolved?.()
+          await options?.beforeFailure
+          throw failure(secret)
+        })()
+      }
+    } as unknown as ModelAdapter<AiSdkAdapterConfig>
+    return { adapter, config }
+  }
+}
+
+function credentialVault(initial: Iterable<[string, string]> = []): {
+  instance: SecretVault
+  entries: Map<string, string>
+  get: ReturnType<typeof vi.fn>
+  set: ReturnType<typeof vi.fn>
+  delete: ReturnType<typeof vi.fn>
+} {
+  const entries = new Map(initial)
+  const get = vi.fn((reference: string) => entries.get(reference))
+  const set = vi.fn(async (reference: string, value: string) => {
+    entries.set(reference, value)
+  })
+  const remove = vi.fn(async (reference: string) => {
+    entries.delete(reference)
+  })
+  return {
+    instance: {
+      get,
+      has: vi.fn((reference: string) => entries.has(reference)),
+      set,
+      delete: remove
+    } as unknown as SecretVault,
+    entries,
+    get,
+    set,
+    delete: remove
+  }
+}
+
+async function* toolCallResponse(
+  request: ModelRequest,
+  name: string,
+  input: JsonObject
+): AsyncIterable<ModelEvent> {
+  const callId = `${request.requestId}:call`
+  const rawArguments = JSON.stringify(input)
+  yield { type: 'response.started', servingModel: request.model }
+  yield {
+    type: 'part.started',
+    part: { kind: 'tool-call', partId: callId, callId, name }
+  }
+  yield {
+    type: 'part.delta',
+    partId: callId,
+    delta: { kind: 'tool-arguments', text: rawArguments }
+  }
+  yield {
+    type: 'part.completed',
+    partId: callId,
+    part: {
+      kind: 'tool-call',
+      callId,
+      name,
+      rawArguments,
+      arguments: input
+    }
+  }
+  yield {
+    type: 'response.completed',
+    messageId: `${request.requestId}:assistant`,
+    stopReason: 'tool-calls'
+  }
+}
+
+async function* textResponse(
+  request: ModelRequest,
+  text: string,
+  usage = false
+): AsyncIterable<ModelEvent> {
+  const partId = `${request.requestId}:text`
+  yield { type: 'response.started', servingModel: request.model }
+  yield { type: 'part.started', part: { kind: 'text', partId } }
+  yield {
+    type: 'part.delta',
+    partId,
+    delta: { kind: 'text', text }
+  }
+  yield {
+    type: 'part.completed',
+    partId,
+    part: { kind: 'text', text }
+  }
+  if (usage) {
+    yield {
+      type: 'usage.updated',
+      usage: { inputTokens: 12, outputTokens: 4, totalTokens: 16 },
+      semantics: 'cumulative'
+    }
+  }
+  yield {
+    type: 'response.completed',
+    messageId: `${request.requestId}:assistant`,
+    stopReason: 'complete'
+  }
+}
+
+function terminalEvents(
+  events: RunEvent[]
+): {
+  emit: (event: RunEvent) => void
+  terminal: Promise<RunEvent>
+  approval: Promise<Extract<RunEvent, { type: 'approval-requested' }>>
+} {
+  let resolveTerminal: (event: RunEvent) => void = () => undefined
+  let resolveApproval: (
+    event: Extract<RunEvent, { type: 'approval-requested' }>
+  ) => void = () => undefined
+  const terminal = new Promise<RunEvent>((resolve) => {
+    resolveTerminal = resolve
+  })
+  const approval = new Promise<Extract<RunEvent, { type: 'approval-requested' }>>(
+    (resolve) => {
+      resolveApproval = resolve
+    }
+  )
+  return {
+    emit: (event) => {
+      events.push(event)
+      if (event.type === 'approval-requested') resolveApproval(event)
+      if (
+        event.type === 'run-completed' ||
+        event.type === 'run-error' ||
+        event.type === 'run-stopped'
+      ) {
+        resolveTerminal(event)
+      }
+    },
+    terminal,
+    approval
+  }
+}
+
+async function harness(
+  scripts: ModelScript[],
+  mcp?: McpRuntime,
+  options?: {
+    vault?: SecretVault
+    runtimeFactory?: ModelRuntimeFactory
+    providerOperations?: ProviderOperationGate
+  }
+): Promise<{
+  directory: string
+  workspace: string
+  store: StateStore
+  manager: RunManager
+  taskId: string
+  requests: ModelRequest[]
+  events: RunEvent[]
+  terminal: Promise<RunEvent>
+  approval: Promise<Extract<RunEvent, { type: 'approval-requested' }>>
+}> {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'ground-run-manager-'))
+  const workspace = path.join(directory, 'workspace')
+  await mkdir(workspace)
+  const store = new StateStore(path.join(directory, 'state.json'))
+  await store.load()
+  const task = await store.createTask(workspace)
+  const requests: ModelRequest[] = []
+  const events: RunEvent[] = []
+  const waiting = terminalEvents(events)
+  const vault =
+    options?.vault ??
+    ({ get: () => undefined } as unknown as SecretVault)
+  const manager = new RunManager(
+    store,
+    vault,
+    waiting.emit,
+    options?.runtimeFactory ?? scriptedRuntime(scripts, requests),
+    mcp,
+    undefined,
+    options?.providerOperations
+  )
+  return {
+    directory,
+    workspace,
+    store,
+    manager,
+    taskId: task.id,
+    requests,
+    events,
+    terminal: waiting.terminal,
+    approval: waiting.approval
+  }
+}
+
+describe('RunManager model runtime', () => {
+  it('refuses to start archived tasks even when called outside the desktop IPC boundary', async () => {
+    const run = await harness([])
+    await run.store.setTaskArchived(run.taskId, true)
+
+    await expect(
+      run.manager.start(run.taskId, 'Do not execute this request.')
+    ).rejects.toThrow('Unarchive this task before starting a run')
+    expect(run.requests).toEqual([])
+    expect(run.store.getTask(run.taskId).items).toEqual([])
+  })
+
+  it('releases the task and provider reservation when initial persistence fails', async () => {
+    const run = await harness([
+      (request) => textResponse(request, 'Recovered after the failed start.')
+    ])
+    const providerId = run.store.getTask(run.taskId).providerId
+    const mutation = vi
+      .spyOn(run.store, 'mutateTask')
+      .mockRejectedValueOnce(new Error('state write failed'))
+
+    await expect(
+      run.manager.start(run.taskId, 'This start cannot persist')
+    ).rejects.toThrow('state write failed')
+    expect(run.manager.isTaskActive(run.taskId)).toBe(false)
+    expect(run.manager.isProviderActive(providerId)).toBe(false)
+
+    mutation.mockRestore()
+    await run.manager.start(run.taskId, 'Try again')
+    await expect(run.terminal).resolves.toMatchObject({
+      type: 'run-completed',
+      taskId: run.taskId
+    })
+  })
+
+  it('serializes provider mutations against run startup in both directions', async () => {
+    const providerOperations = new ProviderOperationGate()
+    let releaseResponse: () => void = () => undefined
+    const responseGate = new Promise<void>((resolve) => {
+      releaseResponse = resolve
+    })
+    const run = await harness(
+      [
+        async function* (request) {
+          await responseGate
+          yield* textResponse(request, 'Finished after the mutation gate.')
+        }
+      ],
+      undefined,
+      { providerOperations }
+    )
+    const providerId = run.store.getTask(run.taskId).providerId
+
+    const releaseMutation = providerOperations.reserveMutation(
+      providerId,
+      () => run.manager.isProviderActive(providerId)
+    )
+    await expect(
+      run.manager.start(run.taskId, 'Do not overlap the provider edit')
+    ).rejects.toThrow(/provider change/i)
+    releaseMutation()
+
+    await run.manager.start(run.taskId, 'Start after the provider edit')
+    await vi.waitFor(() => {
+      expect(run.manager.isProviderActive(providerId)).toBe(true)
+    })
+    expect(() =>
+      providerOperations.reserveMutation(providerId, () =>
+        run.manager.isProviderActive(providerId)
+      )
+    ).toThrow(/active runs/i)
+    releaseResponse()
+    await expect(run.terminal).resolves.toMatchObject({
+      type: 'run-completed'
+    })
+  })
+
+  it('persists partial assistant text when a provider stream fails', async () => {
+    const run = await harness([
+      async function* () {
+        yield {
+          type: 'response.started' as const,
+          servingModel: 'test-model'
+        }
+        yield {
+          type: 'part.started' as const,
+          part: { kind: 'text' as const, partId: 'partial-text' }
+        }
+        yield {
+          type: 'part.delta' as const,
+          partId: 'partial-text',
+          delta: {
+            kind: 'text' as const,
+            text: 'Partial answer before failure.'
+          }
+        }
+        throw new Error('Provider connection failed')
+      }
+    ])
+
+    await run.manager.start(run.taskId, 'Stream a partial answer')
+    await expect(run.terminal).resolves.toMatchObject({
+      type: 'run-error'
+    })
+    expect(run.store.getTask(run.taskId).items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'message',
+          role: 'assistant',
+          content: 'Partial answer before failure.'
+        })
+      ])
+    )
+  })
+
+  it('can stop the active run by task after a renderer is recreated', async () => {
+    const run = await harness([
+      (request) =>
+        toolCallResponse(request, 'write_file', {
+          path: 'README.md',
+          content: 'Ground updated'
+        }),
+      (request) => textResponse(request, 'This response should be stopped.')
+    ])
+    await writeFile(path.join(run.workspace, 'README.md'), 'Ground')
+
+    await run.manager.start(run.taskId, 'Inspect the workspace')
+    await run.approval
+    const providerId = run.store.getTask(run.taskId).providerId
+    expect(run.manager.isProviderActive(providerId)).toBe(true)
+
+    await run.manager.stopTask(run.taskId)
+    await expect(run.terminal).resolves.toMatchObject({
+      type: 'run-stopped',
+      taskId: run.taskId
+    })
+    expect(run.manager.isTaskActive(run.taskId)).toBe(false)
+    expect(run.manager.isProviderActive(providerId)).toBe(false)
+  })
+
+  it('waits for active provider cleanup before stopAll returns', async () => {
+    let resolveStarted: () => void = () => undefined
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve
+    })
+    let cleanupFinished = false
+    const runtimeFactory: ModelRuntimeFactory = () => ({
+      adapter: {
+        id: 'shutdown.test',
+        stream(
+          _request: ModelRequest,
+          context: { signal: AbortSignal }
+        ): AsyncIterable<ModelEvent> {
+          return (async function* () {
+            resolveStarted()
+            await new Promise<void>((resolve) => {
+              if (context.signal.aborted) {
+                resolve()
+                return
+              }
+              context.signal.addEventListener('abort', () => resolve(), {
+                once: true
+              })
+            })
+            await new Promise<void>((resolve) => setTimeout(resolve, 25))
+            cleanupFinished = true
+            throw new DOMException('Run stopped', 'AbortError')
+          })()
+        }
+      } as unknown as ModelAdapter<AiSdkAdapterConfig>,
+      config: {
+        protocol: 'openai-compatible',
+        baseUrl: 'http://127.0.0.1:11434/v1'
+      }
+    })
+    const run = await harness([], undefined, { runtimeFactory })
+
+    await run.manager.start(run.taskId, 'Wait for shutdown cleanup')
+    await started
+    await run.manager.stopAll()
+
+    expect(cleanupFinished).toBe(true)
+    expect(run.manager.isTaskActive(run.taskId)).toBe(false)
+    await expect(run.terminal).resolves.toMatchObject({
+      type: 'run-stopped',
+      taskId: run.taskId
+    })
+  })
+
+  it('keeps assistant tool calls and their results atomic when trimming context', () => {
+    const conversation: ModelRequest['conversation'] = [
+      {
+        kind: 'message',
+        id: 'old-user',
+        role: 'user',
+        parts: [{ kind: 'text', text: 'old context' }]
+      },
+      {
+        kind: 'message',
+        id: 'tool-turn',
+        role: 'assistant',
+        parts: [
+          {
+            kind: 'tool-call',
+            callId: 'call-one',
+            name: 'read_file',
+            rawArguments: '{"path":"README.md"}',
+            arguments: { path: 'README.md' }
+          }
+        ]
+      },
+      {
+        kind: 'tool-result',
+        id: 'tool-result',
+        callId: 'call-one',
+        name: 'read_file',
+        content: [{ kind: 'text', text: '# Ground' }]
+      }
+    ]
+
+    const selected = selectModelContext(conversation, 10_000, 2)
+
+    expect(selected.omittedItems).toBe(1)
+    expect(selected.conversation).toEqual(conversation.slice(1))
+  })
+
+  it('never returns an individual context item above the configured budget', () => {
+    const conversation: ModelRequest['conversation'] = [
+      {
+        kind: 'message',
+        id: 'oversized-user',
+        role: 'user',
+        parts: [{ kind: 'text', text: 'x'.repeat(20_000) }]
+      }
+    ]
+
+    const selected = selectModelContext(conversation, 1_000, 10)
+
+    expect(selected.omittedItems).toBe(1)
+    expect(selected.conversation).toHaveLength(1)
+    expect(JSON.stringify(selected.conversation).length).toBeLessThanOrEqual(1_000)
+    expect(JSON.stringify(selected.conversation)).toContain('truncated')
+  })
+
+  it('applies context limits to UTF-8 bytes for multibyte text', () => {
+    const selected = selectModelContext(
+      [
+        {
+          kind: 'message',
+          id: 'multibyte-user',
+          role: 'user',
+          parts: [{ kind: 'text', text: '界'.repeat(2_000) }]
+        }
+      ],
+      1_000,
+      10
+    )
+
+    expect(selected.omittedItems).toBe(1)
+    expect(
+      Buffer.byteLength(JSON.stringify(selected.conversation), 'utf8')
+    ).toBeLessThanOrEqual(1_000)
+    expect(JSON.stringify(selected.conversation)).toContain('truncated')
+  })
+
+  it('derives a conservative conversation budget from each model profile', () => {
+    const provider: ModelApiProvider = {
+      id: 'small-local',
+      name: 'Small local model',
+      kind: 'openai-compatible',
+      baseUrl: 'http://127.0.0.1:11434/v1',
+      model: 'small-model',
+      hasApiKey: false,
+      supportsTools: true,
+      contextWindowTokens: 4_096,
+      maxOutputTokens: 512,
+      createdAt: '2026-07-28T12:00:00.000Z',
+      updatedAt: '2026-07-28T12:00:00.000Z'
+    }
+
+    expect(modelRequestByteBudget(provider, 1_000)).toBe(2_072)
+  })
+
+  it('binds the production adapter configuration to an opaque endpoint-scoped credential reference', () => {
+    const provider: ModelApiProvider = {
+      id: 'hosted-provider',
+      name: 'Hosted provider',
+      kind: 'openai',
+      baseUrl: 'https://api.example.com/v1/',
+      model: 'model-one',
+      hasApiKey: true,
+      supportsTools: true,
+      createdAt: '2026-07-28T12:00:00.000Z',
+      updatedAt: '2026-07-28T12:00:00.000Z'
+    }
+
+    const runtime = createModelRuntime(provider)
+    const reference = providerCredentialReferenceFor(provider)
+
+    expect(runtime.config.apiKeyRef).toBe(reference)
+    expect(reference).not.toContain(provider.id)
+    expect(reference).not.toContain('api.example.com')
+    expect(() =>
+      createModelRuntime({ ...provider, hasApiKey: false })
+    ).toThrow('Hosted providers require a secret reference')
+  })
+
+  it('resolves only the scoped reference for the immutable provider snapshot', async () => {
+    const observed: { secret?: string } = {}
+    const vault = credentialVault()
+    const run = await harness([], undefined, {
+      vault: vault.instance,
+      runtimeFactory: credentialResolvingRuntime(
+        providerCredentialReferenceFor,
+        observed
+      )
+    })
+    const task = run.store.getTask(run.taskId)
+    const stored = run.store.getProvider(task.providerId)
+    if (stored.kind === 'cli') throw new Error('Expected a model provider')
+    const provider = { ...stored, hasApiKey: true }
+    const reference = providerCredentialReferenceFor(provider)
+    vault.entries.set(reference, 'scoped-secret')
+    await run.store.upsertProvider(provider)
+
+    await run.manager.start(run.taskId, 'Use the scoped credential.')
+    expect((await run.terminal).type).toBe('run-completed')
+
+    expect(observed.secret).toBe('scoped-secret')
+    expect(vault.get).toHaveBeenCalledWith(reference)
+    expect(vault.get).not.toHaveBeenCalledWith(provider.id)
+  })
+
+  it('rejects an adapter request for a different credential boundary without probing the vault', async () => {
+    const observed: { secret?: string } = {}
+    const vault = credentialVault()
+    const run = await harness([], undefined, {
+      vault: vault.instance,
+      runtimeFactory: credentialResolvingRuntime(
+        (provider) =>
+          providerCredentialReference(
+            provider.id,
+            provider.kind,
+            'https://attacker.example/v1'
+          ),
+        observed
+      )
+    })
+    const task = run.store.getTask(run.taskId)
+    const stored = run.store.getProvider(task.providerId)
+    if (stored.kind === 'cli') throw new Error('Expected a model provider')
+    const provider = { ...stored, hasApiKey: true }
+    vault.entries.set(providerCredentialReferenceFor(provider), 'safe-secret')
+    await run.store.upsertProvider(provider)
+
+    await run.manager.start(run.taskId, 'Do not cross the credential boundary.')
+    expect((await run.terminal).type).toBe('run-error')
+
+    expect(observed.secret).toBeUndefined()
+    expect(vault.get).not.toHaveBeenCalled()
+  })
+
+  it('keeps a legacy key usable when best-effort migration fails', async () => {
+    const observed: { secret?: string } = {}
+    const vault = credentialVault()
+    vault.set.mockRejectedValueOnce(new Error('vault write unavailable'))
+    const run = await harness([], undefined, {
+      vault: vault.instance,
+      runtimeFactory: credentialResolvingRuntime(
+        providerCredentialReferenceFor,
+        observed
+      )
+    })
+    const task = run.store.getTask(run.taskId)
+    const stored = run.store.getProvider(task.providerId)
+    if (stored.kind === 'cli') throw new Error('Expected a model provider')
+    const provider = { ...stored, hasApiKey: true }
+    vault.entries.set(provider.id, 'legacy-secret')
+    await run.store.upsertProvider(provider)
+
+    await run.manager.start(run.taskId, 'Use the legacy credential safely.')
+    expect((await run.terminal).type).toBe('run-completed')
+
+    expect(observed.secret).toBe('legacy-secret')
+    expect(vault.set).toHaveBeenCalledWith(
+      providerCredentialReferenceFor(provider),
+      'legacy-secret'
+    )
+    expect(vault.delete).not.toHaveBeenCalled()
+    expect(vault.entries.get(provider.id)).toBe('legacy-secret')
+  })
+
+  it('never falls back to an orphaned legacy key when hasApiKey is false', async () => {
+    const observed: { secret?: string } = {}
+    const vault = credentialVault()
+    const run = await harness([], undefined, {
+      vault: vault.instance,
+      runtimeFactory: credentialResolvingRuntime(
+        providerCredentialReferenceFor,
+        observed
+      )
+    })
+    const task = run.store.getTask(run.taskId)
+    const provider = run.store.getProvider(task.providerId)
+    if (provider.kind === 'cli') throw new Error('Expected a model provider')
+    expect(provider.hasApiKey).toBe(false)
+    vault.entries.set(provider.id, 'orphaned-legacy-secret')
+
+    await run.manager.start(run.taskId, 'Do not use the orphaned key.')
+    expect((await run.terminal).type).toBe('run-error')
+
+    expect(observed.secret).toBeUndefined()
+    expect(vault.get).not.toHaveBeenCalled()
+    expect(vault.set).not.toHaveBeenCalled()
+  })
+
+  it('durably fails with a bounded error and redacts a reflected active credential from state and events', async () => {
+    const secret = 'sk-ground-runtime-secret'
+    const vault = credentialVault()
+    const run = await harness([], undefined, {
+      vault: vault.instance,
+      runtimeFactory: credentialFailingRuntime(
+        (resolvedSecret) =>
+          new Error(
+            `Provider rejected Authorization: Bearer ${resolvedSecret}.\n${'x'.repeat(
+              160_000
+            )}`
+          )
+      )
+    })
+    const task = run.store.getTask(run.taskId)
+    const stored = run.store.getProvider(task.providerId)
+    if (stored.kind === 'cli') throw new Error('Expected a model provider')
+    const provider = { ...stored, hasApiKey: true }
+    vault.entries.set(providerCredentialReferenceFor(provider), secret)
+    await run.store.upsertProvider(provider)
+
+    await run.manager.start(run.taskId, 'Trigger a reflected provider error.')
+    const terminal = await run.terminal
+
+    expect(terminal.type).toBe('run-error')
+    if (terminal.type !== 'run-error') throw new Error('Expected run-error')
+    expect(terminal.message).toContain('Provider rejected Authorization')
+    expect(terminal.message).toContain('[redacted credential]')
+    expect(terminal.message).toContain('Error truncated by Ground')
+    expect(terminal.message.length).toBeLessThanOrEqual(30_000)
+    expect(terminal.message).not.toContain(secret)
+
+    const failedTask = run.store.getTask(run.taskId)
+    expect(failedTask.runStatus).toBe('failed')
+    const failureActivity = failedTask.items.find(
+      (item) =>
+        item.kind === 'activity' &&
+        item.activityType === 'error' &&
+        item.title === 'Run failed'
+    )
+    expect(failureActivity).toMatchObject({
+      kind: 'activity',
+      status: 'error',
+      detail: terminal.message
+    })
+    expect(JSON.stringify(failedTask)).not.toContain(secret)
+    expect(JSON.stringify(run.events)).not.toContain(secret)
+
+    const statePath = path.join(run.directory, 'state.json')
+    expect(await readFile(statePath, 'utf8')).not.toContain(secret)
+    const reloaded = new StateStore(statePath)
+    await reloaded.load()
+    expect(reloaded.getTask(run.taskId).runStatus).toBe('failed')
+  })
+
+  it('reports a bounded redacted live error when the failed-state write itself is unavailable', async () => {
+    const secret = 'sk-ground-persistence-secret'
+    let releaseFailure: () => void = () => undefined
+    const failureGate = new Promise<void>((resolve) => {
+      releaseFailure = resolve
+    })
+    let markCredentialResolved: () => void = () => undefined
+    const credentialResolved = new Promise<void>((resolve) => {
+      markCredentialResolved = resolve
+    })
+    const vault = credentialVault()
+    const run = await harness([], undefined, {
+      vault: vault.instance,
+      runtimeFactory: credentialFailingRuntime(
+        () => new Error('Provider request failed.'),
+        {
+          beforeFailure: failureGate,
+          onCredentialResolved: markCredentialResolved
+        }
+      )
+    })
+    const task = run.store.getTask(run.taskId)
+    const stored = run.store.getProvider(task.providerId)
+    if (stored.kind === 'cli') throw new Error('Expected a model provider')
+    const provider = { ...stored, hasApiKey: true }
+    vault.entries.set(providerCredentialReferenceFor(provider), secret)
+    await run.store.upsertProvider(provider)
+
+    await run.manager.start(run.taskId, 'Fail while finalizing locally.')
+    await credentialResolved
+    const mutateTask = vi
+      .spyOn(run.store, 'mutateTask')
+      .mockRejectedValueOnce(
+        new Error(`Disk write failed while handling ${secret}.${'y'.repeat(80_000)}`)
+      )
+    releaseFailure()
+    const terminal = await run.terminal
+
+    expect(terminal.type).toBe('run-error')
+    if (terminal.type !== 'run-error') throw new Error('Expected run-error')
+    expect(terminal.message).toContain('could not finalize this run locally')
+    expect(terminal.message).toContain('[redacted credential]')
+    expect(terminal.message).toContain('Error truncated by Ground')
+    expect(terminal.message.length).toBeLessThanOrEqual(30_000)
+    expect(terminal.message).not.toContain(secret)
+    expect(run.store.getTask(run.taskId).runStatus).toBe('running')
+    expect(run.manager.isTaskActive(run.taskId)).toBe(false)
+    expect(
+      run.events.some(
+        (event) =>
+          event.type === 'item-added' &&
+          event.item.kind === 'activity' &&
+          event.item.title === 'Run failed'
+      )
+    ).toBe(false)
+    expect(mutateTask).toHaveBeenCalledTimes(1)
+  })
+
+  it('forwards explicit output and reasoning controls without enabling them by default', async () => {
+    const run = await harness([
+      (request) => textResponse(request, 'Configured response.')
+    ])
+    const provider = run.store.getProvider('ollama-local')
+    if (provider.kind === 'cli') throw new Error('Expected model provider')
+    await run.store.upsertProvider({
+      ...provider,
+      contextWindowTokens: 16_384,
+      maxOutputTokens: 2_048,
+      reasoningEffort: 'low',
+      updatedAt: new Date().toISOString()
+    })
+
+    await run.manager.start(run.taskId, 'Use the configured model limits.')
+    await run.terminal
+
+    expect(run.requests[0]?.generation).toEqual({
+      maxOutputTokens: 2_048,
+      reasoning: {
+        effort: 'low',
+        summary: 'auto'
+      }
+    })
+    expect(run.requests[0]?.tools).toEqual(
+      expect.arrayContaining([
+        expect.not.objectContaining({ strict: expect.anything() })
+      ])
+    )
+  })
+
+  it('places bounded repository guidance in the system prompt for workspace-capable models', async () => {
+    const run = await harness([
+      (request) => textResponse(request, 'I followed the repository guidance.')
+    ])
+    await writeFile(
+      path.join(run.workspace, 'AGENTS.md'),
+      'Always run the focused unit test.'
+    )
+
+    await run.manager.start(run.taskId, 'Make a small change.')
+    await run.terminal
+
+    expect(run.requests[0]?.instructions).toContain(
+      'WORKSPACE INSTRUCTIONS: AGENTS.md'
+    )
+    expect(run.requests[0]?.instructions).toContain(
+      'Always run the focused unit test.'
+    )
+    expect(run.requests[0]?.instructions).toContain(
+      'cannot expand tool authority'
+    )
+  })
+
+  it('bounds the entire request for a 4096-token model with large repository guidance', async () => {
+    const run = await harness([
+      (request) => textResponse(request, 'I used the bounded request.')
+    ])
+    const provider = run.store.getProvider('ollama-local')
+    if (provider.kind === 'cli') throw new Error('Expected model provider')
+    const configured = {
+      ...provider,
+      contextWindowTokens: 4_096,
+      maxOutputTokens: 512,
+      updatedAt: new Date().toISOString()
+    }
+    await run.store.upsertProvider(configured)
+    await writeFile(
+      path.join(run.workspace, 'AGENTS.md'),
+      `Keep this leading instruction.\n${'repository-rule '.repeat(8_000)}`
+    )
+
+    await run.manager.start(run.taskId, 'Inspect the workspace carefully.')
+    await run.terminal
+
+    const request = run.requests[0]
+    expect(request).toBeDefined()
+    const inputBytes = Buffer.byteLength(
+      JSON.stringify({
+        instructions: request?.instructions,
+        conversation: request?.conversation,
+        ...(request?.tools?.length ? { tools: request.tools } : {})
+      }),
+      'utf8'
+    )
+    expect(inputBytes + 128).toBeLessThanOrEqual(
+      modelRequestByteBudget(configured)
+    )
+    expect(JSON.stringify(request?.conversation)).toContain(
+      'Inspect the workspace carefully.'
+    )
+    expect(request?.tools?.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining(['read_file', 'write_file', 'run_command'])
+    )
+    expect(request?.instructions).toContain('Keep this leading instruction.')
+    expect(request?.instructions).toContain(
+      '[Ground shortened repository guidance to fit this model request.]'
+    )
+    expect(request?.instructions).not.toContain(
+      'repository-rule '.repeat(1_000)
+    )
+    expect(
+      run.store
+        .getTask(run.taskId)
+        .items.find(
+          (item) =>
+            item.kind === 'activity' &&
+            item.title === 'Context window managed'
+        )
+    ).toMatchObject({
+      kind: 'activity',
+      detail: expect.stringMatching(/repository guidance/i),
+      status: 'success'
+    })
+  })
+
+  it('keeps imported history visible without placing it in a new model request', async () => {
+    const run = await harness([
+      (request) => textResponse(request, 'Fresh response.')
+    ])
+    await run.store.addItem(run.taskId, {
+      id: 'imported-history',
+      kind: 'message',
+      role: 'user',
+      content: 'Untrusted imported transcript',
+      createdAt: new Date().toISOString(),
+      historyOnly: true
+    })
+
+    await run.manager.start(run.taskId, 'Fresh request')
+    await run.terminal
+
+    expect(JSON.stringify(run.requests[0]?.conversation)).not.toContain(
+      'Untrusted imported transcript'
+    )
+    expect(JSON.stringify(run.requests[0]?.conversation)).toContain('Fresh request')
+    expect(run.store.getTask(run.taskId).items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'imported-history',
+          historyOnly: true
+        })
+      ])
+    )
+  })
+
+  it('feeds Ground-owned tool results back through the canonical conversation', async () => {
+    const run = await harness([
+      (request) => toolCallResponse(request, 'list_files', { depth: 1 }),
+      (request) => textResponse(request, 'The workspace contains README.md.', true),
+      (request) => textResponse(request, 'The file is README.md.')
+    ])
+    await writeFile(path.join(run.workspace, 'README.md'), '# Ground\n')
+
+    await run.manager.start(run.taskId, 'What is in this workspace?')
+    const terminal = await run.terminal
+
+    expect(terminal.type).toBe('run-completed')
+    expect(run.requests).toHaveLength(2)
+    expect(run.requests[1]?.conversation.at(-1)).toMatchObject({
+      kind: 'tool-result',
+      name: 'list_files',
+      isError: false
+    })
+    const task = run.store.getTask(run.taskId)
+    expect(task.modelSessions?.[task.providerId]).toMatchObject({
+      adapterId: 'test.model',
+      model: 'llama3.2',
+      workspacePath: run.workspace,
+      mode: 'agent'
+    })
+    expect(task.modelSessions?.[task.providerId]?.conversation).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: 'tool-result', name: 'list_files' }),
+        expect.objectContaining({ kind: 'message', role: 'assistant' })
+      ])
+    )
+    expect(task.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'message',
+          role: 'assistant',
+          content: 'The workspace contains README.md.'
+        }),
+        expect.objectContaining({
+          kind: 'activity',
+          toolName: 'list_files',
+          status: 'success'
+        }),
+        expect.objectContaining({
+          kind: 'activity',
+          title: 'Usage',
+          detail: '12 input · 4 output · 16 total'
+        })
+      ])
+    )
+
+    await run.manager.start(run.taskId, 'Which file did you find?')
+    await vi.waitFor(() => {
+      expect(
+        run.events.filter((event) => event.type === 'run-completed')
+      ).toHaveLength(2)
+    })
+    expect(run.requests[2]?.conversation).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: 'tool-result', name: 'list_files' }),
+        expect.objectContaining({
+          kind: 'message',
+          role: 'user',
+          parts: [{ kind: 'text', text: 'Which file did you find?' }]
+        })
+      ])
+    )
+  })
+
+  it('carries normalized tool context and provider attribution across providers', async () => {
+    const run = await harness([
+      (request) => toolCallResponse(request, 'list_files', { depth: 1 }),
+      (request) => textResponse(request, 'I found README.md.'),
+      (request) => textResponse(request, 'I can continue from that inspection.')
+    ])
+    await writeFile(path.join(run.workspace, 'README.md'), '# Ground\n')
+
+    await run.manager.start(run.taskId, 'Inspect the workspace')
+    await run.terminal
+    const original = run.store.getTask(run.taskId)
+    const currentProvider = run.store.getProvider(original.providerId)
+    const timestamp = new Date().toISOString()
+    await run.store.upsertProvider({
+      ...currentProvider,
+      id: 'second-provider',
+      name: 'Second provider',
+      model: 'second-model',
+      createdAt: timestamp,
+      updatedAt: timestamp
+    })
+    await run.store.mutateTask(run.taskId, (task) => {
+      task.providerId = 'second-provider'
+    })
+
+    await run.manager.start(run.taskId, 'Continue with the other provider')
+    await vi.waitFor(() => {
+      expect(
+        run.events.filter((event) => event.type === 'run-completed')
+      ).toHaveLength(2)
+    })
+
+    const switchedConversation = run.requests[2]?.conversation ?? []
+    expect(switchedConversation).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'message',
+          role: 'assistant',
+          parts: [
+            expect.objectContaining({
+              kind: 'tool-call',
+              name: 'list_files'
+            })
+          ]
+        }),
+        expect.objectContaining({
+          kind: 'tool-result',
+          name: 'list_files',
+          isError: false
+        })
+      ])
+    )
+    const assistantMessages = run.store
+      .getTask(run.taskId)
+      .items.filter(
+        (item) => item.kind === 'message' && item.role === 'assistant'
+      )
+    expect(assistantMessages[0]?.provider?.name).toBe('Ollama · local')
+    expect(assistantMessages.at(-1)?.provider?.name).toBe('Second provider')
+  })
+
+  it('gives API Ask mode only read-only workspace tools and rejects unadvertised writes', async () => {
+    const run = await harness([
+      (request) => toolCallResponse(request, 'read_file', { path: 'README.md' }),
+      (request) =>
+        toolCallResponse(request, 'write_file', {
+          path: 'unexpected.txt',
+          content: 'must not be written'
+        }),
+      (request) => textResponse(request, 'I inspected the workspace without changing it.')
+    ])
+    await writeFile(path.join(run.workspace, 'README.md'), '# Ground\n')
+    await run.store.mutateTask(run.taskId, (task) => {
+      task.mode = 'ask'
+    })
+
+    await run.manager.start(run.taskId, 'Read the project without changing it')
+    expect((await run.terminal).type).toBe('run-completed')
+
+    expect(run.requests[0]?.tools?.map((tool) => tool.name).sort()).toEqual([
+      'list_files',
+      'read_file',
+      'search_files'
+    ])
+    expect(run.requests[0]?.instructions).toContain('read-only workspace tools')
+    expect(run.requests[1]?.conversation.at(-1)).toMatchObject({
+      kind: 'tool-result',
+      name: 'read_file',
+      isError: false
+    })
+    expect(run.requests[2]?.conversation.at(-1)).toMatchObject({
+      kind: 'tool-result',
+      name: 'write_file',
+      isError: true,
+      content: [
+        expect.objectContaining({
+          kind: 'text',
+          text: expect.stringMatching(/unavailable in ask mode/i)
+        })
+      ]
+    })
+    await expect(
+      readFile(path.join(run.workspace, 'unexpected.txt'), 'utf8')
+    ).rejects.toThrow()
+  })
+
+  it('persists a model session against the immutable run workspace and mode', async () => {
+    let releaseResponse: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      releaseResponse = resolve
+    })
+    const run = await harness([
+      async function* (request) {
+        await gate
+        yield* textResponse(request, 'Bound to the original workspace.')
+      }
+    ])
+    const otherWorkspace = path.join(run.directory, 'other-workspace')
+    await mkdir(otherWorkspace)
+
+    await run.manager.start(run.taskId, 'Keep this run bound')
+    await vi.waitFor(() => expect(run.requests).toHaveLength(1))
+    await run.store.mutateTask(run.taskId, (task) => {
+      task.workspacePath = otherWorkspace
+      task.mode = 'ask'
+    })
+    releaseResponse()
+    expect((await run.terminal).type).toBe('run-completed')
+
+    const task = run.store.getTask(run.taskId)
+    expect(task.modelSessions?.[task.providerId]).toMatchObject({
+      workspacePath: run.workspace,
+      mode: 'agent'
+    })
+  })
+
+  it('executes the exact write envelope that was approved', async () => {
+    const run = await harness([
+      (request) =>
+        toolCallResponse(request, 'write_file', {
+          path: 'tracked.txt',
+          content: 'model edit\n'
+        }),
+      (request) => textResponse(request, 'The approved edit could not be applied safely.')
+    ])
+    const target = path.join(run.workspace, 'tracked.txt')
+    await writeFile(target, 'before\n')
+
+    const runId = await run.manager.start(run.taskId, 'Update tracked.txt')
+    const approval = await run.approval
+    expect(approval.item.detail).toContain('+model edit')
+
+    await writeFile(target, 'concurrent user edit\n')
+    await run.manager.resolveApproval(runId, approval.item.approvalId as string, true)
+    const terminal = await run.terminal
+
+    expect(terminal.type).toBe('run-completed')
+    expect(await readFile(target, 'utf8')).toBe('concurrent user edit\n')
+    expect(run.requests[1]?.conversation.at(-1)).toMatchObject({
+      kind: 'tool-result',
+      name: 'write_file',
+      isError: true
+    })
+    const task = run.store.getTask(run.taskId)
+    expect(task.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'activity',
+          toolName: 'write_file',
+          status: 'error',
+          result: expect.stringMatching(/changed since approval/i)
+        })
+      ])
+    )
+  })
+
+  it('shows and executes the exact localized edit envelope that was approved', async () => {
+    const run = await harness([
+      (request) =>
+        toolCallResponse(request, 'edit_file', {
+          path: 'tracked.txt',
+          old_text: 'before',
+          new_text: 'after'
+        }),
+      (request) => textResponse(request, 'The localized edit is complete.')
+    ])
+    const target = path.join(run.workspace, 'tracked.txt')
+    await writeFile(target, 'line before line\n')
+
+    const runId = await run.manager.start(run.taskId, 'Edit tracked.txt')
+    const approval = await run.approval
+    expect(approval.item.title).toBe('Edit tracked.txt')
+    expect(approval.item.detail).toContain('-line before line')
+    expect(approval.item.detail).toContain('+line after line')
+
+    await run.manager.resolveApproval(
+      runId,
+      approval.item.approvalId as string,
+      true
+    )
+    expect((await run.terminal).type).toBe('run-completed')
+    expect(await readFile(target, 'utf8')).toBe('line after line\n')
+    expect(run.requests[1]?.conversation.at(-1)).toMatchObject({
+      kind: 'tool-result',
+      name: 'edit_file',
+      isError: false,
+      content: [
+        expect.objectContaining({
+          kind: 'text',
+          text: 'Edited tracked.txt.'
+        })
+      ]
+    })
+  })
+
+  it('shows exact MCP arguments and definition identity before every call', async () => {
+    const executeTool = vi.fn(async () => ({
+      serverId: 'demo',
+      toolName: 'mcp__demo__lookup',
+      isError: false,
+      result: { answer: 42 },
+      truncated: false,
+      byteLength: 13
+    }))
+    const mcp: McpRuntime = {
+      listApprovedTools: () => [
+        {
+          definition: {
+            name: 'mcp__demo__lookup',
+            description: 'Look up a value',
+            inputSchema: {
+              type: 'object',
+              properties: { query: { type: 'string' } },
+              required: ['query'],
+              additionalProperties: false
+            }
+          },
+          metadata: {
+            source: 'mcp',
+            approvalRequired: true,
+            serverId: 'demo',
+            serverName: 'Demo server',
+            originalName: 'lookup',
+            fingerprint: 'a'.repeat(64),
+            trustStatus: 'approved'
+          }
+        }
+      ],
+      executeTool
+    }
+    const run = await harness(
+      [
+        (request) =>
+          toolCallResponse(request, 'mcp__demo__lookup', {
+            query: 'meaning of life'
+          }),
+        (request) => textResponse(request, 'The result is 42.')
+      ],
+      mcp
+    )
+
+    const runId = await run.manager.start(run.taskId, 'Use the demo lookup')
+    const approval = await run.approval
+
+    expect(executeTool).not.toHaveBeenCalled()
+    expect(approval.item.detail).toContain('Server: Demo server')
+    expect(approval.item.detail).toContain(`Definition SHA-256: ${'a'.repeat(64)}`)
+    expect(approval.item.detail).toContain('"query": "meaning of life"')
+    await run.manager.resolveApproval(
+      runId,
+      approval.item.approvalId as string,
+      true
+    )
+    expect((await run.terminal).type).toBe('run-completed')
+
+    expect(executeTool).toHaveBeenCalledWith(
+      'mcp__demo__lookup',
+      { query: 'meaning of life' },
+      expect.objectContaining({ approvalGranted: true })
+    )
+    expect(run.requests[0]?.tools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'mcp__demo__lookup' })
+      ])
+    )
+    expect(run.requests[1]?.conversation.at(-1)).toMatchObject({
+      kind: 'tool-result',
+      name: 'mcp__demo__lookup',
+      isError: false
+    })
+  })
+})

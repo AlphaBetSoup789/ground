@@ -1,0 +1,109 @@
+name: Bug report
+description: Report a reproducible Ground problem without sharing private data
+title: "[Bug]: "
+labels:
+  - bug
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Ground.
+
+        Do not include API keys, private source, prompts, transcripts, absolute local
+        paths, state files, CLI configuration, environment dumps, or raw support
+        bundles. Report vulnerabilities through SECURITY.md, never this form.
+
+  - type: input
+    id: version
+    attributes:
+      label: Ground version or commit
+      placeholder: "For example: commit abc1234"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+      placeholder: "For example: macOS 15, arm64"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Connection type
+      options:
+        - OpenAI-compatible API
+        - OpenAI Responses
+        - Anthropic Messages
+        - Google Gemini API
+        - Codex CLI
+        - Claude Code
+        - Gemini CLI
+        - Generic CLI
+        - No provider / app shell
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: provider_version
+    attributes:
+      label: Provider, server, model, or CLI version
+      description: Do not include an endpoint containing credentials or private hostnames.
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Ground mode
+      options:
+        - Ask
+        - Agent
+        - Not applicable
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Minimal reproduction
+      description: Give the smallest safe sequence that reproduces the problem.
+      placeholder: |
+        1. Create a new task…
+        2. Select…
+        3. Run…
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include only redacted error text or diagnostics.
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional safe context
+      description: Note whether a fresh task/provider reproduces it and any safe workaround.
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I reviewed this report and removed credentials, private code, transcripts, paths, and account data.
+          required: true
+        - label: This is not a vulnerability report.
+          required: true

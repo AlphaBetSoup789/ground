@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/AlphaBetSoup789/ground/security/advisories/new
+    about: Send credentials or vulnerability details only through this private form.
+  - name: Ask a question or share an idea
+    url: https://github.com/AlphaBetSoup789/ground/discussions
+    about: Use Discussions for non-sensitive setup help and early design feedback.

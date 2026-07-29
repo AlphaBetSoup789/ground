@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="120" y1="100" x2="900" y2="940" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2B2C24"/>
+      <stop offset="1" stop-color="#151610"/>
+    </linearGradient>
+    <linearGradient id="lime" x1="260" y1="180" x2="760" y2="820" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E7FF9B"/>
+      <stop offset="1" stop-color="#9DCC4B"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="22" stdDeviation="24" flood-color="#080904" flood-opacity=".42"/>
+    </filter>
+  </defs>
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#bg)"/>
+  <rect x="48" y="48" width="928" height="928" rx="208" fill="none" stroke="#FFFFFF" stroke-opacity=".08" stroke-width="8"/>
+  <circle cx="512" cy="450" r="350" fill="#C9F66C" opacity=".055"/>
+  <g filter="url(#shadow)">
+    <path d="M236 302c0-51 41-92 92-92h80c51 0 92 41 92 92v420c0 51-41 92-92 92h-80c-51 0-92-41-92-92V302Z" fill="url(#lime)"/>
+    <path d="M524 302c0-51 41-92 92-92h80c51 0 92 41 92 92v420c0 51-41 92-92 92h-80c-51 0-92-41-92-92V302Z" fill="url(#lime)"/>
+    <path d="M404 405h216v214H404z" fill="#1C1D17"/>
+    <path d="M431 432h162v160H431z" rx="42" fill="#26281F"/>
+    <circle cx="512" cy="512" r="38" fill="#DFFF87"/>
+  </g>
+</svg>

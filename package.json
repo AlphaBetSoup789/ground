@@ -1,0 +1,168 @@
+{
+  "name": "ground",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The open workspace for coding agents.",
+  "main": "./out/main/index.js",
+  "author": {
+    "name": "Ground contributors",
+    "email": "247020091+AlphaBetSoup789@users.noreply.github.com",
+    "url": "https://github.com/AlphaBetSoup789"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AlphaBetSoup789/ground.git"
+  },
+  "homepage": "https://github.com/AlphaBetSoup789/ground#readme",
+  "bugs": {
+    "url": "https://github.com/AlphaBetSoup789/ground/issues"
+  },
+  "license": "MIT",
+  "scripts": {
+    "postinstall": "node scripts/prepare-native.mjs",
+    "toolchain:check": "node scripts/check-toolchain.mjs",
+    "install-scripts:check": "node scripts/check-install-script-policy.mjs",
+    "dev": "electron-vite dev",
+    "build": "npm run typecheck && electron-vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build-deps:check": "node scripts/check-build-dependencies.mjs",
+    "licenses:generate": "node scripts/check-production-licenses.mjs --write",
+    "licenses:check": "node scripts/check-production-licenses.mjs --check",
+    "package:inventory": "node scripts/generate-packaged-components.mjs",
+    "sbom:release": "node scripts/generate-release-sbom.mjs",
+    "sbom:verify": "node scripts/verify-release-sbom.mjs",
+    "checksums:release": "node scripts/generate-release-checksums.mjs",
+    "build:preview": "vite build --config vite.preview.config.ts",
+    "preview": "vite preview --config vite.preview.config.ts",
+    "verify": "npm run install-scripts:check && npm run build-deps:check && npm run typecheck && npm test && npm run licenses:check && npm run build",
+    "package:mac": "npm run build && electron-builder --mac dir",
+    "package:zip": "npm run build && electron-builder --mac zip",
+    "dist:mac": "npm run build && electron-builder --mac zip dmg",
+    "dist:win": "npm run build && electron-builder --win nsis",
+    "dist:linux": "npm run build && electron-builder --linux AppImage deb",
+    "smoke:package:launch": "node scripts/smoke-packaged-runtime.mjs launch",
+    "smoke:package:native": "node scripts/smoke-packaged-runtime.mjs native",
+    "smoke:package:mac": "node scripts/smoke-packaged-pty.mjs"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.23",
+    "@ai-sdk/google": "^4.0.27",
+    "@ai-sdk/mcp": "^2.0.18",
+    "@ai-sdk/openai": "^4.0.23",
+    "@ai-sdk/openai-compatible": "^3.0.16",
+    "@ai-sdk/provider-utils": "^5.0.14",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/xterm": "^6.0.0",
+    "ai": "^7.0.41",
+    "diff": "^8.0.2",
+    "lucide-react": "^1.27.0",
+    "node-pty": "^1.1.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@electron/asar": "3.4.1",
+    "@types/diff": "^7.0.2",
+    "@types/node": "^24.10.0",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@vitejs/plugin-react": "^5.2.0",
+    "brace-expansion-modern": "npm:brace-expansion@5.0.8",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "typescript": "^6.0.3",
+    "vite": "^7.3.6",
+    "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "brace-expansion": "file:vendor/brace-expansion-compat"
+  },
+  "build": {
+    "appId": "app.ground.desktop",
+    "productName": "Ground",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/node-pty/**/*"
+    ],
+    "extraResources": [
+      "LICENSE",
+      "THIRD_PARTY_NOTICES.md",
+      {
+        "from": "node_modules/electron/dist/LICENSE",
+        "to": "LICENSE.electron.txt"
+      },
+      {
+        "from": "node_modules/electron/dist/LICENSES.chromium.html",
+        "to": "LICENSES.chromium.html"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
+      "target": [
+        "dir"
+      ],
+      "hardenedRuntime": true,
+      "artifactName": "Ground-${version}-mac-${arch}.${ext}"
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "Ground-${version}-windows-${arch}.${ext}"
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "category": "Development",
+      "maintainer": "Ground contributors <247020091+AlphaBetSoup789@users.noreply.github.com>",
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "artifactName": "Ground-${version}-linux-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false
+    }
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "24.18.0",
+      "onFail": "warn"
+    },
+    "packageManager": {
+      "name": "npm",
+      "version": "11.16.0",
+      "onFail": "error"
+    }
+  },
+  "packageManager": "npm@11.16.0",
+  "allowScripts": {
+    "electron-winstaller@5.4.0": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.1": true,
+    "fsevents": false,
+    "node-pty@1.1.0": true
+  }
+}

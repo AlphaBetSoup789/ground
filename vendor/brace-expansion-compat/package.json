@@ -1,0 +1,18 @@
+{
+  "name": "brace-expansion",
+  "version": "5.0.8",
+  "description": "Ground build-only CommonJS compatibility bridge for brace-expansion 5.0.8.",
+  "main": "./index.cjs",
+  "exports": {
+    ".": {
+      "import": "./index.cjs",
+      "require": "./index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "node": "20 || >=22"
+  }
+}
