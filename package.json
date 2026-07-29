@@ -4,6 +4,7 @@
   "private": true,
   "description": "The open workspace for coding agents.",
   "main": "./out/main/index.js",
+  "desktopName": "app.ground",
   "author": {
     "name": "Ground contributors",
     "email": "247020091+AlphaBetSoup789@users.noreply.github.com",
@@ -37,11 +38,11 @@
     "build:preview": "vite build --config vite.preview.config.ts",
     "preview": "vite preview --config vite.preview.config.ts",
     "verify": "npm run install-scripts:check && npm run build-deps:check && npm run typecheck && npm test && npm run licenses:check && npm run build",
-    "package:mac": "npm run build && electron-builder --mac dir",
-    "package:zip": "npm run build && electron-builder --mac zip",
-    "dist:mac": "npm run build && electron-builder --mac zip dmg",
-    "dist:win": "npm run build && electron-builder --win nsis",
-    "dist:linux": "npm run build && electron-builder --linux AppImage deb",
+    "package:mac": "npm run build && electron-builder --mac dir --publish never",
+    "package:zip": "npm run build && electron-builder --mac zip --publish never",
+    "dist:mac": "npm run build && electron-builder --mac zip dmg --publish never",
+    "dist:win": "npm run build && electron-builder --win nsis --publish never",
+    "dist:linux": "npm run build && electron-builder --linux AppImage deb --publish never",
     "smoke:package:launch": "node scripts/smoke-packaged-runtime.mjs launch",
     "smoke:package:native": "node scripts/smoke-packaged-runtime.mjs native",
     "smoke:package:mac": "node scripts/smoke-packaged-pty.mjs"
@@ -130,6 +131,7 @@
       "icon": "build/icon.png",
       "category": "Development",
       "maintainer": "Ground contributors <247020091+AlphaBetSoup789@users.noreply.github.com>",
+      "syncDesktopName": true,
       "target": [
         "AppImage",
         "deb"
