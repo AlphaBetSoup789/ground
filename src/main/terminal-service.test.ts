@@ -153,11 +153,35 @@ describe('terminal workspace and process boundary', () => {
         cwd: canonical,
         cols: 120,
         rows: 40,
-        name: 'xterm-256color',
-        encoding: 'utf8'
+        name: 'xterm-256color'
       }
     })
+    if (process.platform === 'win32') {
+      expect(factory.calls[0]?.options).not.toHaveProperty('encoding')
+    } else {
+      expect(factory.calls[0]?.options.encoding).toBe('utf8')
+    }
   })
+
+  it.each([
+    { platform: 'win32' as const, expectedEncoding: undefined },
+    { platform: 'linux' as const, expectedEncoding: 'utf8' as const }
+  ])(
+    'uses supported PTY encoding options on $platform',
+    async ({ platform, expectedEncoding }) => {
+      const root = await workspace()
+      const factory = new FakePtyFactory()
+      const service = testService(root, factory, { platform })
+
+      await service.createForWorkspace(root)
+
+      if (expectedEncoding === undefined) {
+        expect(factory.calls[0]?.options).not.toHaveProperty('encoding')
+      } else {
+        expect(factory.calls[0]?.options.encoding).toBe(expectedEncoding)
+      }
+    }
+  )
 
   it('does not spawn when the workspace authorizer rejects the renderer path', async () => {
     const root = await workspace()

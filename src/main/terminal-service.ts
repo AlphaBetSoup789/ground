@@ -22,7 +22,7 @@ export interface TerminalPtySpawnOptions extends TerminalDimensions {
   name: string
   cwd: string
   env: Record<string, string>
-  encoding: 'utf8'
+  encoding?: 'utf8'
 }
 
 export interface TerminalDisposable {
@@ -497,7 +497,7 @@ export class TerminalService {
           : this.ptyFactory
       if (this.closed) throw new Error('Terminal service is disposed')
 
-      pty = factory.spawn(shell.executable, [...shell.args], {
+      const spawnOptions: TerminalPtySpawnOptions = {
         name: 'xterm-256color',
         cols,
         rows,
@@ -507,9 +507,17 @@ export class TerminalService {
           this.platform,
           shell.executable,
           canonicalWorkspace
-        ),
-        encoding: 'utf8'
-      })
+        )
+      }
+      // node-pty always emits UTF-8 strings on Windows and warns when its
+      // unsupported encoding option is present. POSIX accepts the explicit
+      // encoding and uses it for both sides of the pseudoterminal.
+      if (this.platform !== 'win32') spawnOptions.encoding = 'utf8'
+      pty = factory.spawn(
+        shell.executable,
+        [...shell.args],
+        spawnOptions
+      )
 
       const id = this.allocateId()
       const state: InternalSession = {

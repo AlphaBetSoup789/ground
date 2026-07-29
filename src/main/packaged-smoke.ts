@@ -208,6 +208,7 @@ async function smokeTerminal(workspace: string): Promise<void> {
     "  process.stdout.write('ground-packaged-pty-ok\\n');",
     '  process.exit(0);',
     '});',
+    "process.stdout.write('ground-packaged-pty-ready\\n');",
     'setInterval(() => {}, 1000);'
   ].join('\n')
   const ptyFactory = async (): Promise<TerminalPtyFactory> => {
@@ -253,10 +254,16 @@ async function smokeTerminal(workspace: string): Promise<void> {
       rows: 24
     })
     let output = ''
+    let resolveReady: (() => void) | undefined
+    let rejectReady: ((error: Error) => void) | undefined
     let resolveMarker: (() => void) | undefined
     let rejectMarker: ((error: Error) => void) | undefined
     let resolveExit: (() => void) | undefined
     let rejectExit: ((error: Error) => void) | undefined
+    const ready = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve
+      rejectReady = reject
+    })
     const marker = new Promise<void>((resolve, reject) => {
       resolveMarker = resolve
       rejectMarker = reject
@@ -268,6 +275,7 @@ async function smokeTerminal(workspace: string): Promise<void> {
     const subscription = service.subscribe(session.id, {
       onData: (event) => {
         output = `${output}${event.data}`.slice(-16_384)
+        if (output.includes('ground-packaged-pty-ready')) resolveReady?.()
         if (output.includes('ground-packaged-pty-ok')) resolveMarker?.()
       },
       onExit: (event) => {
@@ -277,6 +285,7 @@ async function smokeTerminal(workspace: string): Promise<void> {
               event.exitCode
             )})`
           )
+          rejectReady?.(error)
           rejectMarker?.(error)
           rejectExit?.(error)
         } else if (event.exitCode !== 0) {
@@ -289,6 +298,7 @@ async function smokeTerminal(workspace: string): Promise<void> {
       }
     })
     try {
+      await waitFor('Packaged PTY readiness', ready, 12_000)
       service.sendInput(session.id, 'ground-packaged-pty-input\r')
       await waitFor(
         'Packaged PTY marker and exit',
