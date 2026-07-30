@@ -117,6 +117,16 @@ repository before mutation, and exposes undo only while affected paths still mat
 That protects against accidental loss in the reviewed file set; it is not a general
 repository backup or rollback mechanism.
 
+The structured diff's reviewed-hunk-to-prompt action remains entirely in the
+renderer and cannot mutate Git. It accepts only one complete, non-truncated,
+bounded active hunk, marks the captured workspace text as untrusted and
+potentially stale, visibly escapes presentation controls, and appends it to the
+exact source task's unsent local draft. A task-selection epoch and composer task
+identity prevent delayed focus from targeting a different task. Workspace text
+can still contain secrets or semantic prompt injection; the user must review the
+editable draft and explicitly Send before the existing provider-egress boundary
+is crossed.
+
 ## Implemented controls
 
 - Packaged renderer content is local; development origins are loopback-only.

@@ -10,9 +10,14 @@ import {
   ChevronLeft,
   ChevronRight,
   Code2,
-  FileCode2
+  FileCode2,
+  MessageSquarePlus
 } from 'lucide-react'
 import type { GitDiffResult } from '../../../shared/types'
+import {
+  createDiffFollowupBlockFromParsedHunk,
+  type DiffFollowupSource
+} from '../lib/diff-followup'
 import {
   parseUnifiedDiff,
   safeDiffDisplayText,
@@ -27,6 +32,8 @@ import {
 const INITIAL_VISIBLE_LINES = 1_200
 const VISIBLE_LINE_INCREMENT = 1_200
 const MAX_VISIBLE_METADATA_LINES = 20
+const FOLLOWUP_STATUS =
+  'Hunk added to this task’s draft. Review it before sending; nothing was sent.'
 
 const STATUS_LABELS = {
   modified: 'Modified',
@@ -64,6 +71,8 @@ const ISSUE_MESSAGES = {
 interface DiffReviewProps {
   title: string
   diff: GitDiffResult
+  source: DiffFollowupSource
+  onAddHunkToPrompt?: (block: string) => void
 }
 
 interface DiffFileEntry {
@@ -88,9 +97,13 @@ export function DiffReview(props: DiffReviewProps): React.JSX.Element {
     INITIAL_VISIBLE_LINES
   )
   const [activeHunkIndex, setActiveHunkIndex] = useState(0)
+  const [followupActivationCount, setFollowupActivationCount] =
+    useState(0)
   const fileButtons = useRef<Array<HTMLButtonElement | null>>([])
   const hunkHeadings = useRef(new Map<string, HTMLHeadingElement>())
   const titleId = useId()
+  const followupDescriptionId = useId()
+  const followupStatusId = useId()
 
   const selectedEntry =
     fileEntries.find(
@@ -114,11 +127,13 @@ export function DiffReview(props: DiffReviewProps): React.JSX.Element {
     setRawVisible(false)
     setVisibleLineLimit(INITIAL_VISIBLE_LINES)
     setActiveHunkIndex(0)
+    setFollowupActivationCount(0)
   }, [props.diff.text])
 
   useEffect(() => {
     setVisibleLineLimit(INITIAL_VISIBLE_LINES)
     setActiveHunkIndex(0)
+    setFollowupActivationCount(0)
   }, [selectedFile?.id])
 
   const selectFile = (index: number, moveFocus = false): void => {
@@ -160,6 +175,7 @@ export function DiffReview(props: DiffReviewProps): React.JSX.Element {
     if (!target) return
     setActiveHunkIndex(boundedIndex)
     setVisibleLineLimit(INITIAL_VISIBLE_LINES)
+    setFollowupActivationCount(0)
     requestAnimationFrame(() => hunkHeadings.current.get(target.id)?.focus())
   }
 
@@ -181,6 +197,25 @@ export function DiffReview(props: DiffReviewProps): React.JSX.Element {
     0,
     selectedLineCount - visibleLineLimit
   )
+  const followup = activeHunk && selectedFile
+    ? createDiffFollowupBlockFromParsedHunk({
+        source: props.source,
+        path:
+          selectedFile.newPath ??
+          selectedFile.oldPath ??
+          selectedFile.displayPath,
+        reviewComplete:
+          !props.diff.truncated &&
+          !parsed.inputTruncated &&
+          selectedFile.structured &&
+          selectedFile.issue === undefined,
+        hunk: activeHunk
+      })
+    : undefined
+  const followupUnavailable =
+    followup && !followup.eligible
+      ? diffFollowupUnavailableMessage(followup.reason)
+      : undefined
 
   return (
     <section className="git-diff-review" aria-labelledby={titleId}>
@@ -320,6 +355,63 @@ export function DiffReview(props: DiffReviewProps): React.JSX.Element {
                       >
                         <ChevronRight size={13} aria-hidden="true" />
                       </button>
+                      {props.onAddHunkToPrompt ? (
+                        <button
+                          className="git-diff-add-prompt"
+                          type="button"
+                          disabled={!followup?.eligible}
+                          aria-describedby={`${followupDescriptionId} ${followupStatusId}`}
+                          aria-label={`Add ${
+                            props.source === 'staged'
+                              ? 'staged'
+                              : 'working-tree'
+                          } hunk ${displayedHunkIndex + 1} from ${
+                            selectedFile.displayPath
+                          } (${safeDiffDisplayText(
+                            activeHunk?.header ?? ''
+                          )}) to prompt`}
+                          title={followupUnavailable}
+                          onClick={() => {
+                            if (!followup?.eligible) return
+                            props.onAddHunkToPrompt?.(followup.block)
+                            setFollowupActivationCount(
+                              (current) => current + 1
+                            )
+                          }}
+                        >
+                          <MessageSquarePlus
+                            size={13}
+                            aria-hidden="true"
+                          />
+                          Add hunk to prompt
+                        </button>
+                      ) : null}
+                      <span
+                        className={
+                          followupUnavailable
+                            ? 'git-diff-prompt-note'
+                            : 'visually-hidden'
+                        }
+                        id={followupDescriptionId}
+                        role="note"
+                      >
+                        {followupUnavailable ??
+                          'Adds the complete selected hunk as untrusted workspace context to this task’s editable draft. Nothing is sent.'}
+                      </span>
+                      <span
+                        className="visually-hidden"
+                        id={followupStatusId}
+                        role="status"
+                        aria-live="polite"
+                      >
+                        {followupActivationCount > 0
+                          ? `${FOLLOWUP_STATUS} Added ${followupActivationCount} ${
+                              followupActivationCount === 1
+                                ? 'time'
+                                : 'times'
+                            } from this selection.`
+                          : ''}
+                      </span>
                     </div>
                     <DiffTable
                       file={selectedFile}
@@ -655,6 +747,18 @@ function lineLabel(line: UnifiedDiffLine): string {
 
 function plural(count: number, singular: string): string {
   return `${count} ${singular}${count === 1 ? '' : 's'}`
+}
+
+function diffFollowupUnavailableMessage(
+  reason: 'incomplete-hunk' | 'empty-hunk' | 'oversized'
+): string {
+  if (reason === 'oversized') {
+    return 'This hunk is too large to add to one message draft.'
+  }
+  if (reason === 'empty-hunk') {
+    return 'This hunk has no line content to add to a message draft.'
+  }
+  return 'Only a complete, non-truncated hunk can be added to a message draft.'
 }
 
 function formatBytes(bytes: number): string {

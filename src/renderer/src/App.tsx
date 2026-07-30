@@ -33,6 +33,11 @@ import {
   taskMatchesAskToAgentHandoff,
   type AskToAgentHandoffSource
 } from './lib/ask-agent-handoff'
+import {
+  appendDiffFollowupDraft,
+  canAppendDiffFollowupBlock,
+  shouldFocusDiffFollowupComposer
+} from './lib/diff-followup'
 import { updateTaskDraft, type TaskDrafts } from './lib/task-drafts'
 import { Sidebar } from './components/Sidebar'
 import { TaskView } from './components/TaskView'
@@ -61,6 +66,7 @@ export default function App(): React.JSX.Element {
   const pendingRefreshesRef = useRef(0)
   const snapshotRef = useRef<AppSnapshot | undefined>(undefined)
   const selectedTaskIdRef = useRef<string | undefined>(undefined)
+  const selectedTaskEpochRef = useRef(0)
   const pendingAskToAgentHandoffsRef = useRef(new Set<string>())
   const taskMutationRevisionRef = useRef(new Map<string, number>())
   const activeTaskMutationsRef = useRef(new Map<string, number>())
@@ -218,7 +224,10 @@ export default function App(): React.JSX.Element {
     )
   }, [snapshot])
   snapshotRef.current = snapshot
-  selectedTaskIdRef.current = selectedTask?.id
+  if (selectedTaskIdRef.current !== selectedTask?.id) {
+    selectedTaskEpochRef.current += 1
+    selectedTaskIdRef.current = selectedTask?.id
+  }
 
   const selectTask = useCallback(
     async (taskId: string) => {
@@ -397,6 +406,46 @@ export default function App(): React.JSX.Element {
       }
     },
     [updateTask]
+  )
+
+  const addHunkToPrompt = useCallback(
+    (taskId: string, block: string): void => {
+      const sourceTaskExists = Boolean(
+        snapshotRef.current?.tasks.some((task) => task.id === taskId)
+      )
+      if (!canAppendDiffFollowupBlock(block, sourceTaskExists)) {
+        return
+      }
+      setTaskDrafts((current) =>
+        updateTaskDraft(
+          current,
+          taskId,
+          appendDiffFollowupDraft(current[taskId] ?? '', block)
+        )
+      )
+      if (selectedTaskIdRef.current !== taskId) return
+      const selectionEpoch = selectedTaskEpochRef.current
+      window.requestAnimationFrame(() => {
+        const composer =
+          document.querySelector<HTMLTextAreaElement>(
+            '#task-message-composer'
+          )
+        if (
+          composer &&
+          shouldFocusDiffFollowupComposer({
+            sourceTaskId: taskId,
+            requestedSelectionEpoch: selectionEpoch,
+            selectedTaskId: selectedTaskIdRef.current,
+            currentSelectionEpoch: selectedTaskEpochRef.current,
+            composerTaskId: composer.dataset.taskId,
+            composerDisabled: composer.disabled
+          })
+        ) {
+          composer.focus()
+        }
+      })
+    },
+    []
   )
 
   const acceptCreatedTask = useCallback((task: DesktopTask) => {
@@ -792,6 +841,7 @@ export default function App(): React.JSX.Element {
             onSetArchived={(archived) => void setTaskArchived(archived)}
             onExportTask={(format) => void exportTask(format)}
             onDeleteTask={() => void deleteTask()}
+            onAddHunkToPrompt={addHunkToPrompt}
             onTaskCreated={acceptCreatedTask}
             onWorkspaceTasksChanged={() => void refresh()}
             onError={showError}

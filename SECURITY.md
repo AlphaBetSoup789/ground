@@ -372,6 +372,11 @@ security recipient, before the first supported release.
 - Staging and unstaging accept selected literal paths only, reject repository-wide
   and VCS-metadata mutations, recheck eligibility after a native default-cancel
   confirmation, and never overwrite working-tree files.
+- Adding a reviewed Git hunk to a prompt is not a Git operation. The renderer
+  accepts only a complete non-truncated active hunk, builds one visibly escaped
+  untrusted-workspace context block of at most 32,000 characters, and appends it
+  to the exact source task's unsent process-local draft. It does not invoke a
+  provider, tool, approval, or Git mutation; explicit Send remains required.
 - Commits bind the exact prepared index tree, repository/worktree identities,
   expected parent, and exact checked-out symbolic local ref. Detached-HEAD commits
   are refused. They use a non-dereferencing compare-and-swap update, and disable

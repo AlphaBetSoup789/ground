@@ -1,12 +1,17 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
-import type { GitRecoverySummary, GitStatusSummary } from '../../../shared/types'
+import type {
+  GitOverview,
+  GitRecoverySummary,
+  GitStatusSummary
+} from '../../../shared/types'
 
 vi.mock('../lib/desktop', () => ({ desktop: {} }))
 
 import {
   eligibleGitRestorePaths,
+  gitOverviewForTask,
   GitRecoveryActions,
   RecoveryRequiredNotice
 } from './GitPanel'
@@ -28,6 +33,22 @@ function recovery(
 }
 
 describe('GitPanel recoverable restore presentation', () => {
+  it('never exposes an overview loaded for a different task', () => {
+    const overview: GitOverview = {
+      isRepository: true,
+      commits: [],
+      historyTruncated: false,
+      worktrees: [],
+      recoveries: [],
+      recoveriesTruncated: false
+    }
+    const loaded = { taskId: 'source-task', overview }
+
+    expect(gitOverviewForTask(loaded, 'source-task')).toBe(overview)
+    expect(gitOverviewForTask(loaded, 'other-task')).toBeUndefined()
+    expect(gitOverviewForTask(undefined, 'source-task')).toBeUndefined()
+  })
+
   it('offers only eligible modified and untracked paths', () => {
     const status: GitStatusSummary = {
       branch: 'main',

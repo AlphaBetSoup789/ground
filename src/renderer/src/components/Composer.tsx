@@ -94,6 +94,7 @@ export function Composer(props: ComposerProps): React.JSX.Element {
         <textarea
           ref={textareaRef}
           id="task-message-composer"
+          data-task-id={props.task.id}
           value={props.draft}
           onChange={(event) => props.onDraftChange(event.target.value)}
           onKeyDown={(event) => {

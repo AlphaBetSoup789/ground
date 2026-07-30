@@ -57,6 +57,8 @@ are not necessarily release-certified.
   support, and reduced-motion behavior
 - [x] Reviewable Ask-to-Agent handoff that awaits the mode change, preserves
   task-local drafts, and requires explicit Send before any run or provider egress
+- [x] Bounded reviewed-hunk-to-prompt handoff that preserves the source task's
+  editable draft and requires explicit Send before provider egress
 - [x] Cross-platform CI renderer interaction suite in Electron for keyboard/focus,
   provider-form validation, local-provider refusal recovery, drafts, cancellation,
   archive/search, responsive settings, forced colors, and reduced-motion behavior

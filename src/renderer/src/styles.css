@@ -3245,6 +3245,23 @@ kbd {
   background: rgba(216, 255, 125, 0.045);
 }
 
+.git-diff-hunk-navigation .git-diff-add-prompt {
+  width: auto;
+  gap: 5px;
+  padding-right: 9px;
+  padding-left: 9px;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.git-diff-prompt-note {
+  width: 100%;
+  padding: 2px 1px 3px;
+  color: var(--amber);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
 .git-diff-hunk-position {
   min-width: 0;
   flex: 1;
@@ -7240,6 +7257,10 @@ kbd,
   .git-diff-hunk-partial {
     border: 1px solid currentColor;
     background: Canvas;
+  }
+
+  .git-diff-prompt-note {
+    color: CanvasText;
   }
 
   .git-diff-hunk-row {

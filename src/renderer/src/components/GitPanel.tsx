@@ -43,6 +43,7 @@ type GitPanelTab = 'changes' | 'history' | 'worktrees'
 interface GitPanelProps {
   taskId: string
   workspaceReady: boolean
+  onAddHunkToPrompt: (taskId: string, block: string) => void
   onTaskCreated: (task: DesktopTask) => void
   onWorkspaceTasksChanged: () => void
   onError: (error: unknown) => void
@@ -73,7 +74,11 @@ const TABS: ReadonlyArray<{
 
 export function GitPanel(props: GitPanelProps): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<GitPanelTab>('changes')
-  const [overview, setOverview] = useState<GitOverview>()
+  const [loadedOverview, setLoadedOverview] = useState<{
+    taskId: string
+    overview: GitOverview
+  }>()
+  const overview = gitOverviewForTask(loadedOverview, props.taskId)
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<LoadError>()
   const [branch, setBranch] = useState('')
@@ -100,18 +105,21 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
     async (clearCurrent = false): Promise<void> => {
       const request = ++requestVersion.current
       if (!props.workspaceReady) {
-        setOverview(undefined)
+        setLoadedOverview(undefined)
         setLoadError(undefined)
         setLoading(false)
         return
       }
-      if (clearCurrent) setOverview(undefined)
+      if (clearCurrent) setLoadedOverview(undefined)
       setLoading(true)
       setLoadError(undefined)
       try {
         const nextOverview = await desktop.getGitOverview(props.taskId)
         if (request === requestVersion.current) {
-          setOverview(nextOverview)
+          setLoadedOverview({
+            taskId: props.taskId,
+            overview: nextOverview
+          })
           setAuthorName((current) => current || nextOverview.identity?.name || '')
           setAuthorEmail((current) => current || nextOverview.identity?.email || '')
           const eligibleRestorePaths = new Set(
@@ -602,6 +610,9 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
                 onRestore={(paths) => void restorePaths(paths)}
                 onUndoRecovery={(recoveryId) => void undoRecovery(recoveryId)}
                 onCommit={commitChanges}
+                onAddHunkToPrompt={(block) =>
+                  props.onAddHunkToPrompt(props.taskId, block)
+                }
               />
             )}
           </div>
@@ -648,6 +659,18 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
       ) : null}
     </section>
   )
+}
+
+export function gitOverviewForTask(
+  loaded:
+    | Readonly<{
+        taskId: string
+        overview: GitOverview
+      }>
+    | undefined,
+  taskId: string
+): GitOverview | undefined {
+  return loaded?.taskId === taskId ? loaded.overview : undefined
 }
 
 function RepositorySummary(props: {
@@ -744,6 +767,7 @@ function ChangesView(props: {
   onRestore: (paths: string[]) => void
   onUndoRecovery: (recoveryId: string) => void
   onCommit: (event: React.FormEvent<HTMLFormElement>) => Promise<void>
+  onAddHunkToPrompt: (block: string) => void
 }): React.JSX.Element {
   const { overview } = props
   const status = overview.status
@@ -909,10 +933,20 @@ function ChangesView(props: {
 
       <div className="git-diff-stack">
         {overview.stagedDiff?.text && (
-          <DiffReview title="Staged diff" diff={overview.stagedDiff} />
+          <DiffReview
+            title="Staged diff"
+            diff={overview.stagedDiff}
+            source="staged"
+            onAddHunkToPrompt={props.onAddHunkToPrompt}
+          />
         )}
         {overview.unstagedDiff?.text && (
-          <DiffReview title="Working tree diff" diff={overview.unstagedDiff} />
+          <DiffReview
+            title="Working tree diff"
+            diff={overview.unstagedDiff}
+            source="working"
+            onAddHunkToPrompt={props.onAddHunkToPrompt}
+          />
         )}
         {!hasDiff && status?.untracked.length ? (
           <p className="git-diff-note">

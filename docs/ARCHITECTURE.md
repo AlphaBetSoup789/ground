@@ -109,6 +109,18 @@ explicit Send, exact provider readiness, and the normal managed approvals or
 disclosed native CLI permission policy. Model and native runtime continuation
 records remain mode-bound and are not reused across the handoff.
 
+Structured Git review can also append the active complete hunk to an unsent
+task-local composer draft. The renderer formats the current parsed hunk
+synchronously, labels its staged/working provenance, visibly escapes hostile
+presentation text, and refuses incomplete, truncated, or over-32,000-character
+blocks rather than slicing them. Each loaded Git overview is retained with its
+source task ID, hidden on any task mismatch, and remounted across task changes.
+The callback carries that exact source task ID; delayed focus additionally binds
+the current task-selection epoch and the composer's task identity. This is review
+context only: it adds no Git, IPC, provider, approval, or persistence authority,
+and provider egress still requires an explicit Send through the normal run-start
+boundary.
+
 Provider configuration has a separate persisted readiness state. Saving creates an
 unverified provider revision. **Test** can persist `passed` or `failed` only when
 the submitted form still exactly matches the complete configuration fingerprint,

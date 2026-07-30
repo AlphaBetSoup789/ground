@@ -2,9 +2,14 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type { GitDiffResult } from '../../../shared/types'
+import type { DiffFollowupSource } from '../lib/diff-followup'
 import { DiffReview } from './DiffReview'
 
-function render(text: string, truncated = false): string {
+function render(
+  text: string,
+  truncated = false,
+  source: DiffFollowupSource = 'working'
+): string {
   const diff: GitDiffResult = {
     text,
     truncated,
@@ -13,9 +18,17 @@ function render(text: string, truncated = false): string {
   return renderToStaticMarkup(
     createElement(DiffReview, {
       title: 'Working tree diff',
-      diff
+      diff,
+      source,
+      onAddHunkToPrompt: () => undefined
     })
   )
+}
+
+function addPromptButton(markup: string): string | undefined {
+  return markup.match(
+    /<button class="git-diff-add-prompt"[^>]*>/u
+  )?.[0]
 }
 
 describe('structured diff review', () => {
@@ -51,6 +64,10 @@ diff --git a/src/styles.css b/src/styles.css
     expect(markup).toContain('aria-label="Previous hunk"')
     expect(markup).toContain('aria-label="Next hunk"')
     expect(markup).toContain('aria-label="Hunk 1 of 1:')
+    expect(markup).toContain('Add hunk to prompt')
+    expect(markup).toContain(
+      'aria-label="Add working-tree hunk 1 from src/App.tsx'
+    )
     expect(markup).toContain('Deleted line 1: ')
     expect(markup).toContain('Added line 1: ')
     expect(markup).toContain('Show exact raw patch')
@@ -74,6 +91,7 @@ Binary files a/${dangerousPath} and b/${dangerousPath} differ
       'Presentation controls are shown as visible Unicode escapes.'
     )
     expect(binaryMarkup).toContain('Copy exact raw patch')
+    expect(binaryMarkup).not.toContain('Add hunk to prompt')
     expect(binaryMarkup).not.toContain(dangerousPath)
   })
 
@@ -102,6 +120,10 @@ ${additions}
     expect(markup).toContain('Hunk 1 of 2')
     expect(markup).toContain(
       'Diff capture stopped at Ground’s output safety limit.'
+    )
+    expect(addPromptButton(markup)).toContain('disabled=""')
+    expect(markup).toContain(
+      'Only a complete, non-truncated hunk can be added to a message draft.'
     )
   })
 
@@ -137,5 +159,95 @@ ${additions}
 
     expect(markup.match(/role="option"/gu)).toHaveLength(2)
     expect(markup.match(/aria-selected="true"/gu)).toHaveLength(1)
+  })
+
+  it('labels staged provenance and refuses incomplete or oversized prompt blocks', () => {
+    const staged = render(`diff --git a/src/app.ts b/src/app.ts
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -1 +1 @@
+-old
++new
+`, false, 'staged')
+    expect(staged).toContain(
+      'aria-label="Add staged hunk 1 from src/app.ts'
+    )
+    expect(staged).toMatch(
+      /<button class="git-diff-add-prompt" type="button" aria-describedby=/u
+    )
+
+    const incomplete = render(`diff --git a/src/app.ts b/src/app.ts
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -1,2 +1,2 @@
+-old
++new
+`)
+    expect(addPromptButton(incomplete)).toContain('disabled=""')
+    expect(incomplete).toContain(
+      'Only a complete, non-truncated hunk can be added to a message draft.'
+    )
+
+    const hostileLine = `+\u0000${'x'.repeat(31_999)}`
+    const oversized = render(`diff --git a/src/app.ts b/src/app.ts
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -0,0 +1 @@
+${hostileLine}
+`)
+    expect(addPromptButton(oversized)).toContain('disabled=""')
+    expect(oversized).toContain(
+      'This hunk is too large to add to one message draft.'
+    )
+  })
+
+  it('refuses empty hunks and complete hunks in a file with a sibling issue', () => {
+    const empty = render(`diff --git a/src/app.ts b/src/app.ts
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -1,0 +1,0 @@
+`)
+    expect(addPromptButton(empty)).toContain('disabled=""')
+    expect(empty).toContain(
+      'This hunk has no line content to add to a message draft.'
+    )
+
+    const siblingIssue = render(`diff --git a/src/app.ts b/src/app.ts
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -1 +1 @@
+-old
++new
+@@ -4,2 +4,2 @@
+-incomplete
++replacement
+`)
+    expect(siblingIssue).toContain('Hunk 1 of 2')
+    expect(addPromptButton(siblingIssue)).toContain('disabled=""')
+    expect(siblingIssue).toContain(
+      'Only a complete, non-truncated hunk can be added to a message draft.'
+    )
+  })
+
+  it.each([
+    `diff --cc src/app.ts
+index 1111111,2222222..3333333
+--- a/src/app.ts
++++ b/src/app.ts
+@@@ -1,1 -1,1 +1,1 @@@
+- old
++ new
+`,
+    `diff --git a/src/app.ts b/src/app.ts
+unsupported metadata
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -1 +1 @@
+-old
++new
+`,
+    'not a unified patch'
+  ])('does not expose a prompt action for raw-only fallback', (text) => {
+    expect(render(text)).not.toContain('Add hunk to prompt')
   })
 })

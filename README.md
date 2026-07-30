@@ -98,10 +98,10 @@ conformance runner; npm publication remains a separate maintainer release step.
   archived task history
 - Interactive, multi-session task terminals backed by a real local PTY
 - Git branch/status, structured per-file staged and unstaged diff review with
-  keyboard hunk navigation and an exact raw-patch fallback, path
-  staging/unstaging, exact-tree commits bound to the exact approved checked-out
-  local branch, bounded history, recoverable selected-file restore/undo, and
-  managed-worktree create/remove
+  keyboard hunk navigation, a bounded reviewed-hunk-to-editable-prompt action,
+  and an exact raw-patch fallback, path staging/unstaging, exact-tree commits
+  bound to the exact approved checked-out local branch, bounded history,
+  recoverable selected-file restore/undo, and managed-worktree create/remove
 - Remote Streamable HTTP and local stdio MCP servers with namespaced tools,
   launch and definition trust, and per-call approval
 - Native session-resume support for recognized Codex, Claude, Gemini, and
@@ -528,6 +528,15 @@ the raw view. Hostile presentation controls are shown there as visible Unicode
 escapes, with an explicit copy-exact action for the underlying captured text.
 Large structured patches are disclosed incrementally instead of mounting every
 line at once.
+
+For a complete structured hunk, **Add hunk to prompt** appends only that active
+hunk to the exact task's process-local editable draft. The block records staged
+or working-tree provenance, the parsed path reported by Git, and visibly escaped
+captured lines under an explicit whole-block
+untrusted-and-potentially-stale-workspace-text label. The complete block must fit
+32,000 characters and is never sliced. This action does not send a message,
+contact a provider, approve an operation, or change Git; the user can edit the
+draft and must press **Send** separately.
 
 The panel can stage or unstage selected paths, commit the exact prepared index
 tree, create a branch in a dedicated managed worktree and open it as a new task,

@@ -60,6 +60,7 @@ interface TaskViewProps {
   onSetArchived: (archived: boolean) => void
   onExportTask: (format: TaskExportFormat) => void
   onDeleteTask: () => void
+  onAddHunkToPrompt: (taskId: string, block: string) => void
   onTaskCreated: (task: DesktopTask) => void
   onWorkspaceTasksChanged: () => void
   onError: (error: unknown) => void
@@ -528,8 +529,10 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
             />
           ) : (
             <GitPanel
+              key={props.task.id}
               taskId={props.task.id}
               workspaceReady={Boolean(props.task.workspace)}
+              onAddHunkToPrompt={props.onAddHunkToPrompt}
               onTaskCreated={props.onTaskCreated}
               onWorkspaceTasksChanged={props.onWorkspaceTasksChanged}
               onError={props.onError}
