@@ -350,8 +350,9 @@ current-result keyboard activation, request-bound narrow-sidebar focus, provider
 labels and Chromium constraint validation, local-template/refused-connection
 recovery into a detected CLI, task-local, active-run, and failed-run draft
 preparation, Ask-to-Agent and reviewed-hunk handoffs, paused-streaming
-reading-position recovery, structured Git diff navigation with finished-run
-refresh, failure/retry, late-task isolation, and review-position retention,
+reading-position recovery across later sends and responsive reconciliation,
+structured Git diff navigation with finished-run refresh, failure/retry,
+late-task isolation, and review-position retention,
 deterministic send/cancel, archive and archived search, and 680px responsive
 settings with reduced motion plus forced-color connection-path selection. CI is
 configured to run it directly on macOS/Windows and under Xvfb on Linux. Because

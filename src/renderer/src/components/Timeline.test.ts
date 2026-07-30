@@ -8,6 +8,7 @@ import type {
 } from '../../../shared/types'
 import {
   shouldApplyTimelineJump,
+  shouldContinueTimelineFollow,
   shouldFollowTimeline,
   shouldOfferTimelineJump,
   Timeline,
@@ -108,6 +109,23 @@ describe('timeline output following', () => {
       shouldFollowTimeline({
         clientHeight: 600,
         scrollHeight: 1_600,
+        scrollTop: 919
+      })
+    ).toBe(false)
+  })
+
+  it('keeps a reader pause sticky until an explicit jump resumes it', () => {
+    const nearLatest = {
+      clientHeight: 600,
+      scrollHeight: 1_600,
+      scrollTop: 920
+    }
+
+    expect(shouldContinueTimelineFollow(true, nearLatest)).toBe(true)
+    expect(shouldContinueTimelineFollow(false, nearLatest)).toBe(false)
+    expect(
+      shouldContinueTimelineFollow(true, {
+        ...nearLatest,
         scrollTop: 919
       })
     ).toBe(false)

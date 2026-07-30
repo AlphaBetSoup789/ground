@@ -162,15 +162,17 @@ focus, and ignores execution keys during input-method composition. Streaming tex
 uses a separate batched polite announcement instead of repeatedly announcing the
 whole message, and the timeline follows new output only while the reader remains
 near the bottom. Scrolling away exposes **Jump to latest** without moving the
-viewport; keyboard activation returns to the exact current bottom, resumes
-following, and announces the change. The control and announcement state reset
-when the selected task changes. Unsent composer text is kept separately for each
-task for the current app process; it is not written to durable task state. While a
-task is running or waiting for approval, its textarea remains editable so the next
-prompt can be prepared. That text is not queued, sent, or used to steer the active
-run; the Stop control remains the only run action and `Ctrl/⌘ + Enter` is inert
-until the run finishes. When the latest retained run ends with **Run failed**,
-**Prepare retry** can copy only that run's exact non-imported user message into an
+viewport. Follow remains paused through later messages and responsive layout
+changes until keyboard or pointer activation returns to the exact current bottom,
+resumes following, and announces the change. The control and announcement state
+reset when the selected task changes. Unsent composer text is kept separately for
+each task for the current app process; it is not written to durable task state.
+While a task is running or waiting for approval, its textarea remains editable so
+the next prompt can be prepared. That text is not queued, sent, or used to steer
+the active run; the Stop control remains the only run action and `Ctrl/⌘ + Enter`
+is inert until the run finishes. When the latest retained run ends with **Run
+failed**, **Prepare retry** can copy only that run's exact non-imported user
+message into an
 empty task-local draft. Existing draft bytes are preserved, outcome-unknown **Run
 interrupted** recovery is excluded, and no provider or runtime is contacted until
 the user reviews and explicitly sends the draft. Responsive layouts, forced-color

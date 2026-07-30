@@ -82,6 +82,13 @@ export function shouldOfferTimelineJump(
   )
 }
 
+export function shouldContinueTimelineFollow(
+  currentlyFollowing: boolean,
+  viewport: Pick<HTMLElement, 'clientHeight' | 'scrollHeight' | 'scrollTop'>
+): boolean {
+  return currentlyFollowing && shouldFollowTimeline(viewport)
+}
+
 export function shouldApplyTimelineJump(input: {
   requestedTaskId: string
   currentTaskId: string
@@ -317,7 +324,10 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
       const sourceTaskId = props.task.id
       if (taskIdRef.current !== sourceTaskId) return
 
-      followOutputRef.current = shouldFollowTimeline(timeline)
+      followOutputRef.current = shouldContinueTimelineFollow(
+        followOutputRef.current,
+        timeline
+      )
       updateTimelineJumpVisibility(
         timeline,
         shouldOfferTimelineJump(timeline)

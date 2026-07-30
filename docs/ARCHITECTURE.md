@@ -616,8 +616,9 @@ Assistant streaming remains visually live but uses a separate polite announcer
 that batches and normalizes bounded chunks. Timeline following is conditional on
 the viewport remaining near the latest output, preserving a reader’s scroll
 position. Leaving that threshold exposes a renderer-only **Jump to latest**
-control outside the live log. Activation moves the exact current task viewport to
-its current bottom, restores follow mode, transfers focus to the log, and emits a
+control outside the live log. Paused follow remains sticky through later content
+and geometry changes. Activation moves the exact current task viewport to its
+current bottom, restores follow mode, transfers focus to the log, and emits a
 separate polite status; task identity gates presentation and activation.
 Responsive styles, forced-color treatment, focus-visible states, and
 reduced-motion rules are part of the public-preview baseline; they are not a claim
