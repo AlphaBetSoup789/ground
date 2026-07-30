@@ -26,6 +26,40 @@ const mockRuns = new Map<
   }
 >()
 const timestamp = new Date().toISOString()
+const previewUnstagedDiff = `diff --git a/src/renderer/src/App.tsx b/src/renderer/src/App.tsx
+index 1234567..89abcde 100644
+--- a/src/renderer/src/App.tsx
++++ b/src/renderer/src/App.tsx
+@@ -42,5 +42,6 @@ export function App() {
+   const [ready, setReady] = useState(false)
+${' '}
++  // Ground keeps Git operations local.
+   useEffect(() => {
+     setReady(true)
+   }, [])
+diff --git a/src/renderer/src/styles.css b/src/renderer/src/styles.css
+index 2345678..9abcdef 100644
+--- a/src/renderer/src/styles.css
++++ b/src/renderer/src/styles.css
+@@ -84,4 +84,4 @@ button:focus-visible {
+-  outline: none;
++  outline: 2px solid currentColor;
+   outline-offset: 2px;
+   border-radius: 8px;
+ }
+@@ -6374,4 +6374,6 @@ @media (prefers-reduced-motion: reduce) {
+-  * {
+-    transition-duration: 0s;
++  *,
++  *::before,
++  *::after {
++    transition-duration: 0.01ms;
+   }
+ }
+\\ No newline at end of file`
+const previewUnstagedDiffBytes = new TextEncoder().encode(
+  previewUnstagedDiff
+).byteLength
 const previewWorkspace = {
   id: 'workspace_00000000-0000-4000-8000-000000000001',
   name: 'acme-dashboard'
@@ -684,19 +718,17 @@ const mockApi: DesktopApi = {
       branch: 'main',
       detached: false,
       staged: [],
-      unstaged: ['src/renderer/src/App.tsx'],
+      unstaged: [
+        'src/renderer/src/App.tsx',
+        'src/renderer/src/styles.css'
+      ],
       untracked: ['src/renderer/src/components/GitPanel.tsx'],
       conflicted: []
     },
     unstagedDiff: {
-      text:
-        'diff --git a/src/renderer/src/App.tsx b/src/renderer/src/App.tsx\\n' +
-        '--- a/src/renderer/src/App.tsx\\n' +
-        '+++ b/src/renderer/src/App.tsx\\n' +
-        '@@ -1,3 +1,4 @@\\n' +
-        '+// Ground keeps Git operations local.\\n',
+      text: previewUnstagedDiff,
       truncated: false,
-      bytes: 192
+      bytes: previewUnstagedDiffBytes
     },
     stagedDiff: { text: '', truncated: false, bytes: 0 },
     commits: [

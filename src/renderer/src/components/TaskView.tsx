@@ -156,6 +156,8 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
   return (
     <div
       className={`task-view${workspacePanel ? ' workspace-panel-open' : ''}${
+        workspacePanel ? ` workspace-panel-${workspacePanel}` : ''
+      }${
         isArchived ? ' archived-task-view' : ''
       }${provider?.verification?.status !== 'passed' ? ' provider-needs-test' : ''}`}
     >

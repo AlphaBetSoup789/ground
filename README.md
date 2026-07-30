@@ -95,9 +95,11 @@ conformance runner; npm publication remains a separate maintainer release step.
 - Safe task forks, reversible archive/restore, and bounded search across active or
   archived task history
 - Interactive, multi-session task terminals backed by a real local PTY
-- Git branch/status, staged and unstaged diffs, path staging/unstaging, exact-tree
-  commits bound to the exact approved checked-out local branch, bounded history,
-  recoverable selected-file restore/undo, and managed-worktree create/remove
+- Git branch/status, structured per-file staged and unstaged diff review with
+  keyboard hunk navigation and an exact raw-patch fallback, path
+  staging/unstaging, exact-tree commits bound to the exact approved checked-out
+  local branch, bounded history, recoverable selected-file restore/undo, and
+  managed-worktree create/remove
 - Remote Streamable HTTP and local stdio MCP servers with namespaced tools,
   launch and definition trust, and per-call approval
 - Native session-resume support for recognized Codex, Claude, Gemini, and
@@ -507,11 +509,20 @@ are process-local and end when Ground quits.
 
 The Git panel reads branch/ahead/behind state, staged, unstaged, untracked, and
 conflicted paths, staged and unstaged unified diffs, bounded commit history, and
-registered worktrees. It can stage or unstage selected paths, commit the exact
-prepared index tree, create a branch in a dedicated managed worktree and open it as
-a new task, remove a clean worktree registered inside that managed root, and
-restore selected unstaged tracked files or untracked files through a recoverable
-workflow. Ground requires Git 2.23 or newer.
+registered worktrees. Diff review is organized by file, preserves old and new line
+numbers, summarizes additions and deletions, and supports keyboard file and hunk
+navigation. Unsupported, binary, malformed, or safety-bounded patch segments fail
+closed to their raw text; the complete captured patch is always available through
+the raw view. Hostile presentation controls are shown there as visible Unicode
+escapes, with an explicit copy-exact action for the underlying captured text.
+Large structured patches are disclosed incrementally instead of mounting every
+line at once.
+
+The panel can stage or unstage selected paths, commit the exact prepared index
+tree, create a branch in a dedicated managed worktree and open it as a new task,
+remove a clean worktree registered inside that managed root, and restore selected
+unstaged tracked files or untracked files through a recoverable workflow. Ground
+requires Git 2.23 or newer.
 
 Git discovery passively fingerprints fixed conventional paths and absolute entries
 from Ground’s launch PATH, excluding any path controlled by a configured workspace.

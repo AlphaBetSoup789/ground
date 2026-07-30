@@ -245,6 +245,189 @@ try {
     )
   })
 
+  await run('structured Git diff review supports keyboard and raw-patch inspection', async () => {
+    await page.setViewportSize({ width: 1_280, height: 720 })
+    await page.getByRole('button', { name: /^Show terminal/ }).click()
+    const terminalWorkspace = page.locator(
+      '#workspace-tool-panel[role="region"][aria-label="Workspace terminal"]'
+    )
+    await terminalWorkspace.waitFor()
+    const terminalLayout = await page.locator('.task-view').evaluate((taskView) => {
+      const panel = taskView.querySelector('.workspace-panel')
+      return {
+        className: taskView.className,
+        panelHeight: panel?.clientHeight ?? 0
+      }
+    })
+    assert.match(terminalLayout.className, /\bworkspace-panel-terminal\b/)
+    assert.doesNotMatch(terminalLayout.className, /\bworkspace-panel-git\b/)
+    assert.ok(
+      terminalLayout.panelHeight >= 240 && terminalLayout.panelHeight <= 250,
+      `the terminal should keep its compact laptop-height track; received ${JSON.stringify(terminalLayout)}`
+    )
+
+    await page.getByRole('button', { name: 'Show Git panel' }).click()
+    const gitWorkspace = page.locator(
+      '#workspace-tool-panel[role="region"][aria-label="Git workspace"]'
+    )
+    await gitWorkspace.waitFor()
+
+    const visibleGitContent = gitWorkspace.locator(
+      '.git-panel-content:not([hidden])'
+    )
+    await visibleGitContent.waitFor()
+    const gitLayout = await page.locator('.task-view').evaluate((taskView) => {
+      const panel = taskView.querySelector('.workspace-panel')
+      const content = taskView.querySelector(
+        '.git-panel-content:not([hidden])'
+      )
+      return {
+        className: taskView.className,
+        gridTemplateRows: getComputedStyle(taskView).gridTemplateRows,
+        taskHeight: taskView.clientHeight,
+        panelHeight: panel?.clientHeight ?? 0,
+        contentHeight: content?.clientHeight ?? 0
+      }
+    })
+    assert.match(gitLayout.className, /\bworkspace-panel-git\b/)
+    assert.ok(
+      gitLayout.panelHeight - terminalLayout.panelHeight >= 100,
+      `Git review should receive materially more height than the terminal; received terminal ${terminalLayout.panelHeight}px and Git ${gitLayout.panelHeight}px`
+    )
+    assert.ok(
+      gitLayout.contentHeight >= 180,
+      `the Git panel should leave at least 180px for review at 1280×720; received ${JSON.stringify(gitLayout)}`
+    )
+
+    const workingTreeFiles = gitWorkspace.getByRole('listbox', {
+      name: 'Working tree diff files'
+    })
+    await workingTreeFiles.waitFor()
+    const appFile = workingTreeFiles.getByRole('option', {
+      name: /src\/renderer\/src\/App\.tsx/
+    })
+    const stylesFile = workingTreeFiles.getByRole('option', {
+      name: /src\/renderer\/src\/styles\.css/
+    })
+
+    await appFile.click()
+    await waitForValue(
+      () => appFile.getAttribute('aria-selected'),
+      'true',
+      'clicking a changed file should select it for focused review'
+    )
+    await appFile.press('ArrowDown')
+    await waitForValue(
+      () => stylesFile.getAttribute('aria-selected'),
+      'true',
+      'ArrowDown should move focused diff review to the next changed file'
+    )
+
+    await gitWorkspace.getByRole('button', { name: 'Next hunk' }).click()
+    const secondHunk = gitWorkspace.getByRole('heading', {
+      name: /^Hunk 2 of 2\b/
+    })
+    await secondHunk.waitFor()
+    await waitForValue(
+      () => secondHunk.evaluate((element) => element === document.activeElement),
+      true,
+      'hunk navigation should move focus to the selected hunk heading'
+    )
+
+    await gitWorkspace
+      .getByRole('button', { name: 'Show exact raw patch' })
+      .click()
+    const rawPatch = gitWorkspace.locator('pre[aria-label*="raw patch" i]')
+    await rawPatch.waitFor()
+    assert.match(
+      (await rawPatch.textContent()) ?? '',
+      /diff --git /,
+      'the exact-patch view should retain the original unified diff'
+    )
+    await page.keyboard.press('Tab')
+    assert.equal(
+      await rawPatch.evaluate((element) => element === document.activeElement),
+      true,
+      'the raw patch scroll region should accept keyboard focus'
+    )
+    const rawPatchPresentation = await rawPatch.evaluate((element) => {
+      const style = getComputedStyle(element)
+      return {
+        overflowX: style.overflowX,
+        outlineVisible:
+          style.outlineStyle !== 'none' &&
+          Number.parseFloat(style.outlineWidth) > 0
+      }
+    })
+    assert.equal(rawPatchPresentation.overflowX, 'auto')
+    assert.equal(rawPatchPresentation.outlineVisible, true)
+    await gitWorkspace
+      .getByRole('button', { name: 'Show structured review' })
+      .click()
+    await gitWorkspace.getByRole('heading', { name: /^Hunk 2 of 2\b/ }).waitFor()
+
+    await page.setViewportSize({ width: 680, height: 760 })
+    await page.emulateMedia({
+      reducedMotion: 'reduce',
+      forcedColors: 'active'
+    })
+    await page
+      .getByRole('complementary', { name: 'Task navigation' })
+      .getByRole('button', { name: 'Close sidebar' })
+      .click()
+    await stylesFile.scrollIntoViewIfNeeded()
+    await stylesFile.focus()
+    await waitForValue(
+      () => stylesFile.evaluate((element) => element === document.activeElement),
+      true,
+      'the selected changed file should remain keyboard focusable at narrow widths'
+    )
+    assert.equal(await stylesFile.isVisible(), true)
+    const selectedFileVisualState = await stylesFile.evaluate((element) => {
+      const style = getComputedStyle(element)
+      return {
+        outlineVisible:
+          style.outlineStyle !== 'none' &&
+          Number.parseFloat(style.outlineWidth) > 0,
+        borderVisible:
+          style.borderTopStyle !== 'none' &&
+          Number.parseFloat(style.borderTopWidth) > 0
+      }
+    })
+    assert.equal(
+      selectedFileVisualState.outlineVisible,
+      true,
+      'forced-colors mode should expose a visible focus outline'
+    )
+    assert.equal(
+      selectedFileVisualState.borderVisible,
+      true,
+      'forced-colors mode should preserve a visible selected-file border'
+    )
+    const narrowFileList = gitWorkspace.locator('.git-diff-file-list')
+    const narrowFileReview = gitWorkspace.locator('.git-diff-file-review')
+    await narrowFileList.waitFor()
+    await narrowFileReview.waitFor()
+    const narrowFileListBounds = await narrowFileList.boundingBox()
+    const narrowFileReviewBounds = await narrowFileReview.boundingBox()
+    assert.ok(narrowFileListBounds, 'the narrow diff file list should have layout bounds')
+    assert.ok(narrowFileReviewBounds, 'the narrow file review should have layout bounds')
+    assert.ok(
+      narrowFileReviewBounds.y >=
+        narrowFileListBounds.y + narrowFileListBounds.height - 1,
+      `the narrow diff review should stack below its file list; received list ${JSON.stringify(narrowFileListBounds)} and review ${JSON.stringify(narrowFileReviewBounds)}`
+    )
+    const narrowComposerBounds = await page
+      .getByRole('textbox', { name: 'Message' })
+      .boundingBox()
+    assert.ok(narrowComposerBounds, 'the narrow composer should have layout bounds')
+    assert.ok(
+      narrowComposerBounds.y >= 0 &&
+        narrowComposerBounds.y + narrowComposerBounds.height <= 760,
+      `the composer should remain inside the 760px viewport beside the narrow Git panel; received ${JSON.stringify(narrowComposerBounds)}`
+    )
+  })
+
   await run('archive and search flows update the visible task scope', async () => {
     await page.getByRole('button', { name: 'Task actions' }).click()
     await page.getByRole('menuitem', { name: 'Archive task' }).click()

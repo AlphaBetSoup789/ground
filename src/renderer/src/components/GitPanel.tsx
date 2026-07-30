@@ -29,7 +29,6 @@ import {
 } from 'lucide-react'
 import type {
   DesktopTask,
-  GitDiffResult,
   GitLogEntry,
   GitOverview,
   GitRecoverySummary,
@@ -37,6 +36,7 @@ import type {
   GitWorktreeSummary
 } from '../../../shared/types'
 import { desktop } from '../lib/desktop'
+import { DiffReview } from './DiffReview'
 
 type GitPanelTab = 'changes' | 'history' | 'worktrees'
 
@@ -909,10 +909,10 @@ function ChangesView(props: {
 
       <div className="git-diff-stack">
         {overview.stagedDiff?.text && (
-          <DiffBlock title="Staged diff" diff={overview.stagedDiff} />
+          <DiffReview title="Staged diff" diff={overview.stagedDiff} />
         )}
         {overview.unstagedDiff?.text && (
-          <DiffBlock title="Working tree diff" diff={overview.unstagedDiff} />
+          <DiffReview title="Working tree diff" diff={overview.unstagedDiff} />
         )}
         {!hasDiff && status?.untracked.length ? (
           <p className="git-diff-note">
@@ -1179,29 +1179,6 @@ function FileGroup(props: {
   )
 }
 
-function DiffBlock(props: {
-  title: string
-  diff: GitDiffResult
-}): React.JSX.Element {
-  return (
-    <section className="git-diff-block">
-      <div className="git-diff-header">
-        <h3>{props.title}</h3>
-        <span>{formatBytes(props.diff.bytes)}</span>
-      </div>
-      <pre className="git-unified-diff" tabIndex={0} aria-label={props.title}>
-        <code>{props.diff.text}</code>
-      </pre>
-      {props.diff.truncated && (
-        <p className="git-diff-truncated" role="note">
-          <AlertCircle size={12} aria-hidden="true" />
-          Diff stopped at Ground’s output safety limit.
-        </p>
-      )}
-    </section>
-  )
-}
-
 function HistoryView(props: {
   commits: GitLogEntry[]
   truncated: boolean
@@ -1448,12 +1425,6 @@ function errorMessage(error: unknown, fallback: string): string {
     return error.message
   }
   return fallback
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1_000) return `${bytes} B`
-  if (bytes < 1_000_000) return `${(bytes / 1_000).toFixed(1)} KB`
-  return `${(bytes / 1_000_000).toFixed(1)} MB`
 }
 
 function formatCommitDate(value: string): string {
