@@ -60,6 +60,17 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
   name, model, and adapter—not endpoint, provider ID, credentials, or revisions.
 - Safe task forks that rekey portable history and strip runtime/approval authority,
   reversible archive/restore, and bounded search across active or archived tasks.
+- Keyboard-complete active/archive task search and switching: `Ctrl/⌘ + K`
+  reveals and focuses search, Enter opens the first current result, Arrow keys
+  enter the exact filtered result list, Escape clears or exits predictably, and
+  stale selection work cannot redirect focus across tasks or responsive layouts.
+- Reviewable Ask-to-Agent handoff that changes only the exact eligible task,
+  prepares an editable task-local implementation draft, and requires a separate
+  explicit Send before provider egress or workspace action.
+- Structured staged and working-tree diff review with per-file summaries,
+  keyboard hunk navigation, hostile-presentation escaping, bounded raw-patch
+  fallback, and a reviewed-hunk-to-prompt action that preserves existing draft
+  text without applying or sending the patch.
 - Three rotating validated state snapshots, automatic fallback from a corrupt or
   missing primary, unreadable-file quarantine, an in-app recovery browser,
   credential-free native export, and native-confirmed retained-snapshot restore.
@@ -132,13 +143,17 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
 - Add a keyboard command palette, task-local process-memory composer drafts,
   near-bottom-only timeline following, and bounded batched screen-reader
   announcements for streamed assistant text.
-- Add a seven-scenario Playwright-over-Electron renderer interaction suite for
-  command-palette keyboard/focus behavior, accessible provider-form validation,
-  truthful local-provider refusal recovery into a detected CLI, task-local drafts,
-  deterministic send cancellation, archive/search, responsive settings,
-  reduced-motion CSS, and forced-color connection-path selection. It uses the
-  explicit browser-preview desktop mock and is not
+- Expand the Playwright-over-Electron renderer interaction suite to twelve
+  scenarios covering command-palette and task-search keyboard/focus behavior,
+  accessible provider-form validation, truthful local-provider refusal recovery
+  into a detected CLI, task-local drafts, Ask-to-Agent and reviewed-hunk prompt
+  handoffs, deterministic send cancellation, archive/search, responsive settings
+  and sidebar selection, reduced-motion CSS, and forced-color connection-path
+  selection. It uses the explicit browser-preview desktop mock and is not
   production-main/native/provider certification.
+- Recover interrupted managed writes, commands, and MCP calls as explicit
+  outcome-unknown activity, without automatically replaying the side effect or
+  retaining continuation authority.
 - A dated credential-free CLI help/source-surface observation records the reviewed
   Codex, Claude Code, Gemini, and Antigravity versions without claiming live
   provider certification.

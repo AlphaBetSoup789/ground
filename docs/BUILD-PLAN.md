@@ -306,6 +306,34 @@ Acceptance gate:
   persistence, and deletion rules.
 - Diff review remains bound to current file/index identities.
 
+### M3.4 Task interaction and navigation — P1
+
+Requirements: GR-3, GR-8.1
+
+- Keep command discovery, task search, task switching, and task-local drafts
+  keyboard-complete across desktop and narrow layouts.
+- Let a user deliberately move reviewed context—such as an Ask response or one
+  complete Git hunk—into an editable draft without starting a run.
+- Let a user prepare the next task-local prompt while a run or approval is active
+  without queueing, steering, or sending it implicitly.
+- Bind delayed selection, handoff, and focus work to the exact current task and
+  source revision so stale renderer work cannot redirect a draft or selection.
+- Keep every prompt handoff visibly editable and require a separate explicit Send
+  before provider or runtime egress.
+
+Acceptance gate:
+
+- Task search, result activation, command discovery, task switching, and sidebar
+  exit can be completed by keyboard with deterministic focus on supported window
+  sizes.
+- Task-local drafts survive task switching and remain attributable to exactly one
+  task, including drafts prepared while another run is still active.
+- Context-to-draft actions preserve existing text, refuse incomplete or oversized
+  input, and cannot create a user message, run, approval, tool call, or provider
+  request by themselves.
+- Input-method composition, stale async completion, responsive layout changes,
+  and modal focus changes have renderer interaction evidence.
+
 ## M4 — Ground-owned parallel work
 
 Goal: users can delegate independent subtasks across models or runtimes while
