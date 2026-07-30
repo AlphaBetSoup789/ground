@@ -252,7 +252,7 @@ jobs:
       - name: Smoke-test packaged main and preload startup
         run: npm run smoke:package:launch
 
-      - name: Smoke-test packaged identity, credentials, approvals, and native runtime
+      - name: Smoke-test packaged provider turn and native runtime
         if: runner.os != 'Linux'
         run: npm run smoke:package:native
 
@@ -260,7 +260,7 @@ jobs:
         if: runner.os != 'Linux'
         run: npm run smoke:package:distributable
 
-      - name: Smoke-test packaged native runtime with ephemeral Secret Service
+      - name: Smoke-test packaged provider turn and native runtime with ephemeral Secret Service
         if: runner.os == 'Linux'
         shell: bash
         env:

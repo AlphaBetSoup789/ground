@@ -647,6 +647,12 @@ export interface ProviderTestResult {
   ok: boolean
   title: string
   detail: string
+  /**
+   * A narrow, main-process-derived reason that may unlock specific corrective
+   * UI. Other failures stay uncategorized until Ground can distinguish them
+   * without guessing from display text.
+   */
+  failureKind?: 'connection-refused'
   models?: string[]
   /**
    * True only when this result was retained on an unchanged saved profile.

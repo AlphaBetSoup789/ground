@@ -448,17 +448,31 @@ const mockApi: DesktopApi = {
   deleteProvider: async (providerId) => {
     mockSnapshot.providers = mockSnapshot.providers.filter((provider) => provider.id !== providerId)
   },
-  testProvider: async (draft) => ({
-    ok: true,
-    title: draft.kind === 'cli' ? 'Executable found' : 'Connection successful',
-    detail:
-      draft.kind === 'cli'
-        ? `${draft.command}\nPrompt transport: ${draft.promptMode}`
-        : draft.model
-          ? 'The endpoint responded and the configured model is ready.'
-          : 'The endpoint responded. Enter a model ID to finish setup.',
-    models: draft.kind !== 'cli' && draft.model ? [draft.model] : undefined
-  }),
+  testProvider: async (draft) => {
+    if (
+      draft.kind === 'openai-compatible' &&
+      draft.baseUrl?.includes('127.0.0.1:1/')
+    ) {
+      return {
+        ok: false,
+        title: 'Could not connect',
+        detail:
+          'No service is listening at http://127.0.0.1:1/v1 (connection refused, ECONNREFUSED).',
+        failureKind: 'connection-refused'
+      }
+    }
+    return {
+      ok: true,
+      title: draft.kind === 'cli' ? 'Executable found' : 'Connection successful',
+      detail:
+        draft.kind === 'cli'
+          ? `${draft.command}\nPrompt transport: ${draft.promptMode}`
+          : draft.model
+            ? 'The endpoint responded and the configured model is ready.'
+            : 'The endpoint responded. Enter a model ID to finish setup.',
+      models: draft.kind !== 'cli' && draft.model ? [draft.model] : undefined
+    }
+  },
   detectClis: async () => [
     {
       id: 'codex',

@@ -29,6 +29,8 @@ import { McpSettingsPane } from './McpSettingsPane'
 import { RecoverySettingsPane } from './RecoverySettingsPane'
 
 type ApiProviderKind = Exclude<ProviderDraft['kind'], 'cli'>
+export type ProviderConnectionPath = 'hosted' | 'local' | 'cli'
+type CliDetectionStatus = 'pending' | 'succeeded' | 'failed'
 
 interface ApiProviderOption {
   kind: ApiProviderKind
@@ -86,6 +88,74 @@ const CLI_ADAPTER_LABELS = {
   antigravity: 'Antigravity CLI'
 } as const
 
+export function providerConnectionPathForDraft(
+  draft: ProviderDraft
+): ProviderConnectionPath {
+  if (draft.kind === 'cli') return 'cli'
+  if (draft.kind !== 'openai-compatible' || !draft.baseUrl) return 'hosted'
+  try {
+    const hostname = new URL(draft.baseUrl).hostname
+      .replace(/^\[(.*)\]$/u, '$1')
+      .toLowerCase()
+    return hostname === 'localhost' ||
+      hostname === '::1' ||
+      /^127(?:\.\d{1,3}){3}$/u.test(hostname)
+      ? 'local'
+      : 'hosted'
+  } catch {
+    return 'hosted'
+  }
+}
+
+export function providerDraftForConnectionPath(
+  path: ProviderConnectionPath
+): ProviderDraft {
+  if (path === 'cli') return blankDraft('cli')
+  if (path === 'hosted') return blankDraft('openai')
+  return {
+    ...blankDraft('openai-compatible'),
+    name: 'Ollama · local',
+    baseUrl: 'http://127.0.0.1:11434/v1',
+    supportsTools: true,
+    contextWindowTokens: 32_768,
+    maxOutputTokens: 4_096
+  }
+}
+
+export function shouldShowLocalServerRecovery(
+  draft: ProviderDraft,
+  result: ProviderTestResult
+): boolean {
+  return (
+    !result.ok &&
+    result.failureKind === 'connection-refused' &&
+    providerConnectionPathForDraft(draft) === 'local'
+  )
+}
+
+export function providerConnectionPathExplanation(
+  selectedPath: ProviderConnectionPath,
+  detected: readonly DetectedCli[],
+  detectionStatus: CliDetectionStatus
+): string {
+  if (selectedPath === 'hosted') {
+    return 'Ground connects directly to the hosted API. Test sends a real request with this profile; Ground does not proxy model traffic.'
+  }
+  if (selectedPath === 'local') {
+    return 'The included local-server values are only a connection template. Ground does not supply, install, or start a local runtime, and it does not download models.'
+  }
+  if (detectionStatus === 'pending') {
+    return 'Ground is checking for recognized agent CLIs installed locally. You can still choose an executable that is already installed.'
+  }
+  if (detectionStatus === 'failed') {
+    return 'Ground could not complete local CLI detection. You can still choose an executable that is already installed.'
+  }
+  const detectedNames = detected.map((candidate) => candidate.name)
+  return detectedNames.length
+    ? `${detectedNames.join(', ')} ${detectedNames.length === 1 ? 'was' : 'were'} detected locally. Detection does not prove sign-in, model access, or a successful turn.`
+    : 'No recognized agent CLI was detected locally. You can still choose an executable that is already installed.'
+}
+
 interface ProviderModalProps {
   providers: ProviderProfile[]
   mcpServers: McpServerProfile[]
@@ -96,10 +166,11 @@ interface ProviderModalProps {
 }
 
 export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
-  const initialProvider =
-    props.providers.find(
-      (provider) => provider.id === props.initialProviderId
-    ) ?? props.providers[0]
+  const initialProvider = props.initialProviderId
+    ? props.providers.find(
+        (provider) => provider.id === props.initialProviderId
+      )
+    : undefined
   const dialogRef = useRef<HTMLDivElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const deleteTriggerRef = useRef<HTMLButtonElement>(null)
@@ -110,6 +181,8 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
     providerToDraft(initialProvider)
   )
   const [detected, setDetected] = useState<DetectedCli[]>([])
+  const [cliDetectionStatus, setCliDetectionStatus] =
+    useState<CliDetectionStatus>('pending')
   const [testing, setTesting] = useState(false)
   const [saving, setSaving] = useState(false)
   const [testResult, setTestResult] = useState<ProviderTestResult>()
@@ -134,8 +207,14 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
   useEffect(() => {
     void desktop
       .detectClis()
-      .then(setDetected)
-      .catch(props.onError)
+      .then((candidates) => {
+        setDetected(candidates)
+        setCliDetectionStatus('succeeded')
+      })
+      .catch((error: unknown) => {
+        setCliDetectionStatus('failed')
+        props.onError(error)
+      })
   }, [props.onError])
 
   useEffect(() => {
@@ -202,6 +281,15 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
     setDraft({ ...blankDraft(kind), ...preset, kind })
     setTestResult(undefined)
     setConfirmDelete(false)
+  }
+
+  const chooseConnectionPath = (path: ProviderConnectionPath): void => {
+    const nextDraft = providerDraftForConnectionPath(path)
+    beginNew(nextDraft.kind, nextDraft)
+  }
+
+  const configureDetectedCli = (candidate: DetectedCli): void => {
+    beginNew('cli', candidate.draft)
   }
 
   const selectMobileSection = (value: string): void => {
@@ -508,6 +596,15 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
               if (!saving && !testing) void save()
             }}
           >
+            {!selectedProvider && (
+              <ProviderConnectionPicker
+                draft={draft}
+                detected={detected}
+                detectionStatus={cliDetectionStatus}
+                onChoose={chooseConnectionPath}
+                onConfigureDetectedCli={configureDetectedCli}
+              />
+            )}
             {draft.kind !== 'cli' ? (
               <ApiProviderForm
                 draft={draft}
@@ -541,6 +638,13 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
                 <div>
                   <strong>{testResult.title}</strong>
                   <p>{testResult.detail}</p>
+                  {shouldShowLocalServerRecovery(draft, testResult) && (
+                    <LocalServerRecovery
+                      detected={detected}
+                      onChooseCli={() => chooseConnectionPath('cli')}
+                      onConfigureDetectedCli={configureDetectedCli}
+                    />
+                  )}
                   {testResult.persisted === false && (
                     <p className="test-result-retention">
                       Draft-only check. Save these settings, then test the saved
@@ -680,6 +784,150 @@ function MobileSettingsSwitcher(props: {
         </optgroup>
       </select>
     </label>
+  )
+}
+
+function ProviderConnectionPicker(props: {
+  draft: ProviderDraft
+  detected: DetectedCli[]
+  detectionStatus: CliDetectionStatus
+  onChoose: (path: ProviderConnectionPath) => void
+  onConfigureDetectedCli: (candidate: DetectedCli) => void
+}): React.JSX.Element {
+  const selectedPath = providerConnectionPathForDraft(props.draft)
+  const explanationId = 'provider-connection-path-explanation'
+  const explanation = providerConnectionPathExplanation(
+    selectedPath,
+    props.detected,
+    props.detectionStatus
+  )
+
+  return (
+    <fieldset className="connection-path-picker">
+      <legend>Connection path</legend>
+      <div className="connection-path-options">
+        <label className={selectedPath === 'hosted' ? 'selected' : ''}>
+          <input
+            type="radio"
+            name="provider-connection-path"
+            value="hosted"
+            checked={selectedPath === 'hosted'}
+            aria-describedby={explanationId}
+            onChange={() => props.onChoose('hosted')}
+          />
+          <span>
+            <Cloud size={15} aria-hidden="true" />
+            <span>
+              <strong>Hosted API</strong>
+              <small>Cloud endpoint and API key</small>
+            </span>
+          </span>
+        </label>
+        <label className={selectedPath === 'local' ? 'selected' : ''}>
+          <input
+            type="radio"
+            name="provider-connection-path"
+            value="local"
+            checked={selectedPath === 'local'}
+            aria-describedby={explanationId}
+            onChange={() => props.onChoose('local')}
+          />
+          <span>
+            <Server size={15} aria-hidden="true" />
+            <span>
+              <strong>Local server</strong>
+              <small>Ollama, LM Studio, or compatible</small>
+            </span>
+          </span>
+        </label>
+        <label className={selectedPath === 'cli' ? 'selected' : ''}>
+          <input
+            type="radio"
+            name="provider-connection-path"
+            value="cli"
+            checked={selectedPath === 'cli'}
+            aria-describedby={explanationId}
+            onChange={() => props.onChoose('cli')}
+          />
+          <span>
+            <TerminalSquare size={15} aria-hidden="true" />
+            <span>
+              <strong>Installed CLI</strong>
+              <small>Existing coding-agent executable</small>
+            </span>
+          </span>
+        </label>
+      </div>
+      <p
+        id={explanationId}
+        className="connection-path-explanation"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {explanation}
+      </p>
+      {selectedPath === 'cli' && props.detected.length > 0 && (
+        <div
+          className="connection-path-detected"
+          role="group"
+          aria-label="Detected CLI executables"
+        >
+          <span>Configure a detected executable</span>
+          <div>
+            {props.detected.map((candidate) => (
+              <button
+                type="button"
+                key={candidate.id}
+                onClick={() => props.onConfigureDetectedCli(candidate)}
+              >
+                <TerminalSquare size={12} aria-hidden="true" />
+                {candidate.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </fieldset>
+  )
+}
+
+function LocalServerRecovery(props: {
+  detected: DetectedCli[]
+  onChooseCli: () => void
+  onConfigureDetectedCli: (candidate: DetectedCli) => void
+}): React.JSX.Element {
+  return (
+    <div className="local-server-recovery">
+      <strong>Before testing this local server again</strong>
+      <ol>
+        <li>Start its API server and keep it running.</li>
+        <li>Pull or load the exact model identifier entered above.</li>
+        <li>Confirm the server&apos;s port and Base URL, then choose Test again.</li>
+      </ol>
+      <p>
+        Ground does not install or start the server and does not pull models for
+        it.
+      </p>
+      <div className="local-server-alternatives">
+        {props.detected.map((candidate) => (
+          <button
+            type="button"
+            key={candidate.id}
+            onClick={() => props.onConfigureDetectedCli(candidate)}
+          >
+            <TerminalSquare size={12} aria-hidden="true" />
+            Configure {candidate.name}
+          </button>
+        ))}
+        <button type="button" onClick={props.onChooseCli}>
+          Choose another installed CLI
+        </button>
+      </div>
+      <small>
+        A detected executable is only a path match; Ground has not verified its
+        authentication or model access.
+      </small>
+    </div>
   )
 }
 

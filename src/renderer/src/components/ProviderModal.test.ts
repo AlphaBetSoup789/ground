@@ -7,7 +7,11 @@ vi.mock('../lib/desktop', () => ({ desktop: {} }))
 
 import {
   cliDraftWithChosenExecutable,
-  ProviderModal
+  ProviderModal,
+  providerConnectionPathForDraft,
+  providerConnectionPathExplanation,
+  providerDraftForConnectionPath,
+  shouldShowLocalServerRecovery
 } from './ProviderModal'
 
 describe('provider settings', () => {
@@ -30,6 +34,7 @@ describe('provider settings', () => {
       createElement(ProviderModal, {
         providers: [cliProvider],
         mcpServers: [],
+        initialProviderId: cliProvider.id,
         onClose: () => undefined,
         onSaved: async () => undefined,
         onError: () => undefined
@@ -97,6 +102,90 @@ describe('provider settings', () => {
     expect(markup).not.toContain(
       '<h3 id="settings-dialog-title">Edit Ollama</h3>'
     )
+  })
+
+  it('distinguishes truthful hosted, local-server, and installed-CLI paths', () => {
+    const localTemplate: ProviderProfile = {
+      id: 'ollama-template',
+      name: 'Ollama · local',
+      kind: 'openai-compatible',
+      baseUrl: 'http://127.0.0.1:11434/v1',
+      model: 'qwen3',
+      hasApiKey: false,
+      supportsTools: true,
+      createdAt: '2026-07-29T12:00:00.000Z',
+      updatedAt: '2026-07-29T12:00:00.000Z'
+    }
+    const markup = renderToStaticMarkup(
+      createElement(ProviderModal, {
+        providers: [localTemplate],
+        mcpServers: [],
+        onClose: () => undefined,
+        onSaved: async () => undefined,
+        onError: () => undefined
+      })
+    )
+
+    expect(markup).toContain('<legend>Connection path</legend>')
+    expect(markup).toContain('value="hosted"')
+    expect(markup).toContain('>Hosted API<')
+    expect(markup).toContain('value="local"')
+    expect(markup).toContain('>Local server<')
+    expect(markup).toContain('value="cli"')
+    expect(markup).toContain('>Installed CLI<')
+    expect(markup).toContain(
+      'The included local-server values are only a connection template'
+    )
+    expect(markup).toContain(
+      '<h3 id="settings-dialog-title">Connect a provider</h3>'
+    )
+    expect(markup).not.toContain(
+      '<h3 id="settings-dialog-title">Edit Ollama · local</h3>'
+    )
+
+    const localDraft = providerDraftForConnectionPath('local')
+    expect(localDraft).toMatchObject({
+      kind: 'openai-compatible',
+      name: 'Ollama · local',
+      baseUrl: 'http://127.0.0.1:11434/v1',
+      model: ''
+    })
+    expect(providerConnectionPathForDraft(localDraft)).toBe('local')
+    expect(
+      providerConnectionPathForDraft({
+        ...localDraft,
+        baseUrl: 'https://models.example.test/v1'
+      })
+    ).toBe('hosted')
+    expect(providerDraftForConnectionPath('cli')).toMatchObject({
+      kind: 'cli',
+      command: '',
+      trustConfirmed: false
+    })
+    expect(
+      shouldShowLocalServerRecovery(localDraft, {
+        ok: false,
+        title: 'Could not connect',
+        detail: 'No service is listening.',
+        failureKind: 'connection-refused'
+      })
+    ).toBe(true)
+    expect(
+      shouldShowLocalServerRecovery(localDraft, {
+        ok: false,
+        title: 'Could not connect',
+        detail: '401 Unauthorized'
+      })
+    ).toBe(false)
+    expect(
+      providerConnectionPathExplanation('cli', [], 'pending')
+    ).toMatch(/checking for recognized agent CLIs/iu)
+    expect(
+      providerConnectionPathExplanation('cli', [], 'failed')
+    ).toMatch(/could not complete local CLI detection/iu)
+    expect(
+      providerConnectionPathExplanation('cli', [], 'succeeded')
+    ).toMatch(/No recognized agent CLI was detected locally/iu)
   })
 
   it('keeps picker cancellation harmless and resets acknowledgement for a changed path', () => {

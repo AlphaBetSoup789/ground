@@ -106,6 +106,7 @@ import {
   shouldMigrateLegacyData,
   writePackagedSmokeResult
 } from './packaged-smoke'
+import { runPackagedProviderSmoke } from './packaged-provider-smoke'
 import {
   CliTrustRegistry,
   type CliTrustRequest,
@@ -134,6 +135,7 @@ const stateRestoreGateBypassChannels = new Set<string>([
 const trustedRendererUrls = new Map<number, string>()
 let runEventRevision = 0
 const activeRunEvents = new Map<string, DesktopRunEventEnvelope[]>()
+const packagedSmokeRunEvents: RunEvent[] = []
 const packagedSmokeConfig = resolvePackagedSmokeConfig({
   isPackaged: app.isPackaged,
   temporaryDirectory: os.tmpdir()
@@ -152,6 +154,9 @@ if (packagedSmokeConfig) {
 }
 
 function emitRunEvent(event: RunEvent): void {
+  if (packagedSmokeConfig) {
+    packagedSmokeRunEvents.push(structuredClone(event))
+  }
   const envelope = toDesktopRunEventEnvelope({
     revision: (runEventRevision += 1),
     event
@@ -2050,7 +2055,18 @@ if (!ownsInstance) {
       if (packagedSmokeConfig.scope === 'native') {
         Object.assign(
           checks,
-          await runPackagedNativeSmoke(packagedSmokeConfig)
+          await runPackagedNativeSmoke(packagedSmokeConfig, () =>
+            runPackagedProviderSmoke({
+              token: packagedSmokeConfig.token,
+              directory: packagedSmokeConfig.directory,
+              userDataPath: packagedSmokeConfig.userDataPath,
+              store,
+              providers,
+              runs,
+              workspaceGrants,
+              runEvents: () => packagedSmokeRunEvents
+            })
+          )
         )
       }
       await finishPackagedSmoke(checks)

@@ -1134,7 +1134,10 @@ export class ProviderService {
             apiKey,
             PROVIDER_DISCOVERY_TIMEOUT_MS,
             discoveryEndpoint
-          )
+          ),
+        ...(connectionRefused
+          ? { failureKind: 'connection-refused' as const }
+          : {})
       }
     }
 
@@ -1215,7 +1218,10 @@ export class ProviderService {
               COMPATIBLE_GENERATION_TIMEOUT_MS,
               generationEndpoint
             )}`
-          ].join(' ')
+          ].join(' '),
+        ...(connectionRefused
+          ? { failureKind: 'connection-refused' as const }
+          : {})
       }
     } finally {
       clearTimeout(generationTimer)

@@ -746,8 +746,9 @@ function EmptyApp(props: {
           One calm place to work.
         </h1>
         <p>
-          Confirm the included local preset or connect an API or agent CLI, then
-          choose a folder and keep every task in one persistent workspace.
+          Connect a hosted API, a local server you already run, or an installed
+          agent CLI. Then choose a folder and keep every task in one persistent
+          workspace.
         </p>
         <div className="first-run-actions">
           <button

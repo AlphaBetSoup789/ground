@@ -49,12 +49,15 @@ are not necessarily release-certified.
 - [x] Saved-provider readiness checks that gate every exact provider revision before
   run startup, with versioned credential publication and task/provider-bound start
   reservations
+- [x] First-run Hosted API, Local server, and Installed CLI paths that identify the
+  local values as a template, keep passive CLI detection non-authoritative, and
+  limit stopped-server recovery to confirmed refused loopback connections
 - [x] Keyboard command palette, task-local unsent drafts, bounded streaming
   announcements, near-bottom timeline following, responsive layout, forced-color
   support, and reduced-motion behavior
 - [x] Cross-platform CI renderer interaction suite in Electron for keyboard/focus,
-  provider-form validation, drafts, cancellation, archive/search, responsive
-  settings, and reduced-motion behavior
+  provider-form validation, local-provider refusal recovery, drafts, cancellation,
+  archive/search, responsive settings, forced colors, and reduced-motion behavior
 - [x] Baseline CI, CodeQL, issue forms, and contributor/security documentation
 
 ## Public alpha hardening
@@ -73,6 +76,12 @@ are not necessarily release-certified.
   versioned, publishable adapter package plus deterministic conformance suite
 - [x] Keep published compatibility evidence explicit about deterministic
   fixture/mock provenance and the absence of paid live-provider/CLI certification
+- [x] Add a packaged, credential-free, token-bound loopback OpenAI-compatible
+  readiness and first-turn fixture that crosses the production registry,
+  `RunManager`, and durable state without claiming external-provider certification
+- [ ] Complete the remaining M1.1 production-app smoke matrix for a direct
+  first-class API, a recognized CLI deterministic child, and malformed
+  provider/runtime responses
 
 ### Safe coding loop
 
@@ -88,7 +97,8 @@ are not necessarily release-certified.
   commits, and clean managed-worktree create/remove
 - [x] Add a recoverable selected-file restore/undo workflow
 - [x] Add fixed packaged-app identity, encrypted-vault, native-dialog, PTY, Git,
-  MCP-launch, and process-tree cancellation runtime evidence
+  deterministic compatible-provider first-turn, MCP-launch, and process-tree
+  cancellation runtime evidence
 - [ ] Add adversarial packaged renderer-interaction and accessibility end-to-end
   certification
 
@@ -116,6 +126,8 @@ are not necessarily release-certified.
 - [x] Require distributable-bound runtime evidence for macOS arm64/x64, Windows
   x64, and Linux x64, including temporary NSIS installation and ZIP/AppImage
   extraction
+- [ ] Re-run the current provider-first-turn runtime-evidence contract against all
+  four native distributables and verify the aggregate
 - [x] Scaffold a tag workflow for checksums, CycloneDX SBOM, build/SBOM
   attestations, and a draft prerelease
 - [ ] Produce signed, notarized macOS artifacts from protected CI
