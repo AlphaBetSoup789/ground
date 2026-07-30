@@ -78,6 +78,9 @@ are not necessarily release-certified.
   the desktop provider screen and managed run loop
 - [x] Persist canonical model/tool history, per-item provider attribution, and
   normalized cross-provider tool exchanges
+- [x] Preserve the active user objective across bounded managed-API context,
+  retain complete recent tool exchanges, and update a visible notice when
+  projection or planner reductions change
 - [x] Publish version-pinned synthetic API-adapter and CLI-parser compatibility
   fixtures with explicit provenance and package/declaration drift checks
 - [x] Document source-trusted static model-adapter registration without runtime

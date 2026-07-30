@@ -1488,6 +1488,12 @@ describe('RunManager model runtime', () => {
       },
       {
         kind: 'message',
+        id: 'active-user',
+        role: 'user',
+        parts: [{ kind: 'text', text: 'active objective' }]
+      },
+      {
+        kind: 'message',
         id: 'tool-turn',
         role: 'assistant',
         parts: [
@@ -1509,9 +1515,10 @@ describe('RunManager model runtime', () => {
       }
     ]
 
-    const selected = selectModelContext(conversation, 10_000, 2)
+    const selected = selectModelContext(conversation, 10_000, 3)
 
     expect(selected.omittedItems).toBe(1)
+    expect(selected.activeObjective).toBe('retained')
     expect(selected.conversation).toEqual(conversation.slice(1))
   })
 
@@ -1528,8 +1535,11 @@ describe('RunManager model runtime', () => {
     const selected = selectModelContext(conversation, 1_000, 10)
 
     expect(selected.omittedItems).toBe(1)
+    expect(selected.activeObjective).toBe('truncated')
     expect(selected.conversation).toHaveLength(1)
-    expect(JSON.stringify(selected.conversation).length).toBeLessThanOrEqual(1_000)
+    expect(
+      Buffer.byteLength(JSON.stringify(selected.conversation), 'utf8')
+    ).toBeLessThanOrEqual(1_000)
     expect(JSON.stringify(selected.conversation)).toContain('truncated')
   })
 
@@ -1540,7 +1550,7 @@ describe('RunManager model runtime', () => {
           kind: 'message',
           id: 'multibyte-user',
           role: 'user',
-          parts: [{ kind: 'text', text: '界'.repeat(2_000) }]
+          parts: [{ kind: 'text', text: '🙂界'.repeat(2_000) }]
         }
       ],
       1_000,
@@ -1552,6 +1562,328 @@ describe('RunManager model runtime', () => {
       Buffer.byteLength(JSON.stringify(selected.conversation), 'utf8')
     ).toBeLessThanOrEqual(1_000)
     expect(JSON.stringify(selected.conversation)).toContain('truncated')
+    const projected = JSON.stringify(selected.conversation)
+    expect(Buffer.from(projected, 'utf8').toString('utf8')).toBe(projected)
+    const projectedMessage = selected.conversation[0]
+    if (projectedMessage?.kind !== 'message') {
+      throw new Error('Expected a compacted objective message')
+    }
+    const projectedText = projectedMessage.parts
+      .filter((part) => part.kind === 'text')
+      .map((part) => part.text)
+      .join('')
+    expect(projectedText).not.toMatch(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/u
+    )
+  })
+
+  it('pins the latest user occurrence without relying on unique ids or text', () => {
+    const conversation: ModelRequest['conversation'] = [
+      {
+        kind: 'message',
+        id: 'repeated-id',
+        role: 'user',
+        parts: [{ kind: 'text', text: 'same prompt text' }]
+      },
+      {
+        kind: 'message',
+        id: 'old-answer',
+        role: 'assistant',
+        parts: [{ kind: 'text', text: 'old answer' }]
+      },
+      {
+        kind: 'message',
+        id: 'repeated-id',
+        role: 'user',
+        parts: [{ kind: 'text', text: 'same prompt text' }]
+      },
+      {
+        kind: 'message',
+        id: 'new-answer',
+        role: 'assistant',
+        parts: [{ kind: 'text', text: 'new answer' }]
+      }
+    ]
+
+    const selected = selectModelContext(conversation, 10_000, 2)
+
+    expect(selected.activeObjective).toBe('retained')
+    expect(selected.omittedItems).toBe(2)
+    expect(selected.conversation).toEqual(conversation.slice(2))
+  })
+
+  it('keeps the objective in source order while filling remaining recent context', () => {
+    const conversation: ModelRequest['conversation'] = [
+      {
+        kind: 'message',
+        id: 'oldest',
+        role: 'assistant',
+        parts: [{ kind: 'text', text: 'oldest' }]
+      },
+      {
+        kind: 'message',
+        id: 'older',
+        role: 'assistant',
+        parts: [{ kind: 'text', text: 'older' }]
+      },
+      {
+        kind: 'message',
+        id: 'objective',
+        role: 'user',
+        parts: [{ kind: 'text', text: 'current objective' }]
+      },
+      {
+        kind: 'message',
+        id: 'newer',
+        role: 'assistant',
+        parts: [{ kind: 'text', text: 'newer' }]
+      },
+      {
+        kind: 'message',
+        id: 'newest',
+        role: 'assistant',
+        parts: [{ kind: 'text', text: 'newest' }]
+      }
+    ]
+
+    const selected = selectModelContext(conversation, 10_000, 4)
+
+    expect(selected.conversation.map((item) => item.id)).toEqual([
+      'older',
+      'objective',
+      'newer',
+      'newest'
+    ])
+  })
+
+  it('keeps parallel tool results all-or-none after reserving the objective', () => {
+    const conversation: ModelRequest['conversation'] = [
+      {
+        kind: 'message',
+        id: 'objective',
+        role: 'user',
+        parts: [{ kind: 'text', text: 'inspect both files' }]
+      },
+      {
+        kind: 'message',
+        id: 'parallel-tools',
+        role: 'assistant',
+        parts: [
+          {
+            kind: 'tool-call',
+            callId: 'call-a',
+            name: 'read_file',
+            rawArguments: '{"path":"a.ts"}'
+          },
+          {
+            kind: 'tool-call',
+            callId: 'call-b',
+            name: 'read_file',
+            rawArguments: '{"path":"b.ts"}'
+          }
+        ]
+      },
+      {
+        kind: 'tool-result',
+        id: 'result-a',
+        callId: 'call-a',
+        content: [{ kind: 'text', text: 'a' }]
+      },
+      {
+        kind: 'tool-result',
+        id: 'result-b',
+        callId: 'call-b',
+        content: [{ kind: 'text', text: 'b' }]
+      }
+    ]
+
+    const tooSmall = selectModelContext(conversation, 10_000, 3)
+    const exact = selectModelContext(conversation, 10_000, 4)
+
+    expect(tooSmall.conversation).toEqual([conversation[0]])
+    expect(tooSmall.omittedItems).toBe(3)
+    expect(exact.conversation).toEqual(conversation)
+  })
+
+  it('preserves the existing marked fallback for a tool-only oversized context', () => {
+    const conversation: ModelRequest['conversation'] = [
+      {
+        kind: 'message',
+        id: 'tool-turn',
+        role: 'assistant',
+        parts: [
+          {
+            kind: 'tool-call',
+            callId: 'large-call',
+            name: 'read_file',
+            rawArguments: '{"path":"large.txt"}'
+          }
+        ]
+      },
+      {
+        kind: 'tool-result',
+        id: 'large-result',
+        callId: 'large-call',
+        content: [{ kind: 'text', text: 'x'.repeat(10_000) }]
+      }
+    ]
+
+    const selected = selectModelContext(conversation, 500, 10)
+
+    expect(selected.activeObjective).toBe('none')
+    expect(selected.omittedItems).toBe(2)
+    expect(selected.conversation).toHaveLength(1)
+    expect(JSON.stringify(selected.conversation)).toContain(
+      'omitted an oversized tool exchange'
+    )
+  })
+
+  it('retains the ordinary recent suffix when no user objective exists', () => {
+    const conversation: ModelRequest['conversation'] = [
+      {
+        kind: 'message',
+        id: 'older-assistant',
+        role: 'assistant',
+        parts: [{ kind: 'text', text: 'older' }]
+      },
+      {
+        kind: 'message',
+        id: 'newer-assistant',
+        role: 'assistant',
+        parts: [{ kind: 'text', text: 'newer' }]
+      }
+    ]
+
+    expect(selectModelContext(conversation, 10_000, 1)).toEqual({
+      conversation: [conversation[1]],
+      omittedItems: 1,
+      activeObjective: 'none'
+    })
+  })
+
+  it('bounds an oversized objective while retaining its tail and recent evidence', () => {
+    const conversation: ModelRequest['conversation'] = [
+      {
+        kind: 'message',
+        id: 'large-objective',
+        role: 'user',
+        parts: [
+          {
+            kind: 'text',
+            text: `BEGIN ${'🙂 middle '.repeat(2_000)} END-CONSTRAINT`
+          }
+        ]
+      },
+      {
+        kind: 'message',
+        id: 'recent-evidence',
+        role: 'assistant',
+        parts: [{ kind: 'text', text: 'The latest test failed in auth.ts.' }]
+      }
+    ]
+
+    const selected = selectModelContext(conversation, 1_000, 10)
+    const serialized = JSON.stringify(selected.conversation)
+
+    expect(selected.activeObjective).toBe('truncated')
+    expect(selected.omittedItems).toBe(1)
+    expect(selected.conversation.map((item) => item.id)).toEqual([
+      'large-objective',
+      'recent-evidence'
+    ])
+    expect(serialized).toContain('BEGIN')
+    expect(serialized).toContain('END-CONSTRAINT')
+    expect(serialized).toContain('truncated the active user objective')
+    expect(Buffer.byteLength(serialized, 'utf8')).toBeLessThanOrEqual(1_000)
+  })
+
+  it('rebalances an exact-but-dominant objective to retain recent evidence', () => {
+    const conversation: ModelRequest['conversation'] = [
+      {
+        kind: 'message',
+        id: 'dominant-objective',
+        role: 'user',
+        parts: [
+          {
+            kind: 'text',
+            text: `OBJECTIVE-START ${'a'.repeat(60_000)} OBJECTIVE-END`
+          }
+        ]
+      },
+      {
+        kind: 'message',
+        id: 'large-recent-evidence',
+        role: 'assistant',
+        parts: [
+          {
+            kind: 'text',
+            text: `EVIDENCE-START ${'b'.repeat(100_000)} EVIDENCE-END`
+          }
+        ]
+      }
+    ]
+
+    const selected = selectModelContext(conversation, 150_000, 10)
+    const serialized = JSON.stringify(selected.conversation)
+
+    expect(selected.activeObjective).toBe('truncated')
+    expect(selected.conversation.map((item) => item.id)).toEqual([
+      'dominant-objective',
+      'large-recent-evidence'
+    ])
+    expect(serialized).toContain('OBJECTIVE-START')
+    expect(serialized).toContain('OBJECTIVE-END')
+    expect(serialized).toContain('EVIDENCE-START')
+    expect(serialized).toContain('EVIDENCE-END')
+    expect(Buffer.byteLength(serialized, 'utf8')).toBeLessThanOrEqual(
+      150_000
+    )
+  })
+
+  it('reports an objective as unrepresentable instead of silently dropping it', () => {
+    const selected = selectModelContext(
+      [
+        {
+          kind: 'message',
+          id: 'objective',
+          role: 'user',
+          parts: [{ kind: 'text', text: 'must remain visible' }]
+        }
+      ],
+      2,
+      1
+    )
+
+    expect(selected).toEqual({
+      conversation: [],
+      omittedItems: 1,
+      activeObjective: 'omitted'
+    })
+  })
+
+  it('honors the exact serialized boundary after objective reservation', () => {
+    const conversation: ModelRequest['conversation'] = [
+      {
+        kind: 'message',
+        id: 'objective',
+        role: 'user',
+        parts: [{ kind: 'text', text: 'keep this objective' }]
+      },
+      {
+        kind: 'message',
+        id: 'answer',
+        role: 'assistant',
+        parts: [{ kind: 'text', text: 'recent answer' }]
+      }
+    ]
+    const exactBytes = Buffer.byteLength(JSON.stringify(conversation), 'utf8')
+
+    expect(
+      selectModelContext(conversation, exactBytes, 2).conversation
+    ).toEqual(conversation)
+    expect(
+      selectModelContext(conversation, exactBytes - 1, 2).conversation
+    ).toEqual([conversation[0]])
   })
 
   it('derives a conservative conversation budget from each model profile', () => {
@@ -2172,6 +2504,241 @@ describe('RunManager model runtime', () => {
     })
   })
 
+  it('keeps the active objective through bounded timeline and request planning', async () => {
+    const run = await harness([
+      (request) => textResponse(request, 'The objective remained available.')
+    ])
+    await run.store.mutateTask(run.taskId, (task) => {
+      task.items.push(
+        ...Array.from({ length: 245 }, (_, index) => ({
+          id: `older-message-${index}`,
+          kind: 'message' as const,
+          role: 'assistant' as const,
+          content: `Older normalized context ${index}`,
+          createdAt: '2026-07-29T12:00:00.000Z'
+        }))
+      )
+    })
+
+    await run.manager.start(
+      run.taskId,
+      'ACTIVE OBJECTIVE: preserve this exact request'
+    )
+    await run.terminal
+
+    const conversation = run.requests[0]?.conversation ?? []
+    const serialized = JSON.stringify(conversation)
+    expect(serialized).toContain(
+      'ACTIVE OBJECTIVE: preserve this exact request'
+    )
+    expect(
+      conversation.filter(
+        (item) =>
+          item.kind === 'message' &&
+          item.role === 'user' &&
+          item.parts.some(
+            (part) =>
+              part.kind === 'text' &&
+              part.text ===
+                'ACTIVE OBJECTIVE: preserve this exact request'
+          )
+      )
+    ).toHaveLength(1)
+    expect(conversation).toHaveLength(200)
+
+    const notice = run.store
+      .getTask(run.taskId)
+      .items.find(
+        (item) =>
+          item.kind === 'activity' &&
+          item.title === 'Context window managed'
+      )
+    expect(notice).toMatchObject({
+      kind: 'activity',
+      detail: expect.stringMatching(/active user objective was retained/i)
+    })
+    if (!notice || notice.kind !== 'activity') {
+      throw new Error('Expected context management notice')
+    }
+    expect(notice.detail).toContain(
+      '6 older normalized conversation items'
+    )
+    expect(notice.detail).toContain(
+      '40 other conversation items'
+    )
+  })
+
+  it('reports a new context state when later tool evidence requires trimming', async () => {
+    const run = await harness([
+      (request) =>
+        toolCallResponse(request, 'read_file', {
+          path: 'large-context.txt'
+        }),
+      (request) => textResponse(request, 'Finished after the bounded follow-up.')
+    ])
+    const provider = run.store.getProvider('ollama-local')
+    if (provider.kind === 'cli') throw new Error('Expected model provider')
+    const configured = {
+      ...provider,
+      contextWindowTokens: 4_096,
+      maxOutputTokens: 512,
+      updatedAt: new Date().toISOString()
+    }
+    await run.store.upsertProvider(configured)
+    await writeFile(
+      path.join(run.workspace, 'AGENTS.md'),
+      `Keep this rule.\n${'repository guidance '.repeat(8_000)}`
+    )
+    await writeFile(
+      path.join(run.workspace, 'large-context.txt'),
+      'large tool evidence\n'.repeat(10_000)
+    )
+
+    await run.manager.start(run.taskId, 'Keep this active objective in every round')
+    await run.terminal
+
+    expect(run.requests).toHaveLength(2)
+    for (const request of run.requests) {
+      expect(JSON.stringify(request.conversation)).toContain(
+        'Keep this active objective in every round'
+      )
+    }
+    const notices = run.store
+      .getTask(run.taskId)
+      .items.filter(
+        (item) =>
+          item.kind === 'activity' &&
+          item.title === 'Context window managed'
+      )
+    expect(notices).toHaveLength(1)
+    expect(notices[0]).toMatchObject({
+      kind: 'activity',
+      detail: expect.stringMatching(/repository guidance/i)
+    })
+    if (notices[0]?.kind !== 'activity') {
+      throw new Error('Expected an updated context-management activity')
+    }
+    expect(notices[0].detail).toMatch(/other conversation items/i)
+    expect(
+      run.events.some(
+        (event) =>
+          event.type === 'item-updated' &&
+          event.item.id === notices[0]?.id
+      )
+    ).toBe(true)
+  })
+
+  it('does not spend timeline context capacity on non-projectable activity', async () => {
+    const run = await harness([
+      (request) => textResponse(request, 'Only model-visible context arrived.')
+    ])
+    await run.store.mutateTask(run.taskId, (task) => {
+      task.items.push({
+        id: 'visible-history',
+        kind: 'message',
+        role: 'assistant',
+        content: 'Visible historical answer',
+        createdAt: '2026-07-29T12:00:00.000Z'
+      })
+      task.items.push(
+        ...Array.from({ length: 300 }, (_, index) => ({
+          id: `local-status-${index}`,
+          kind: 'activity' as const,
+          runId: `historical-run-${index}`,
+          activityType: 'status' as const,
+          title: `Local status ${index}`,
+          status: 'success' as const,
+          createdAt: '2026-07-29T12:00:00.000Z'
+        }))
+      )
+    })
+
+    await run.manager.start(run.taskId, 'Fresh active objective')
+    await run.terminal
+
+    expect(JSON.stringify(run.requests[0]?.conversation)).toContain(
+      'Visible historical answer'
+    )
+    expect(
+      run.store
+        .getTask(run.taskId)
+        .items.some(
+          (item) =>
+            item.kind === 'activity' &&
+            item.title === 'Context window managed'
+        )
+    ).toBe(false)
+  })
+
+  it('does not recount mirrored resumable history as timeline omissions', async () => {
+    const run = await harness([
+      (request) => textResponse(request, 'Continued from normalized history.')
+    ])
+    const providerId = run.store.getTask(run.taskId).providerId
+    const provider = run.store.getProvider(providerId)
+    if (provider.kind === 'cli') throw new Error('Expected a model provider')
+    const mirrored = Array.from({ length: 245 }, (_, index) => ({
+      kind: 'message' as const,
+      id: `mirrored-${index}`,
+      role: 'assistant' as const,
+      parts: [
+        {
+          kind: 'text' as const,
+          text: `Mirrored session context ${index}`
+        }
+      ]
+    }))
+    await run.store.mutateTask(run.taskId, (task) => {
+      task.items.push(
+        ...mirrored.map((item) => ({
+          id: item.id,
+          kind: 'message' as const,
+          role: item.role,
+          content: item.parts[0]?.text ?? '',
+          createdAt: '2026-07-29T12:00:00.000Z'
+        }))
+      )
+      task.modelSessions = {
+        [provider.id]: {
+          adapterId: 'test.model',
+          providerRevision: provider.updatedAt,
+          providerFingerprint:
+            providerConfigurationFingerprint(provider),
+          model: provider.model,
+          workspacePath: task.workspacePath,
+          mode: task.mode,
+          origin: 'ground',
+          conversation: mirrored,
+          updatedAt: task.updatedAt
+        }
+      }
+    })
+
+    await run.manager.start(run.taskId, 'Continue with this objective')
+    await run.terminal
+
+    const notice = run.store
+      .getTask(run.taskId)
+      .items.find(
+        (item) =>
+          item.kind === 'activity' &&
+          item.title === 'Context window managed'
+      )
+    expect(notice).toMatchObject({
+      kind: 'activity',
+      detail: expect.stringMatching(/other conversation items/i)
+    })
+    if (!notice || notice.kind !== 'activity') {
+      throw new Error('Expected context management notice')
+    }
+    expect(notice.detail).not.toContain(
+      'outside the bounded task-timeline projection'
+    )
+    expect(JSON.stringify(run.requests[0]?.conversation)).toContain(
+      'Continue with this objective'
+    )
+  })
+
   it('keeps imported history visible without placing it in a new model request', async () => {
     const run = await harness([
       (request) => textResponse(request, 'Fresh response.')
@@ -2239,6 +2806,15 @@ describe('RunManager model runtime', () => {
     const original = run.store.getProvider(providerId)
     if (original.kind === 'cli') throw new Error('Expected a model provider')
     await run.store.mutateTask(run.taskId, (task) => {
+      task.items.push(
+        ...Array.from({ length: 245 }, (_, index) => ({
+          id: `fresh-history-${index}`,
+          kind: 'message' as const,
+          role: 'assistant' as const,
+          content: `Fresh normalized history ${index}`,
+          createdAt: '2026-07-29T12:00:00.000Z'
+        }))
+      )
       task.modelSessions = {
         [original.id]: {
           adapterId: 'test.model',
@@ -2249,19 +2825,17 @@ describe('RunManager model runtime', () => {
           workspacePath: task.workspacePath,
           mode: task.mode,
           origin: 'ground',
-          conversation: [
-            {
-              kind: 'message',
-              id: 'stale-provider-conversation',
-              role: 'user',
-              parts: [
-                {
-                  kind: 'text',
-                  text: 'Must not survive a same-timestamp provider change'
-                }
-              ]
-            }
-          ],
+          conversation: Array.from({ length: 245 }, (_, index) => ({
+            kind: 'message' as const,
+            id: `stale-provider-conversation-${index}`,
+            role: 'assistant' as const,
+            parts: [
+              {
+                kind: 'text' as const,
+                text: `Must not survive provider change ${index}`
+              }
+            ]
+          })),
           updatedAt: task.createdAt
         }
       }
@@ -2273,12 +2847,27 @@ describe('RunManager model runtime', () => {
     }
     await run.store.upsertProvider(replacement)
 
-    await run.manager.start(run.taskId, 'Fresh request')
+    await run.manager.start(
+      run.taskId,
+      'Fresh objective after provider change'
+    )
     await run.terminal
 
-    expect(JSON.stringify(run.requests[0]?.conversation)).not.toContain(
-      'Must not survive a same-timestamp provider change'
-    )
+    const conversation = JSON.stringify(run.requests[0]?.conversation)
+    expect(conversation).not.toContain('Must not survive provider change')
+    expect(conversation).toContain('Fresh objective after provider change')
+    expect(run.requests[0]?.conversation).toHaveLength(200)
+    const notice = run.store
+      .getTask(run.taskId)
+      .items.find(
+        (item) =>
+          item.kind === 'activity' &&
+          item.title === 'Context window managed'
+      )
+    expect(notice).toMatchObject({
+      kind: 'activity',
+      detail: expect.stringMatching(/active user objective was retained/i)
+    })
     expect(
       run.store.getTask(run.taskId).modelSessions?.[providerId]
         ?.providerFingerprint

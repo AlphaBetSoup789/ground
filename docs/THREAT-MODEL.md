@@ -238,6 +238,13 @@ newer draft occupies that exact task.
   launch; other batch and PowerShell launchers are rejected.
 - API Ask mode advertises only bounded list/read/search tools. Writes, commands, and
   MCP are Agent-only, and an unadvertised call is rejected.
+- Managed API context planning anchors the latest user-message occurrence before
+  selecting recent complete exchanges, uses serialized UTF-8 byte accounting, and
+  never splits a selected tool-call/result group. A marked objective that still
+  cannot fit fails before adapter egress. Timeline projection excludes
+  non-projectable and already represented session entries from its omission count;
+  the local management activity is updated when later rounds change the exact
+  reduction.
 - Ask-to-Agent handoff is bound to the exact task, provider, and non-imported
   assistant response. It changes the persisted mode and prepares an unsent
   task-local draft only; it does not start a run, reuse an Ask-mode provider

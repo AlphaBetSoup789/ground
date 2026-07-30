@@ -132,10 +132,12 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
 - Model-visible tool paths are workspace-relative and sensitive paths are filtered.
 - Active runs bind their provider, workspace, and mode for their lifetime; the UI
   blocks changing those execution inputs until the run stops.
-- Context selection keeps recent complete tool exchanges within a conservative,
-  model-profile-derived UTF-8-byte whole-request budget, preserves core coding
-  tools and a repository-guidance allowance, compacts definitions when necessary,
-  and reports every managed reduction.
+- Context selection reserves the latest user objective, then keeps recent complete
+  tool exchanges within a conservative, model-profile-derived UTF-8-byte
+  whole-request budget. A dominant objective can become a visibly marked bounded
+  head-and-tail form so newer evidence still fits; complete tool groups remain
+  atomic, core coding tools and repository guidance retain priority, and one
+  timeline activity updates as managed reductions change.
 - New tasks remember the most recently selected provider, while legacy state
   migrates deterministically to a valid default.
 - Recognized CLI runtime activities now upsert stable native lifecycle identities

@@ -280,6 +280,15 @@ settings can override the context-window estimate and maximum response tokens, a
 can opt into low, medium, or high reasoning effort. These values are best-effort
 provider inputs: an incompatible endpoint or model may reject them.
 
+For managed API runs, Ground reserves the latest user message as the active
+objective before it fills the remaining request budget with recent complete
+conversation and tool-result groups. If an exact but dominant objective would
+displace all newer evidence, Ground keeps a visibly marked, bounded head-and-tail
+form so both can fit; it never splits a complete tool group. A budget too small
+even for the marked objective fails before provider egress. The single **Context
+window managed** timeline activity updates when later rounds require a different
+reduction, while the full task history remains local.
+
 After a completed, non-imported Ask response, an idle task with a workspace and an
 Agent-capable provider offers **Continue in Agent**. The action is bound to that
 exact task, provider, and assistant response. It persists Agent mode, then prepares
@@ -844,10 +853,10 @@ official artifact has been published or certified. Read
 - MCP currently supports tools over unauthenticated Streamable HTTP and local
   stdio. Remote headers/OAuth, resources, prompts, Apps/UI, and elicitation are not
   implemented.
-- Ground converts configured token limits into a conservative UTF-8 byte budget
-  and keeps recent complete tool exchanges, but it does not yet use each model’s
-  exact tokenizer or provide semantic repository indexing and summarizing
-  compaction.
+- Ground converts configured token limits into a conservative UTF-8 byte budget,
+  keeps the active objective plus recent complete tool exchanges, and reports
+  bounded reductions. It does not yet use each model’s exact tokenizer or provide
+  semantic repository indexing and Ground-owned summarizing compaction.
 - Generic CLIs have limited event semantics and no native session resume.
 - Ground does not automatically resume an interrupted managed action. If it
   restarts with a durable action-start claim but no recorded outcome, it marks the

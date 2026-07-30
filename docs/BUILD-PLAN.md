@@ -279,6 +279,10 @@ Requirements: GR-3.6, GR-6
 - Keep provider-native session acceleration optional.
 - Define invalidation when provider, workspace, mode, or imported-history policy
   changes.
+- As a non-summarizing precursor, reserve the active user objective inside every
+  bounded managed-API request, keep complete tool exchanges atomic, and report
+  timeline-projection and request-planner reductions without recounting compatible
+  session history.
 
 Acceptance gate:
 

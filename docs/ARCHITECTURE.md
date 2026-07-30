@@ -92,13 +92,25 @@ Agent mode can also advertise approval-gated full writes, exact localized edits,
 commands, and definition-trusted MCP tools. The model profile can supply an
 explicit context window, maximum output tokens, and optional reasoning effort.
 Context selection reserves output and safety headroom, converts the remaining
-tokens to a conservative UTF-8 byte budget, keeps recent complete tool exchanges,
-and records a timeline notice when guidance, tools, or older items are reduced.
-Core read/write/command definitions and a minimum repository-guidance allowance
-receive priority in small windows. This byte estimate is safer for multibyte text
-than a characters-per-token ratio but is not the model’s exact tokenizer. These
-numeric/reasoning settings are user-supplied protocol hints, not model capability
-certification.
+tokens to a conservative UTF-8 byte budget, and identifies the last user-message
+occurrence as the active objective. It reserves that objective before selecting a
+recent suffix of complete conversation/tool-result groups. If an exact objective
+fits alone but would exclude every newer group, a Unicode-safe bounded head-and-tail
+form with an explicit Ground marker is considered; it is used only when doing so
+retains newer evidence. A request that cannot represent even the marker fails
+before adapter egress. Source occurrence indices, rather than text or message IDs,
+prevent accidental duplication while complete tool groups remain atomic and in
+source order.
+
+The earlier task-timeline projection counts only model-projectable entries not
+already represented by a compatible session. Its omissions and the later request
+planner’s omissions remain separate, so resuming a session does not falsely count
+mirrored history. One persisted **Context window managed** activity is updated as
+the management state or exact counts change. Core read/write/command definitions
+and a minimum repository-guidance allowance receive priority in small windows.
+This byte estimate is safer for multibyte text than a characters-per-token ratio
+but is not the model’s exact tokenizer. These numeric/reasoning settings are
+user-supplied protocol hints, not model capability certification.
 
 The renderer’s Ask-to-Agent handoff is a two-step convenience, not a new authority
 path. It binds the action to an idle task’s exact non-imported assistant response

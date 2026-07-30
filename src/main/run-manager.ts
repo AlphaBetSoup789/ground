@@ -173,6 +173,9 @@ const MODEL_REQUEST_ENVELOPE_BYTES = 128
 const MIN_WORKSPACE_GUIDANCE_BYTES = 256
 const WORKSPACE_INSTRUCTION_TRUNCATION_MARKER =
   '\n[Ground shortened repository guidance to fit this model request.]'
+const ACTIVE_OBJECTIVE_TRUNCATION_MARKER =
+  '\n\n[Ground truncated the active user objective to fit this model request.]'
+const MAX_TRUNCATED_ACTIVE_OBJECTIVE_BYTES = 64_000
 const MAX_RUNTIME_ERROR_CHARACTERS = 30_000
 const RUNTIME_ERROR_TRUNCATION_NOTICE = '\n… Error truncated by Ground.'
 const RUN_SHUTDOWN_TIMEOUT_MS = 8_000
@@ -458,10 +461,28 @@ interface PlannedModelInput {
   conversation: ConversationItem[]
   tools: ModelToolDefinition[]
   omittedConversationItems: number
+  omittedTimelineConversationItems: number
+  activeObjective: ModelContextSelection['activeObjective']
   repositoryGuidanceManaged: boolean
   compactedToolDefinitions: boolean
   omittedToolNames: string[]
   byteBudget: number
+}
+
+export interface ModelContextSelection {
+  conversation: ConversationItem[]
+  omittedItems: number
+  activeObjective: 'none' | 'retained' | 'truncated' | 'omitted'
+}
+
+interface TimelineContextSelection {
+  items: Task['items']
+  omittedConversationItems: number
+}
+
+interface ModelConversationProjection {
+  conversation: ConversationItem[]
+  omittedTimelineConversationItems: number
 }
 
 type EventSink = (event: RunEvent) => void
@@ -1070,15 +1091,16 @@ export class RunManager {
       task.includeImportedHistory === true &&
       (!resumableSession ||
         !modelSessionIncludesImportedHistory(resumableSession, task))
-    const conversation = resumableSession
-      ? appendTimelineContext(
+    const conversationProjection = resumableSession
+      ? appendRecentTimelineContext(
           structuredClone(
             resumableSession.conversation
           ) as unknown as ConversationItem[],
-          recentTimelineItems(task.items, includeImportedTimeline),
+          task.items,
           includeImportedTimeline
         )
       : buildModelConversation(task)
+    const conversation = conversationProjection.conversation
     const observedToolCallIds = conversationToolCallIds(conversation)
     for (const item of task.items) {
       if (
@@ -1095,7 +1117,8 @@ export class RunManager {
         : ''
     let totalUsage: TokenUsage | undefined
     let latestCheckpoint = resumableSession?.checkpoint
-    let contextNoticeShown = false
+    let reportedContextState: string | undefined
+    let contextActivity: ActivityItem | undefined
 
     for (let round = 0; round < 20; round += 1) {
       run.controller.signal.throwIfAborted()
@@ -1121,7 +1144,8 @@ export class RunManager {
             })
           )
         ],
-        workspaceInstructions
+        workspaceInstructions,
+        conversationProjection.omittedTimelineConversationItems
       )
       const canUseTools = input.tools.length > 0
       let assistantItem: MessageItem | undefined
@@ -1163,14 +1187,36 @@ export class RunManager {
       }
 
       const contextDetails = contextManagementDetails(input)
-      if (contextDetails && !contextNoticeShown) {
-        contextNoticeShown = true
-        await this.addActivity(run, {
-          activityType: 'status',
-          title: 'Context window managed',
-          detail: contextDetails,
-          status: 'success'
-        })
+      const contextState = contextManagementStateKey(input)
+      if (
+        contextDetails &&
+        contextState &&
+        contextState !== reportedContextState
+      ) {
+        if (!contextActivity) {
+          contextActivity = await this.addActivity(run, {
+            activityType: 'status',
+            title: 'Context window managed',
+            detail: contextDetails,
+            status: 'success'
+          })
+        } else {
+          const updated = await this.store.updateItem(
+            run.taskId,
+            contextActivity.id,
+            (item) => {
+              if (item.kind === 'activity') item.detail = contextDetails
+            }
+          )
+          if (updated.kind === 'activity') contextActivity = updated
+          this.emit({
+            type: 'item-updated',
+            taskId: run.taskId,
+            runId: run.id,
+            item: updated
+          })
+        }
+        reportedContextState = contextState
       }
       const request: ModelRequest = {
         requestId: `${run.id}:${round + 1}`,
@@ -2758,11 +2804,11 @@ function toolDefinitionForProvider(
   return compatibleDefinition
 }
 
-function buildModelConversation(task: Task): ConversationItem[] {
+function buildModelConversation(task: Task): ModelConversationProjection {
   const includeImportedHistory = task.includeImportedHistory === true
-  return appendTimelineContext(
+  return appendRecentTimelineContext(
     [],
-    recentTimelineItems(task.items, includeImportedHistory),
+    task.items,
     includeImportedHistory
   )
 }
@@ -2807,22 +2853,95 @@ function assertFreshToolCallIds(
   }
 }
 
-function recentTimelineItems(
+function appendRecentTimelineContext(
+  initial: ConversationItem[],
   items: Task['items'],
   includeImportedHistory = false
-): Task['items'] {
-  const selected: Task['items'] = []
-  let characters = 0
-  for (const item of [...items].reverse()) {
+): ModelConversationProjection {
+  const selected = recentTimelineItems(
+    items,
+    includeImportedHistory,
+    initial
+  )
+  return {
+    conversation: appendTimelineContext(
+      initial,
+      selected.items,
+      includeImportedHistory
+    ),
+    omittedTimelineConversationItems: selected.omittedConversationItems
+  }
+}
+
+function recentTimelineItems(
+  items: Task['items'],
+  includeImportedHistory = false,
+  representedConversation: readonly ConversationItem[] = []
+): TimelineContextSelection {
+  const representedMessageIds = new Set(
+    representedConversation
+      .filter((item) => item.kind === 'message')
+      .map((item) => item.id)
+  )
+  const representedCallIds = conversationToolCallIds(representedConversation)
+  const candidates: Array<{
+    item: Task['items'][number]
+    projectedConversationItems: number
+  }> = []
+
+  for (const item of items) {
     if (item.historyOnly && !includeImportedHistory) continue
-    const cost = JSON.stringify(item).length
-    if (selected.length && (selected.length >= 240 || characters + cost > 800_000)) {
+    if (item.kind === 'message') {
+      if (!item.content || representedMessageIds.has(item.id)) continue
+      representedMessageIds.add(item.id)
+      candidates.push({
+        item,
+        projectedConversationItems: 1
+      })
+      continue
+    }
+    if (
+      !item.callId ||
+      !item.toolName ||
+      item.status === 'pending' ||
+      item.status === 'running' ||
+      representedCallIds.has(item.callId)
+    ) {
+      continue
+    }
+    representedCallIds.add(item.callId)
+    candidates.push({
+      item,
+      projectedConversationItems: 2
+    })
+  }
+
+  const selected: typeof candidates = []
+  let bytes = 0
+  for (const candidate of [...candidates].reverse()) {
+    const cost = serializedUtf8Bytes(candidate.item)
+    if (
+      selected.length &&
+      (selected.length >= 240 || bytes + cost > 800_000)
+    ) {
       break
     }
-    selected.unshift(item)
-    characters += cost
+    selected.unshift(candidate)
+    bytes += cost
   }
-  return selected
+
+  const selectedItems = new Set(selected.map((candidate) => candidate.item))
+  return {
+    items: selected.map((candidate) => candidate.item),
+    omittedConversationItems: candidates.reduce(
+      (count, candidate) =>
+        count +
+        (selectedItems.has(candidate.item)
+          ? 0
+          : candidate.projectedConversationItems),
+      0
+    )
+  }
 }
 
 function appendTimelineContext(
@@ -2920,19 +3039,44 @@ export function selectModelContext(
   conversation: ConversationItem[],
   byteBudget = MODEL_CONTEXT_BYTE_BUDGET,
   itemLimit = MODEL_CONTEXT_ITEM_LIMIT
-): { conversation: ConversationItem[]; omittedItems: number } {
+): ModelContextSelection {
+  let activeObjectiveIndex = -1
+  for (let index = conversation.length - 1; index >= 0; index -= 1) {
+    const item = conversation[index] as ConversationItem
+    if (item.kind === 'message' && item.role === 'user') {
+      activeObjectiveIndex = index
+      break
+    }
+  }
+  const completeObjective =
+    activeObjectiveIndex === -1 ? 'none' : 'retained'
   if (conversation.length <= itemLimit) {
     const completeCost = serializedUtf8Bytes(conversation)
     if (completeCost <= byteBudget) {
-      return { conversation, omittedItems: 0 }
+      return {
+        conversation,
+        omittedItems: 0,
+        activeObjective: completeObjective
+      }
     }
   }
 
-  const groups: ConversationItem[][] = []
+  interface IndexedConversationGroup {
+    startIndex: number
+    items: ConversationItem[]
+    retainedSourceItems: number
+  }
+
+  const groups: IndexedConversationGroup[] = []
   for (let index = 0; index < conversation.length; index += 1) {
+    const startIndex = index
     const item = conversation[index] as ConversationItem
     if (item.kind !== 'message' || item.role !== 'assistant') {
-      groups.push([item])
+      groups.push({
+        startIndex,
+        items: [item],
+        retainedSourceItems: 1
+      })
       continue
     }
     const callIds = new Set(
@@ -2941,7 +3085,11 @@ export function selectModelContext(
         .map((part) => part.callId)
     )
     if (!callIds.size) {
-      groups.push([item])
+      groups.push({
+        startIndex,
+        items: [item],
+        retainedSourceItems: 1
+      })
       continue
     }
     const group: ConversationItem[] = [item]
@@ -2951,42 +3099,164 @@ export function selectModelContext(
       group.push(candidate)
       index += 1
     }
-    groups.push(group)
+    groups.push({
+      startIndex,
+      items: group,
+      retainedSourceItems: group.length
+    })
   }
 
-  const selected: ConversationItem[][] = []
-  let selectedItems = 0
-  let compactedItems = 0
-  for (let index = groups.length - 1; index >= 0; index -= 1) {
-    const group = groups[index] as ConversationItem[]
-    const prospective = [group, ...selected].flat()
-    const exceedsLimit =
-      selectedItems + group.length > itemLimit ||
-      serializedUtf8Bytes(prospective) > byteBudget
-    if (exceedsLimit) {
-      if (!selected.length && itemLimit > 0 && byteBudget > 0) {
-        const compacted = compactOversizedGroup(
-          group,
-          Math.max(0, byteBudget - 2)
-        )
-        if (serializedUtf8Bytes(compacted) <= byteBudget) {
-          selected.unshift(compacted)
-        }
-        compactedItems = group.length
+  const objectiveGroup = groups.find(
+    (group) => group.startIndex === activeObjectiveIndex
+  )
+  const flattenSelection = (
+    candidates: IndexedConversationGroup[]
+  ): ConversationItem[] =>
+    candidates
+      .slice()
+      .sort((left, right) => left.startIndex - right.startIndex)
+      .flatMap((group) => group.items)
+
+  const selectGroups = (
+    anchor: IndexedConversationGroup | undefined
+  ): {
+    selected: IndexedConversationGroup[]
+    blocked?: IndexedConversationGroup
+  } => {
+    const selected: IndexedConversationGroup[] = []
+    for (let index = groups.length - 1; index >= 0; index -= 1) {
+      const group = groups[index] as IndexedConversationGroup
+      if (group === objectiveGroup) continue
+      const prospective = flattenSelection([
+        ...selected,
+        group,
+        ...(anchor ? [anchor] : [])
+      ])
+      if (
+        prospective.length > itemLimit ||
+        serializedUtf8Bytes(prospective) > byteBudget
+      ) {
+        return { selected, blocked: group }
       }
-      break
+      selected.push(group)
     }
-    selected.unshift(group)
-    selectedItems += group.length
+    return { selected }
   }
 
-  const flattened = selected.flat()
+  let exactAnchor: IndexedConversationGroup | undefined
+  const createCompactedAnchor = (
+    maximumBytes: number
+  ): IndexedConversationGroup | undefined => {
+    if (!objectiveGroup || itemLimit <= 0 || maximumBytes <= 0) {
+      return undefined
+    }
+    const compacted = compactActiveObjective(
+      objectiveGroup.items[0] as ConversationItem,
+      Math.min(MAX_TRUNCATED_ACTIVE_OBJECTIVE_BYTES, maximumBytes)
+    )
+    if (
+      !compacted.length ||
+      compacted.length > itemLimit ||
+      serializedUtf8Bytes(compacted) > byteBudget
+    ) {
+      return undefined
+    }
+    return {
+      startIndex: activeObjectiveIndex,
+      items: compacted,
+      retainedSourceItems: 0
+    }
+  }
+
+  let fallbackCompactedAnchor: IndexedConversationGroup | undefined
+  if (objectiveGroup && itemLimit > 0 && byteBudget > 0) {
+    const exactObjective = objectiveGroup.items
+    const exactObjectiveBytes = serializedUtf8Bytes(exactObjective)
+    if (exactObjectiveBytes <= byteBudget) {
+      exactAnchor = objectiveGroup
+    } else {
+      fallbackCompactedAnchor = createCompactedAnchor(byteBudget)
+    }
+  }
+
+  let anchorGroup = exactAnchor ?? fallbackCompactedAnchor
+  let selection = selectGroups(anchorGroup)
+  const retainsNewerContext = selection.selected.some(
+    (group) => group.startIndex > activeObjectiveIndex
+  )
+  if (
+    objectiveGroup &&
+    !retainsNewerContext &&
+    selection.blocked &&
+    selection.blocked.startIndex > activeObjectiveIndex
+  ) {
+    const blockedBytes = serializedUtf8Bytes(selection.blocked.items)
+    const availableAnchorBytes = Math.max(
+      0,
+      byteBudget - blockedBytes + 1
+    )
+    const rebalancedAnchor = createCompactedAnchor(
+      availableAnchorBytes
+    )
+    if (rebalancedAnchor) {
+      const rebalancedSelection = selectGroups(rebalancedAnchor)
+      if (
+        rebalancedSelection.selected.some(
+          (group) => group.startIndex > activeObjectiveIndex
+        )
+      ) {
+        anchorGroup = rebalancedAnchor
+        selection = rebalancedSelection
+      }
+    }
+  }
+
+  const selected = selection.selected
+  if (
+    activeObjectiveIndex === -1 &&
+    !selected.length &&
+    selection.blocked &&
+    itemLimit > 0 &&
+    byteBudget > 0
+  ) {
+    const compacted = compactOversizedGroup(
+      selection.blocked.items,
+      Math.max(0, byteBudget - 2)
+    )
+    if (
+      compacted.length > 0 &&
+      compacted.length <= itemLimit &&
+      serializedUtf8Bytes(compacted) <= byteBudget
+    ) {
+      selected.push({
+        startIndex: selection.blocked.startIndex,
+        items: compacted,
+        retainedSourceItems: 0
+      })
+    }
+  }
+
+  const activeObjective: ModelContextSelection['activeObjective'] =
+    activeObjectiveIndex === -1
+      ? 'none'
+      : anchorGroup === exactAnchor && exactAnchor
+        ? 'retained'
+        : anchorGroup
+          ? 'truncated'
+          : 'omitted'
+  const finalGroups = [
+    ...selected,
+    ...(anchorGroup ? [anchorGroup] : [])
+  ]
+  const flattened = flattenSelection(finalGroups)
+  const retainedSourceItems = finalGroups.reduce(
+    (count, group) => count + group.retainedSourceItems,
+    0
+  )
   return {
     conversation: flattened,
-    omittedItems: Math.max(
-      compactedItems,
-      conversation.length - flattened.length
-    )
+    omittedItems: Math.max(0, conversation.length - retainedSourceItems),
+    activeObjective
   }
 }
 
@@ -3025,7 +3295,8 @@ function planModelInput(
   provider: ApiProvider,
   conversation: ConversationItem[],
   candidates: RequestToolCandidate[],
-  workspaceInstructions: string
+  workspaceInstructions: string,
+  omittedTimelineConversationItems = 0
 ): PlannedModelInput {
   const byteBudget = modelRequestByteBudget(provider)
   const minimumConversationBudget = Math.min(
@@ -3114,12 +3385,19 @@ function planModelInput(
     conversation,
     conversationBudget
   )
+  if (selected.activeObjective === 'omitted') {
+    throw new Error(
+      'The configured model context is too small to include a marked form of the active user objective. Increase the provider context window or reduce fixed repository and tool context before retrying.'
+    )
+  }
 
   return {
     instructions,
     conversation: selected.conversation,
     tools,
     omittedConversationItems: selected.omittedItems,
+    omittedTimelineConversationItems,
+    activeObjective: selected.activeObjective,
     repositoryGuidanceManaged:
       boundedGuidance.truncated ||
       workspaceInstructions.includes(
@@ -3266,8 +3544,40 @@ function compactSchemaDescriptions(value: JsonObject): JsonObject {
   ) as JsonObject
 }
 
+function contextManagementStateKey(
+  input: PlannedModelInput
+): string | undefined {
+  const managed =
+    input.activeObjective === 'truncated' ||
+    input.activeObjective === 'omitted' ||
+    input.repositoryGuidanceManaged ||
+    input.compactedToolDefinitions ||
+    input.omittedToolNames.length > 0 ||
+    input.omittedTimelineConversationItems > 0 ||
+    input.omittedConversationItems > 0
+  if (!managed) return undefined
+  return JSON.stringify({
+    activeObjective: input.activeObjective,
+    repositoryGuidanceManaged: input.repositoryGuidanceManaged,
+    compactedToolDefinitions: input.compactedToolDefinitions,
+    omittedToolNames: input.omittedToolNames,
+    omittedTimelineConversationItems:
+      input.omittedTimelineConversationItems,
+    omittedConversationItems: input.omittedConversationItems
+  })
+}
+
 function contextManagementDetails(input: PlannedModelInput): string | undefined {
   const details: string[] = []
+  if (input.activeObjective === 'truncated') {
+    details.push(
+      'Ground kept a visibly truncated form of the active user objective in this request.'
+    )
+  } else if (input.activeObjective === 'omitted') {
+    details.push(
+      'The configured context budget could not represent the active user objective; Ground omitted it rather than sending an unmarked fragment.'
+    )
+  }
   if (input.repositoryGuidanceManaged) {
     details.push(
       'Ground shortened repository guidance to fit this model’s configured context window.'
@@ -3285,18 +3595,97 @@ function contextManagementDetails(input: PlannedModelInput): string | undefined 
       } omitted from this request: ${input.omittedToolNames.join(', ')}.`
     )
   }
-  if (input.omittedConversationItems > 0) {
+  if (input.omittedTimelineConversationItems > 0) {
     details.push(
-      `The most recent complete exchanges were kept and ${input.omittedConversationItems} older item${
-        input.omittedConversationItems === 1 ? ' was' : 's were'
+      `${input.omittedTimelineConversationItems} older normalized conversation item${
+        input.omittedTimelineConversationItems === 1 ? ' was' : 's were'
+      } outside the bounded task-timeline projection before request planning.`
+    )
+  }
+  const objectiveReplacement =
+    input.activeObjective === 'truncated' || input.activeObjective === 'omitted'
+      ? 1
+      : 0
+  const omittedOtherConversationItems = Math.max(
+    0,
+    input.omittedConversationItems - objectiveReplacement
+  )
+  if (omittedOtherConversationItems > 0) {
+    details.push(
+      `The most recent complete exchanges were kept and ${omittedOtherConversationItems} other conversation item${
+        omittedOtherConversationItems === 1 ? ' was' : 's were'
       } omitted from this request.`
     )
   }
   if (!details.length) return undefined
+  if (input.activeObjective === 'retained') {
+    details.unshift(
+      'The active user objective was retained in this bounded request.'
+    )
+  }
   details.push(
     `The full task history and repository files remain stored locally. The planned model input is bounded to ${input.byteBudget.toLocaleString()} conservative UTF-8 bytes.`
   )
   return details.join(' ')
+}
+
+function compactActiveObjective(
+  source: ConversationItem,
+  byteBudget: number
+): ConversationItem[] {
+  if (
+    byteBudget <= 0 ||
+    source.kind !== 'message' ||
+    source.role !== 'user'
+  ) {
+    return []
+  }
+  const availableText = source.parts
+    .filter(
+      (
+        part
+      ): part is Extract<(typeof source.parts)[number], { kind: 'text' }> =>
+        part.kind === 'text'
+    )
+    .map((part) => part.text)
+    .join('\n')
+  const codePoints = Array.from(availableText)
+  const createCandidate = (maximumCharacters: number): ConversationItem => {
+    const boundedCharacters = Math.max(0, maximumCharacters)
+    const leadingCharacters = Math.ceil((boundedCharacters * 2) / 3)
+    const trailingCharacters = boundedCharacters - leadingCharacters
+    const prefix = codePoints.slice(0, leadingCharacters).join('')
+    const suffix =
+      trailingCharacters > 0
+        ? codePoints.slice(-trailingCharacters).join('')
+        : ''
+    return {
+      kind: 'message',
+      id: source.id,
+      role: 'user',
+      parts: [
+        {
+          kind: 'text',
+          text: `${prefix}${ACTIVE_OBJECTIVE_TRUNCATION_MARKER}${suffix}`
+        }
+      ]
+    }
+  }
+
+  let lower = 0
+  let upper = codePoints.length
+  let selected: ConversationItem[] = []
+  while (lower <= upper) {
+    const middle = Math.floor((lower + upper) / 2)
+    const candidate = [createCandidate(middle)]
+    if (serializedUtf8Bytes(candidate) <= byteBudget) {
+      selected = candidate
+      lower = middle + 1
+    } else {
+      upper = middle - 1
+    }
+  }
+  return selected
 }
 
 function compactOversizedGroup(

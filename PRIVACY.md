@@ -122,6 +122,16 @@ when a user switches providers; this means relevant prior messages and tool resu
 may be sent to the newly selected provider. Foreign provider-owned continuation
 state is not replayed.
 
+Within the configured managed-API request budget, Ground gives the latest user
+message priority as the active objective and then includes recent complete
+conversation/tool-result groups. If the exact objective would otherwise displace
+all newer evidence, Ground may send a visibly marked bounded form containing its
+beginning and end; the local timeline retains the full text. Ground reports
+timeline-projection and request-planner reductions in an updating local activity.
+If even a marked objective cannot fit, Ground fails before contacting the model
+adapter for that request. This policy applies to Ground-managed API requests, not
+to the provider-internal context behavior of external CLI runtimes.
+
 Testing a connection sends a model-discovery request and the configured credential,
 if required, to that endpoint. If an OpenAI-compatible `/models` response cannot
 prove compatibility, Ground makes a separate bounded non-streaming
