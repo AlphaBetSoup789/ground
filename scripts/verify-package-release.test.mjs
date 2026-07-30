@@ -7,23 +7,15 @@ import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
 import packageMetadata from '../package.json' with { type: 'json' }
 import { classifyUnsignedMacSignature } from './lib/mac-signature.mjs'
+import {
+  PROVIDER_RUNTIME_DOES_NOT_PROVE,
+  PROVIDER_RUNTIME_PROVES,
+  REQUIRED_NATIVE_RUNTIME_CHECKS
+} from './lib/package-runtime-evidence-contract.mjs'
 
 const execFileAsync = promisify(execFile)
 const projectRoot = path.resolve(import.meta.dirname, '..')
 const temporaryDirectories = []
-const requiredChecks = [
-  'main',
-  'preload',
-  'rendererDocument',
-  'appIdentity',
-  'safeStorage',
-  'nativeApprovalDialog',
-  'pty',
-  'git',
-  'mcp',
-  'mcpLaunchApproval',
-  'processTreeCancellation'
-]
 const targets = [
   ['darwin', 'arm64', 'mac-zip-extracted', 'mac-arm64.zip'],
   ['darwin', 'x64', 'mac-zip-extracted', 'mac-x64.zip'],
@@ -123,7 +115,9 @@ describe('release artifact and runtime-evidence verification', () => {
     for (const [platform, architecture, source, suffix] of targets) {
       const artifact = `Ground-${packageMetadata.version}-${suffix}`
       const contents = `artifact:${artifact}\n`
-      const checks = Object.fromEntries(requiredChecks.map((name) => [name, true]))
+      const checks = Object.fromEntries(
+        REQUIRED_NATIVE_RUNTIME_CHECKS.map((name) => [name, true])
+      )
       const document = {
         version: 1,
         status: 'passed',
@@ -155,7 +149,35 @@ describe('release artifact and runtime-evidence verification', () => {
               : {})
           },
           nativeApproval: { cancelled: true },
-          mcpLaunchApproval: { exactEnvelopeValidated: true }
+          mcpLaunchApproval: { exactEnvelopeValidated: true },
+          providerRuntime: {
+            version: 1,
+            fixture: {
+              protocol: 'openai-compatible',
+              binding: 'token-bound-literal-loopback',
+              externalCredentialsUsed: false,
+              modelDiscoveryRequests: 1,
+              streamingCompletionRequests: 1,
+              streamedContentChunks: 2
+            },
+            readiness: {
+              passed: true,
+              persisted: true,
+              scope: 'connection'
+            },
+            firstTurn: {
+              runCompletedEventObserved: true,
+              taskIdleAfterStateReload: true,
+              assistantMarkerPersisted: true,
+              providerAttributionPersisted: true,
+              modelSessionPersisted: true,
+              noFailurePersisted: true
+            },
+            claims: {
+              proves: [...PROVIDER_RUNTIME_PROVES],
+              doesNotProve: [...PROVIDER_RUNTIME_DOES_NOT_PROVE]
+            }
+          }
         }
       }
       await writeFile(
@@ -195,6 +217,24 @@ describe('release artifact and runtime-evidence verification', () => {
       })
     ).rejects.toThrow(/security evidence is incomplete/iu)
     linuxEvidence.evidence.credentialStorage.backend = 'gnome_libsecret'
+    await writeFile(
+      linuxEvidencePath,
+      `${JSON.stringify(linuxEvidence)}\n`
+    )
+
+    linuxEvidence.evidence.providerRuntime.claims.doesNotProve = []
+    await writeFile(
+      linuxEvidencePath,
+      `${JSON.stringify(linuxEvidence)}\n`
+    )
+    await expect(
+      runScript('scripts/verify-package-runtime-evidence.mjs', [directory], {
+        GITHUB_SHA: releaseCommit
+      })
+    ).rejects.toThrow(/provider runtime evidence is incomplete/iu)
+    linuxEvidence.evidence.providerRuntime.claims.doesNotProve = [
+      ...PROVIDER_RUNTIME_DOES_NOT_PROVE
+    ]
     await writeFile(
       linuxEvidencePath,
       `${JSON.stringify(linuxEvidence)}\n`

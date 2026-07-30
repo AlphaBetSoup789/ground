@@ -42,6 +42,7 @@ import {
   type TerminalPtyFactory
 } from './terminal-service'
 import { prepareCliEnvironmentPlan } from './cli-environment'
+import type { PackagedProviderSmokeEvidence } from './packaged-provider-smoke'
 
 const SMOKE_DIRECTORY_PREFIX = 'ground-packaged-smoke-'
 const RESULT_FILENAME = 'result.json'
@@ -91,6 +92,7 @@ interface PackagedNativeEvidence {
   mcpLaunchApproval: {
     exactEnvelopeValidated: true
   }
+  providerRuntime: PackagedProviderSmokeEvidence
 }
 
 export interface WindowsTerminalProbe {
@@ -1037,14 +1039,22 @@ async function smokeMcpAndCancellation(
 }
 
 function reportNativeSmokeProgress(
-  check: 'identity' | 'credentials' | 'approval' | 'pty' | 'git' | 'mcp',
+  check:
+    | 'identity'
+    | 'credentials'
+    | 'approval'
+    | 'pty'
+    | 'git'
+    | 'provider'
+    | 'mcp',
   state: 'starting' | 'passed'
 ): void {
   process.stderr.write(`ground-packaged-smoke-${check}-${state}\n`)
 }
 
 export async function runPackagedNativeSmoke(
-  config: PackagedSmokeConfig
+  config: PackagedSmokeConfig,
+  runProviderSmoke: () => Promise<PackagedProviderSmokeEvidence>
 ): Promise<Record<string, boolean>> {
   const workspace = path.join(config.directory, 'workspace')
   const worktreeRoot = path.join(config.directory, 'worktrees')
@@ -1053,15 +1063,9 @@ export async function runPackagedNativeSmoke(
     mkdir(worktreeRoot, { mode: 0o700 })
   ])
   const checks: Record<string, boolean> = {}
-  const evidence: PackagedNativeEvidence = {
-    version: 1,
-    app: await smokeAppIdentity(),
-    credentialStorage: await smokeCredentialStorage(config),
-    nativeApproval: await smokeNativeApprovalDialog(config),
-    mcpLaunchApproval: {
-      exactEnvelopeValidated: true
-    }
-  }
+  const appEvidence = await smokeAppIdentity()
+  const credentialStorageEvidence = await smokeCredentialStorage(config)
+  const nativeApprovalEvidence = await smokeNativeApprovalDialog(config)
   checks.appIdentity = true
   checks.safeStorage = true
   checks.nativeApprovalDialog = true
@@ -1076,14 +1080,29 @@ export async function runPackagedNativeSmoke(
   checks.git = true
   reportNativeSmokeProgress('git', 'passed')
 
+  reportNativeSmokeProgress('provider', 'starting')
+  const providerRuntimeEvidence = await runProviderSmoke()
+  checks.providerCompatibleFirstTurn = true
+  reportNativeSmokeProgress('provider', 'passed')
+
   reportNativeSmokeProgress('mcp', 'starting')
-  evidence.mcpLaunchApproval.exactEnvelopeValidated =
+  const exactMcpLaunchEnvelopeValidated =
     await smokeMcpAndCancellation(config)
   checks.mcp = true
   checks.mcpLaunchApproval = true
   checks.processTreeCancellation = true
   reportNativeSmokeProgress('mcp', 'passed')
 
+  const evidence: PackagedNativeEvidence = {
+    version: 1,
+    app: appEvidence,
+    credentialStorage: credentialStorageEvidence,
+    nativeApproval: nativeApprovalEvidence,
+    mcpLaunchApproval: {
+      exactEnvelopeValidated: exactMcpLaunchEnvelopeValidated
+    },
+    providerRuntime: providerRuntimeEvidence
+  }
   await writeFile(
     path.join(config.directory, NATIVE_EVIDENCE_FILENAME),
     `${JSON.stringify(evidence, null, 2)}\n`,

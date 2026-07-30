@@ -2,6 +2,10 @@ import { readFile, readdir } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import { sha256File } from './lib/packaged-components.mjs'
+import {
+  hasCompleteProviderRuntimeEvidence,
+  REQUIRED_NATIVE_RUNTIME_CHECKS
+} from './lib/package-runtime-evidence-contract.mjs'
 
 const projectRoot = path.resolve(import.meta.dirname, '..')
 const artifactDirectory = path.resolve(
@@ -11,19 +15,6 @@ const artifactDirectory = path.resolve(
 const packageMetadata = JSON.parse(
   await readFile(path.join(projectRoot, 'package.json'), 'utf8')
 )
-const requiredChecks = [
-  'main',
-  'preload',
-  'rendererDocument',
-  'appIdentity',
-  'safeStorage',
-  'nativeApprovalDialog',
-  'pty',
-  'git',
-  'mcp',
-  'mcpLaunchApproval',
-  'processTreeCancellation'
-]
 const targets = [
   {
     platform: 'darwin',
@@ -96,7 +87,9 @@ for (const target of targets) {
     invalid(evidenceName, 'target metadata does not match the release')
   }
   if (
-    requiredChecks.some((name) => document.checks?.[name] !== true)
+    REQUIRED_NATIVE_RUNTIME_CHECKS.some(
+      (name) => document.checks?.[name] !== true
+    )
   ) {
     invalid(evidenceName, 'one or more required runtime checks are missing')
   }
@@ -122,6 +115,13 @@ for (const target of targets) {
     document.evidence?.mcpLaunchApproval?.exactEnvelopeValidated !== true
   ) {
     invalid(evidenceName, 'security evidence is incomplete')
+  }
+  if (
+    !hasCompleteProviderRuntimeEvidence(
+      document.evidence?.providerRuntime
+    )
+  ) {
+    invalid(evidenceName, 'provider runtime evidence is incomplete')
   }
   if (
     document.distributable?.name !== target.artifact ||

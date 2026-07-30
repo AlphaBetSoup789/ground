@@ -23,7 +23,10 @@ const results = []
 
 async function resetRenderer() {
   await page.setViewportSize({ width: 1_280, height: 860 })
-  await page.emulateMedia({ reducedMotion: 'no-preference' })
+  await page.emulateMedia({
+    reducedMotion: 'no-preference',
+    forcedColors: 'none'
+  })
   await page.reload({ waitUntil: 'domcontentloaded' })
   await page.getByLabel('Task title').waitFor()
 }
@@ -110,7 +113,7 @@ try {
     const displayName = page.getByLabel('Display name')
     const model = page.getByLabel('Model identifier')
     const baseUrl = page.getByLabel('Base URL')
-    const apiKey = page.getByLabel('API key')
+    const apiKey = page.getByRole('textbox', { name: /^API key/ })
     assert.equal(await baseUrl.getAttribute('type'), 'url')
     assert.equal(await apiKey.getAttribute('type'), 'password')
 
@@ -129,6 +132,70 @@ try {
     assert.equal(await model.evaluate((element) => element.matches(':invalid')), true)
     assert.notEqual(await model.evaluate((element) => element.validationMessage), '')
     assert.equal(await model.evaluate((element) => element === document.activeElement), true)
+  })
+
+  await run('local provider failure explains ownership and offers an installed CLI', async () => {
+    await page.getByRole('button', { name: 'Providers & settings' }).click()
+    await page.getByRole('dialog', { name: 'Connect a provider' }).waitFor()
+
+    const connectionPaths = page.getByRole('group', { name: 'Connection path' })
+    await connectionPaths.waitFor()
+    const localPath = connectionPaths.getByRole('radio', {
+      name: /Local server/
+    })
+    const cliPath = connectionPaths.getByRole('radio', {
+      name: /Installed CLI/
+    })
+    assert.equal(
+      await localPath.isChecked(),
+      true,
+      'general settings should start a new local template, not edit the seeded provider'
+    )
+    await localPath.focus()
+    await localPath.press('ArrowRight')
+    assert.equal(await cliPath.isChecked(), true)
+    assert.equal(
+      await cliPath.evaluate((element) => element === document.activeElement),
+      true,
+      'switching connection paths with arrow keys should preserve radio focus'
+    )
+    await cliPath.press('ArrowLeft')
+    assert.equal(await localPath.isChecked(), true)
+    assert.equal(
+      await localPath.evaluate((element) => element === document.activeElement),
+      true
+    )
+    await connectionPaths.getByText('Hosted API', { exact: true }).click()
+    await connectionPaths.getByText('Local server', { exact: true }).click()
+    await page.getByText(
+      /included local-server values are only a connection template/
+    ).waitFor()
+
+    const baseUrl = page.getByLabel('Base URL')
+    assert.equal(await baseUrl.inputValue(), 'http://127.0.0.1:11434/v1')
+    await page.getByLabel('Model identifier').fill('missing-local-model')
+    await baseUrl.fill('http://127.0.0.1:1/v1')
+    await page.getByRole('button', { name: 'Test', exact: true }).click()
+
+    const failure = page.getByRole('alert').filter({ hasText: 'Could not connect' })
+    await failure.waitFor()
+    await failure.getByText('Before testing this local server again').waitFor()
+    await failure.getByText(
+      /Ground does not install or start the server and does not pull models/
+    ).waitFor()
+
+    await failure.getByRole('button', { name: 'Configure Codex CLI' }).click()
+    assert.equal(
+      await page.getByRole('radio', { name: /Installed CLI/ }).isChecked(),
+      true
+    )
+    assert.equal(
+      await page.getByRole('textbox', { name: /^Executable/ }).inputValue(),
+      '/opt/homebrew/bin/codex'
+    )
+    await page.getByText(
+      /Detection does not prove sign-in, model access, or a successful turn/
+    ).waitFor()
   })
 
   await run('composer drafts remain task-local across task switches', async () => {
@@ -191,10 +258,19 @@ try {
 
   await run('responsive settings and reduced-motion rules apply', async () => {
     await page.setViewportSize({ width: 680, height: 760 })
-    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.emulateMedia({
+      reducedMotion: 'reduce',
+      forcedColors: 'active'
+    })
     assert.equal(
       await page.evaluate(() =>
         window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      ),
+      true
+    )
+    assert.equal(
+      await page.evaluate(() =>
+        window.matchMedia('(forced-colors: active)').matches
       ),
       true
     )
@@ -203,6 +279,16 @@ try {
     await page.getByRole('dialog').waitFor()
     assert.equal(await page.locator('.settings-nav').isVisible(), false)
     assert.equal(await page.getByLabel('Settings section').isVisible(), true)
+    const selectedConnectionPath = page.locator(
+      '.connection-path-options input:checked + span'
+    )
+    assert.equal(await selectedConnectionPath.count(), 1)
+    assert.equal(
+      await selectedConnectionPath.evaluate(
+        (element) => getComputedStyle(element).outlineStyle
+      ),
+      'solid'
+    )
 
     const transitionDurationsMs = await page
       .getByRole('button', { name: 'Close provider settings' })

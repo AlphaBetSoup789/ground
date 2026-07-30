@@ -81,6 +81,9 @@ conformance runner; npm publication remains a separate maintainer release step.
   Ground-managed tool set
 - Provider switching with per-item provider attribution and normalized tool-call
   and tool-result context
+- First-run provider setup split into Hosted API, Local server, and Installed CLI
+  paths, with passive local CLI detection presented as a path match rather than a
+  health or authentication claim
 - Approval-gated full writes, exact localized edits, commands, and MCP calls for
   Ground-managed API agents, with an exact native allow-once confirmation
 - Durable start/completion claims for Ground-managed writes, commands, and MCP
@@ -157,6 +160,16 @@ the project does not yet claim a complete cross-platform accessibility audit.
 
 Open **Providers & settings** in the desktop app.
 
+New provider setup begins with three explicit connection paths:
+
+- **Hosted API** connects Ground directly to a cloud endpoint using the selected
+  protocol and account credential.
+- **Local server** fills a loopback OpenAI-compatible template for Ollama, LM
+  Studio, or another server that the user already operates.
+- **Installed CLI** configures an existing coding-agent executable. Ground may
+  offer passively detected local candidates, but detection does not prove sign-in,
+  model access, or a successful turn.
+
 ### First-class hosted API
 
 Choose OpenAI, Anthropic, or Google AI, then enter the model identifier and API key
@@ -202,6 +215,11 @@ Enter:
 - the model identifier expected by that endpoint; and
 - an API key if the endpoint requires one.
 
+The included local values are a connection template only. Ground does not supply,
+install, or start Ollama, LM Studio, or another local runtime, and it does not pull
+or download models. Start the server separately and load the exact model identifier
+before testing it in Ground.
+
 Non-loopback endpoints must use HTTPS. Ground sends requests directly to the
 configured origin and rejects redirects. It does not route model traffic through a
 Ground service. **Test connection** first requests the compatible endpoint’s
@@ -212,6 +230,12 @@ test succeeds only if either response has the expected shape; it rejects redirec
 bounds both responses, and combines redacted diagnostics if both probes fail. That
 fallback is a real generation request and can consume a small amount of the
 configured endpoint’s quota.
+
+When main confirms that a literal-loopback connection was refused, the provider
+form shows a local-server checklist and offers any passively detected CLI
+alternatives. Ground does not infer that diagnosis from arbitrary error text, so
+authentication, protocol-shape, and other failures retain their original
+diagnostics instead of being presented as a stopped server.
 
 In Agent mode, the integrated API path can expose `list_files`, `read_file`,
 `search_files`, `write_file`, `edit_file`, and `run_command`. Reads are bounded and
@@ -242,6 +266,8 @@ by a configured Ground workspace. **Choose executable…** opens a main-process-
 native file picker and validates the selected direct executable or reviewed Windows
 Node package shim without running it. Saving the profile and launching the final
 invocation remain separate native confirmations.
+Candidates shown in onboarding are therefore described as detected locally, not
+healthy or authenticated.
 
 The Antigravity structured preset requires version 1.1.8 or newer. Ground runs its
 bounded `--version` probe only after the user confirms the saved executable and
@@ -606,10 +632,12 @@ dependencies.
 `test:e2e:renderer` launches the real built React renderer in Electron with the
 explicit browser-preview desktop mock and drives it through Playwright. It covers
 command-palette focus/navigation, native HTML provider-form validation, task-local
-drafts, mock send/cancel, archive/search, responsive settings, and reduced-motion
-styles. CI runs it on macOS, Windows, and Linux/Xvfb. It does not load the
-production preload/main process, invoke native permissions, use a real provider, or
-replace screen-reader/manual accessibility testing.
+drafts, mock send/cancel, archive/search, responsive settings, reduced-motion and
+forced-color styles, plus the local-template/refused-connection recovery path into
+a detected CLI. The current suite contains seven scenarios. CI runs it on macOS,
+Windows, and Linux/Xvfb. It does not load the production preload/main process,
+invoke native permissions, use a real provider, or replace screen-reader/manual
+accessibility testing.
 
 The suite covers provider event normalization and output bounds, CLI argv/event
 parsing and cancellation, native session metadata, renderer/IPC trust checks,
@@ -657,8 +685,18 @@ matching native runners. They launch the unpacked app with an isolated temporary
 profile and verify real main/preload/document startup without browser automation.
 A bounded native smoke verifies packaged app identity, performs an OS-encrypted
 credential-vault set/reload/get/delete round trip, opens and automatically cancels
-a real native approval dialog, and exercises PTY, Git, an exact local stdio MCP
-launch/call, and process-tree cleanup.
+a real native approval dialog, and exercises PTY, Git, a deterministic packaged
+OpenAI-compatible provider first turn, an exact local stdio MCP launch/call, and
+process-tree cleanup.
+
+The provider subprobe starts a credential-free, token-bound server on literal
+loopback. Through the packaged main process it saves and persistently verifies one
+OpenAI-compatible profile, streams one first task turn through the production
+adapter registry and `RunManager`, reloads state, and checks the assistant marker,
+provider attribution, continuation state, idle task status, and absence of a
+persisted failure. It does not prove hosted credentials or internet reachability,
+the behavior of Ollama, LM Studio, or another vendor service, CLI execution, tool
+execution, or any provider protocol other than OpenAI-compatible.
 
 The distributable smoke extracts the macOS ZIP, silently installs the Windows NSIS
 package in a temporary directory and verifies the executable and installation
@@ -671,13 +709,16 @@ This is bounded runtime evidence—not general installer, renderer interaction,
 accessibility, live-provider/CLI, signing, notarization, or distribution
 certification.
 
-On the current branch, a local macOS arm64 package passes launch scope, the full
-native scope, and that same native scope after extracting its ZIP. Separately, the
-native
+For the current source, a local macOS arm64 `npm run package:mac` build and
+`npm run smoke:package:native` against its unpacked app passed, including the
+deterministic provider first turn. A current-source distributable smoke and
+four-target aggregate have not been run. The older
 [four-target Package previews run](https://github.com/AlphaBetSoup789/ground/actions/runs/30473714099)
 completed the required macOS arm64, macOS x64, Windows x64, and Linux x64 jobs for
-source commit `a3073a8`. Those artifact-bound records are commit-specific unsigned
-preview evidence, not evidence for later source or a supported distribution.
+source commit `a3073a8`, but it predates the packaged-provider-turn requirement.
+Those artifact-bound records remain evidence only for that earlier smoke contract;
+they do not satisfy the current aggregate or certify later source or a supported
+distribution.
 
 Linux credentials require a working Secret Service/libsecret backend and an
 unlocked desktop keyring. Ground refuses Electron’s insecure `basic_text` fallback.

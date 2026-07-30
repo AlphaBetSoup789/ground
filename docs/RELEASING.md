@@ -62,9 +62,19 @@ Native scope repeats startup and verifies:
 - a real production native approval dialog that is automatically aborted after a
   bounded delay and must resolve as Cancel;
 - the packaged PTY binding and Git status service;
+- one credential-free, token-bound literal-loopback OpenAI-compatible provider
+  readiness check and first streamed task turn through the packaged production
+  registry and `RunManager`;
 - a fixed local stdio MCP handshake/tool call whose exact launch envelope is
   validated; and
 - descendant process-tree cleanup.
+
+The provider fixture performs exactly one model-discovery request and one streamed
+completion, then reloads state and requires the assistant marker, provider
+attribution, compatible-adapter continuation state, idle task status, and no
+persisted failure. It does not use an external credential or public network. It
+does not certify hosted providers, Ollama, LM Studio, another vendor service, CLI
+agents, tool execution, or protocols other than OpenAI-compatible.
 
 Distributable scope extracts the exact macOS ZIP, silently installs the Windows
 NSIS package into a temporary directory and verifies that its executable and
@@ -74,7 +84,21 @@ DMG and DEB installation are not exercised. The resulting
 `ground-package-runtime-evidence-<platform>-<architecture>.json` binds fixed checks,
 security evidence, package identity, installation source, and the distributable’s
 name and SHA-256. This is bounded runtime evidence, not broad installer,
-accessibility, provider, signing, notarization, or distribution certification.
+accessibility, live-provider/CLI, signing, notarization, or distribution
+certification.
+
+### Current evidence snapshot
+
+For the current source, local macOS arm64 `npm run package:mac` and
+`npm run smoke:package:native` against the unpacked app passed, including the
+deterministic provider first turn. The current-source distributable smoke and
+four-target evidence aggregate have not been run.
+
+The older
+[Package previews run 30473714099](https://github.com/AlphaBetSoup789/ground/actions/runs/30473714099)
+completed four native targets for commit `a3073a8`, but it predates the packaged
+provider-turn requirement. Its records remain evidence for the earlier smoke
+contract and do not satisfy the current runtime-evidence aggregate.
 
 Linux uses Xvfb in hosted workflows and requires D-Bus, `libsecret`, and an unlocked
 Secret Service backend. The workflow creates an ephemeral GNOME-keyring session.
@@ -115,8 +139,9 @@ Before pushing a release tag:
    macOS x64, Windows x64, and Linux x64. The checks require Ground's license,
    `THIRD_PARTY_NOTICES.md`, Electron's license, and Chromium's bundled third-party
    license inventory in packaged resources. Native scope must load `node-pty`,
-   complete credential/native-dialog/Git/MCP/process-cleanup probes, and
-   distributable scope must bind its evidence to the exact ZIP, NSIS, or AppImage.
+   complete credential/native-dialog/Git/provider-first-turn/MCP/process-cleanup
+   probes, and distributable scope must bind its evidence to the exact ZIP, NSIS,
+   or AppImage.
 5. Aggregate the four runtime-evidence records beside their distributables and run
    `npm run package-evidence:verify -- PATH_TO_ARTIFACTS`. This requires the exact
    four target records and checks every recorded artifact hash.
@@ -153,7 +178,8 @@ If those gates pass, it:
   Windows signing policy is defined;
 - boots each unpacked packaged app through a main/preload readiness handshake and
   smoke-tests packaged identity, OS-encrypted credential storage, the fail-closed
-  native approval dialog, PTY, Git, exact fixed local MCP, and process-tree cleanup;
+  native approval dialog, PTY, Git, the deterministic compatible-provider first
+  turn, exact fixed local MCP, and process-tree cleanup;
 - reruns native scope against each exact macOS ZIP, installed Windows NSIS package,
   or extracted Linux AppImage and emits an artifact-hash-bound runtime-evidence
   record;
@@ -193,7 +219,9 @@ to prove only its fail-closed Cancel result; it does not certify human review,
 focus, assistive technology, or every OS dialog behavior. The credential round trip
 proves only the configured runner’s secure-storage session. Local MCP auto-approval
 applies only to a fixed in-memory fixture executed by Ground's own packaged
-runtime.
+runtime. Provider evidence likewise applies only to Ground's credential-free,
+token-bound literal-loopback OpenAI-compatible fixture and the one first-turn path
+described above.
 
 All third-party actions are pinned to reviewed full commit SHAs, checkout does not
 persist credentials, and each job receives only its declared permissions. When a

@@ -91,6 +91,13 @@ argv construction but does not authenticate or launch an agent turn. A readiness
 pass is therefore an installation-specific preflight, not a published compatibility
 certification.
 
+New-provider onboarding separates Hosted API, Local server, and Installed CLI
+paths. The Local server path supplies only editable loopback values; it does not
+install or start a server or download a model. Only a main-process-confirmed
+refused literal-loopback connection unlocks the local startup/model/port recovery
+checklist. Passive CLI candidates are described as detected locally because a path
+match does not establish authentication, model access, or successful execution.
+
 Reviewed downstream builds can statically register another `ModelAdapter` or
 `AgentRuntimeAdapter` and map an existing profile envelope to it without replacing
 the canonical reducers. This is source integration, not dynamic end-user plugin
@@ -262,7 +269,7 @@ portable resume contract and do not persist opaque sessions.
 
 | Platform | Development | Packaged artifact | Release status |
 | --- | --- | --- | --- |
-| macOS arm64 | Local + hosted CI/source target | Local unpacked launch/native and extracted-ZIP native evidence passed; ZIP/DMG workflow target | No supported release |
+| macOS arm64 | Local + hosted CI/source target | Current source: local unpacked native evidence passed; current-source ZIP/distributable evidence not run; ZIP/DMG workflow target | No supported release |
 | macOS x64 | Hosted Intel CI/source target | ZIP/DMG target; native evidence reruns against extracted ZIP | No supported release |
 | Windows x64 | Hosted CI/source target | NSIS target; native evidence reruns after temporary silent install and invokes uninstall | No supported release |
 | Linux x64 | Hosted CI/source target | AppImage/DEB target; native evidence reruns against extracted AppImage under Xvfb + Secret Service | No supported release |
@@ -278,10 +285,23 @@ configuration alone is not a passing result.
 
 The native scope verifies packaged identity, a real OS-encrypted `SecretVault`
 set/reload/get/delete round trip, a production approval dialog automatically
-aborted to Cancel, PTY, Git, exact local stdio MCP launch/call, and process-tree
-cleanup. Distributable scope extracts a macOS ZIP or Linux AppImage, or temporarily
-installs NSIS and verifies its executable/install directory are removed, then runs
-native scope against the result. It does not
+aborted to Cancel, PTY, Git, a deterministic packaged OpenAI-compatible provider
+first turn, exact local stdio MCP launch/call, and process-tree cleanup.
+
+The provider check binds a credential-free fixture to literal loopback and a
+per-smoke token. Through the packaged main process it saves the profile, persists a
+successful readiness check after one model-discovery request, and streams one
+two-chunk completion through the production adapter registry and `RunManager`.
+After reloading state it requires a completed event, an idle task, the exact
+assistant marker, provider attribution, compatible-adapter continuation state, and
+no persisted failure. This proves only that deterministic OpenAI-compatible
+packaged path. It does not prove hosted credentials, internet reachability, an
+external vendor service, CLI agents, tools, or OpenAI Responses, Anthropic
+Messages, or Google Gemini behavior.
+
+Distributable scope extracts a macOS ZIP or Linux AppImage, or temporarily installs
+NSIS and verifies its executable/install directory are removed, then runs native
+scope against the result. It does not
 install DMG or DEB artifacts, drive arbitrary installer options, exercise a real
 model/CLI/MCP server, or certify renderer accessibility. Linux requires D-Bus,
 libsecret, and an unlocked Secret Service implementation; hosted workflows create
@@ -298,24 +318,28 @@ those secrets exist or that an official artifact has completed the workflow.
 Public-alpha preview artifacts are unsigned, macOS previews are unnotarized, and
 Windows/Linux signing policy remains undefined.
 
-The current local macOS arm64 build has passed the packaged launch scope, the native
-identity/secure-storage/dialog/PTY/Git/MCP/cancellation scope, and that same native
-scope from its extracted ZIP. Separately, the native
+For the current source, local macOS arm64 `npm run package:mac` and the unpacked
+`npm run smoke:package:native` passed, including the deterministic provider turn.
+A current-source distributable smoke and four-target aggregate have not been run.
+The older
 [four-target Package previews run](https://github.com/AlphaBetSoup789/ground/actions/runs/30473714099)
 completed the required macOS arm64, macOS x64, Windows x64, and Linux x64 jobs for
-source commit `a3073a8`, with artifact-bound runtime evidence. Those records are
-commit-specific unsigned preview evidence, not evidence for later source. They do
-not certify signing, notarization, DMG/DEB installation, renderer accessibility,
-live providers/CLIs, or supported distribution.
+source commit `a3073a8`, but predates the required packaged provider turn. Its
+artifact-bound records cover only the earlier smoke contract and cannot satisfy the
+current aggregate. They are not evidence for later source and do not certify
+signing, notarization, DMG/DEB installation, renderer accessibility, live
+providers/CLIs, or supported distribution.
 
-The six-scenario renderer interaction suite runs the built browser-preview React
-renderer in Electron through Playwright Core. Its current local result is 6/6:
+The seven-scenario renderer interaction suite runs the built browser-preview React
+renderer in Electron through Playwright Core. Its current local result is 7/7:
 command-palette filtering/keyboard/focus restore, provider labels and Chromium
-constraint validation, task-local drafts, deterministic send/cancel, archive and
-archived search, and 680px responsive settings with reduced motion. CI is configured
-to run it directly on macOS/Windows and under Xvfb on Linux. Because it uses the
-explicit preview desktop mock, it is renderer evidence—not production-main/preload,
-native permission, provider, screen-reader, or packaged-app certification.
+constraint validation, local-template/refused-connection recovery into a detected
+CLI, task-local drafts, deterministic send/cancel, archive and archived search, and
+680px responsive settings with reduced motion plus forced-color connection-path
+selection. CI is configured to run it directly on macOS/Windows and under Xvfb on
+Linux. Because it uses the explicit preview desktop mock, it is renderer
+evidence—not production-main/preload, native permission, provider, screen-reader,
+or packaged-app certification.
 
 The pinned compatibility suite performs no authenticated request and launches no
 coding CLI. Its separate loopback SSE integration drives only Ground’s production

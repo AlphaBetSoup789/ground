@@ -1656,6 +1656,7 @@ describe('provider model discovery', () => {
       expect(result).toMatchObject({
         ok: false,
         title: 'Could not connect',
+        failureKind: 'connection-refused',
         detail: expect.stringContaining(
           `No service is listening at ${endpoint}`
         )
@@ -1977,6 +1978,7 @@ describe('provider model discovery', () => {
         /generation probe failed:.*invalid assistant message/iu
       )
     })
+    expect(result.failureKind).toBeUndefined()
   })
 
   it('keeps fallback verification unpersisted for unsaved and modified drafts', async () => {

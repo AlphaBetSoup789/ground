@@ -9,6 +9,10 @@ import {
   locatePackagedApp
 } from './lib/packaged-app.mjs'
 import { sha256File } from './lib/packaged-components.mjs'
+import {
+  hasCompleteProviderRuntimeEvidence,
+  REQUIRED_NATIVE_RUNTIME_CHECKS
+} from './lib/package-runtime-evidence-contract.mjs'
 
 const scope = process.argv[2] ?? 'launch'
 if (scope !== 'launch' && scope !== 'native') {
@@ -206,19 +210,7 @@ try {
 
   const requiredChecks =
     scope === 'native'
-      ? [
-          'main',
-          'preload',
-          'rendererDocument',
-          'appIdentity',
-          'safeStorage',
-          'nativeApprovalDialog',
-          'pty',
-          'git',
-          'mcp',
-          'mcpLaunchApproval',
-          'processTreeCancellation'
-        ]
+      ? REQUIRED_NATIVE_RUNTIME_CHECKS
       : ['main', 'preload', 'rendererDocument']
   if (
     outcome.code !== 0 ||
@@ -244,9 +236,14 @@ try {
       evidence.app?.packaged !== true ||
       evidence.app?.platform !== process.platform ||
       evidence.app?.architecture !== process.arch ||
+      evidence.credentialStorage?.encryptionAvailable !== true ||
       evidence.credentialStorage?.roundTrip !== true ||
+      evidence.credentialStorage?.backend === 'basic_text' ||
+      (process.platform === 'linux' &&
+        evidence.credentialStorage?.backend !== 'gnome_libsecret') ||
       evidence.nativeApproval?.cancelled !== true ||
-      evidence.mcpLaunchApproval?.exactEnvelopeValidated !== true
+      evidence.mcpLaunchApproval?.exactEnvelopeValidated !== true ||
+      !hasCompleteProviderRuntimeEvidence(evidence.providerRuntime)
     ) {
       throw new Error(
         `Packaged native evidence failed validation: ${JSON.stringify(evidence)}`

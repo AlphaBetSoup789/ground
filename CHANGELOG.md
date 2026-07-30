@@ -40,6 +40,11 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
   saved API/CLI tests record pass or failure, and run startup requires a passing
   check. OpenAI-compatible tests fall back from an unavailable `/models` listing
   to one bounded minimal generation probe.
+- First-run provider onboarding with explicit Hosted API, Local server, and
+  Installed CLI paths. The local path is labeled as a connection template rather
+  than a bundled runtime; confirmed refused loopback connections receive targeted
+  startup/model/port recovery and passively detected CLI alternatives without
+  claiming authentication, model access, or runtime health.
 - Ask-mode list/read/search tools and advanced per-provider context-window,
   response-token, and optional reasoning-effort controls.
 - Per-message/activity provider attribution and normalized cross-provider
@@ -78,12 +83,14 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
   shipped-content SBOM coverage, and deterministic release checksums.
 - Native-runner packaged startup and runtime smokes: a private
   main/preload/document readiness handshake plus packaged identity, encrypted-vault
-  round trip, fail-closed native approval dialog, PTY, Git, local stdio MCP, and
-  descendant-cleanup probes. Distributable smoke extracts the macOS ZIP, temporarily
-  installs/uninstalls Windows NSIS, or extracts the Linux AppImage, then binds
-  runtime-evidence records to the exact artifact and architecture.
-- Four-target packaging evidence for macOS arm64, macOS x64, Windows x64, and Linux
-  x64, with release-time evidence inventory and SHA-256 verification.
+  round trip, fail-closed native approval dialog, PTY, Git, one deterministic
+  credential-free OpenAI-compatible readiness and first-turn path, local stdio MCP,
+  and descendant-cleanup probes. Distributable smoke extracts the macOS ZIP,
+  temporarily installs/uninstalls Windows NSIS, or extracts the Linux AppImage,
+  then binds runtime-evidence records to the exact artifact and architecture.
+- A four-target packaging-evidence contract for macOS arm64, macOS x64, Windows
+  x64, and Linux x64, with release-time evidence inventory, SHA-256 verification,
+  and mandatory packaged-provider-turn evidence.
 
 ### Changed
 
@@ -115,11 +122,13 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
 - Add a keyboard command palette, task-local process-memory composer drafts,
   near-bottom-only timeline following, and bounded batched screen-reader
   announcements for streamed assistant text.
-- Add a six-scenario Playwright-over-Electron renderer interaction suite for
+- Add a seven-scenario Playwright-over-Electron renderer interaction suite for
   command-palette keyboard/focus behavior, accessible provider-form validation,
-  task-local drafts, deterministic send cancellation, archive/search, responsive
-  settings, and reduced-motion CSS. It uses the explicit browser-preview desktop
-  mock and is not production-main/native/provider certification.
+  truthful local-provider refusal recovery into a detected CLI, task-local drafts,
+  deterministic send cancellation, archive/search, responsive settings,
+  reduced-motion CSS, and forced-color connection-path selection. It uses the
+  explicit browser-preview desktop mock and is not
+  production-main/native/provider certification.
 - A dated credential-free CLI help/source-surface observation records the reviewed
   Codex, Claude Code, Gemini, and Antigravity versions without claiming live
   provider certification.

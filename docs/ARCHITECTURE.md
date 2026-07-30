@@ -79,6 +79,14 @@ renderer-driven through a short-lived opaque attachment capability.
 OpenAI Responses, Anthropic Messages, Google Gemini, and OpenAI-compatible/local
 endpoints belong in this class.
 
+Provider creation presents three connection paths without changing these ownership
+boundaries: Hosted API selects a direct cloud protocol, Local server starts from a
+loopback OpenAI-compatible template, and Installed CLI selects an existing external
+runtime. The local template is data only; Ground does not install or supervise the
+server and does not download models. Passive CLI discovery likewise proves only
+that a reviewed executable shape exists in a bounded local install location, not
+that it is authenticated, can access a model, or can complete a turn.
+
 For an attached workspace, Ask mode advertises only bounded list/read/search tools.
 Agent mode can also advertise approval-gated full writes, exact localized edits,
 commands, and definition-trusted MCP tools. The model profile can supply an
@@ -104,6 +112,12 @@ launch an authenticated agent turn. A run reserves the exact task revision,
 provider revision/configuration fingerprint, and credential boundary before CLI
 authorization or workspace lookup. Provider mutation and verification publication
 cannot interleave with that reservation or an active run.
+
+Corrective UI is unlocked by typed main-process evidence rather than renderer
+message matching. In the current narrow case, only an actual refused connection to
+a literal-loopback provider carries `connection-refused`; that result can show the
+local startup/model/port checklist and detected-CLI alternatives. Authentication,
+protocol-shape, and other uncategorized failures retain their original diagnostics.
 
 ### Agent runtime adapters
 
@@ -527,11 +541,12 @@ reduced-motion rules are part of the public-preview baseline; they are not a cla
 complete cross-platform accessibility certification.
 
 A Playwright-over-Electron suite drives that real built renderer with the
-explicit browser-preview desktop mock. Its six scenarios cover palette
-keyboard/focus, provider-form labels and Chromium constraint validation, task-local
-drafts, deterministic send/cancel, archive/search, responsive settings, and
-reduced-motion CSS. It does not load production main/preload authority or replace
-manual screen-reader/native review.
+explicit browser-preview desktop mock. Its seven scenarios cover palette
+keyboard/focus, provider-form labels and Chromium constraint validation,
+local-template/refused-connection recovery into a detected CLI, task-local drafts,
+deterministic send/cancel, archive/search, responsive settings, reduced-motion CSS,
+and the forced-color connection-path selection. It does not load production
+main/preload authority or replace manual screen-reader/native review.
 
 ## Current composition and migration
 
@@ -552,21 +567,32 @@ authenticated native coding-agent session.
 Native package workflows target macOS arm64/x64, Windows x64, and Linux x64. A
 fixed packaged smoke verifies app identity, OS-encrypted vault round-trip, the
 fail-closed Cancel result of a real native approval dialog, PTY, Git, exact local
-MCP launch/call, and process-tree cleanup. The distributable layer reruns that
-scope against an extracted macOS ZIP, a temporarily installed Windows NSIS
-package, or an extracted Linux AppImage and emits an artifact-hash-bound evidence
-record. Release aggregation requires all four target records. These are bounded
-runtime checks, not signing, notarization, DMG/DEB installation, renderer,
-accessibility, live-provider/CLI, or distribution certification.
+MCP launch/call, process-tree cleanup, and one deterministic packaged provider
+first turn. That provider subprobe uses a credential-free, token-bound
+literal-loopback OpenAI-compatible fixture. The packaged main process saves and
+persistently verifies its profile, streams one task turn through the production
+registry and `RunManager`, reloads state, and verifies successful assistant output,
+provider attribution, continuation state, and idle status without a persisted
+failure. It does not exercise hosted credentials, internet or vendor behavior,
+CLIs, tools, or other provider protocols.
 
-The current local macOS arm64 package passes launch, native, and extracted-ZIP
-native scope. Separately, the native
+The distributable layer reruns native scope against an extracted macOS ZIP, a
+temporarily installed Windows NSIS package, or an extracted Linux AppImage and
+emits an artifact-hash-bound evidence record. Release aggregation requires all four
+target records, including the provider subprobe. These are bounded runtime checks,
+not signing, notarization, DMG/DEB installation, renderer, accessibility,
+live-provider/CLI, or distribution certification.
+
+For the current source, a local macOS arm64 `package:mac` build and unpacked native
+smoke passed, including the deterministic provider turn. Current-source
+distributable scope and four-target aggregation have not been run. The older
 [four-target Package previews run](https://github.com/AlphaBetSoup789/ground/actions/runs/30473714099)
 completed the required macOS arm64, macOS x64, Windows x64, and Linux x64 jobs for
-source commit `a3073a8`, with artifact-bound runtime evidence. Those records are
-commit-specific unsigned preview evidence, not evidence for later source. They do
-not certify signing, notarization, DMG/DEB installation, renderer accessibility,
-live providers/CLIs, or supported distribution.
+source commit `a3073a8`, but predates the packaged-provider-turn requirement. Its
+artifact-bound records prove only the earlier smoke contract and cannot satisfy the
+current aggregate. Neither evidence set certifies signing, notarization, DMG/DEB
+installation, renderer accessibility, live providers/CLIs, or supported
+distribution.
 
 The next storage boundary is a transactional, append-only event store with schema
 migrations and materialized task views. Stronger OS-specific confinement,

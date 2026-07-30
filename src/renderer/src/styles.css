@@ -3959,6 +3959,138 @@ kbd {
   display: block;
 }
 
+.connection-path-picker {
+  min-width: 0;
+  margin: 0 0 20px;
+  padding: 0 0 14px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.connection-path-picker > legend {
+  margin-bottom: 8px;
+  color: #92968a;
+  font-size: 11px;
+  font-weight: 680;
+}
+
+.connection-path-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.connection-path-options label {
+  position: relative;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.connection-path-options input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.connection-path-options label > span {
+  display: grid;
+  min-height: 68px;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  justify-content: initial;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: #777b70;
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.connection-path-options label > span > svg {
+  margin-top: 2px;
+}
+
+.connection-path-options label > span > span {
+  display: grid;
+  gap: 4px;
+}
+
+.connection-path-options label:hover > span {
+  border-color: rgba(216, 255, 125, 0.18);
+  background: rgba(216, 255, 125, 0.025);
+}
+
+.connection-path-options label.selected > span {
+  border-color: rgba(216, 255, 125, 0.3);
+  color: var(--accent);
+  background: rgba(216, 255, 125, 0.055);
+}
+
+.connection-path-options input:focus-visible + span {
+  outline: 2px solid rgba(216, 255, 125, 0.55);
+  outline-offset: 2px;
+}
+
+.connection-path-options strong {
+  color: #d7dad0;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.connection-path-options small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 450;
+  line-height: 1.35;
+}
+
+.connection-path-explanation {
+  margin: 9px 1px 0;
+  color: #777b70;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.connection-path-detected {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+  color: #85897e;
+  font-size: 10px;
+}
+
+.connection-path-detected > div,
+.local-server-alternatives {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.connection-path-detected button,
+.local-server-alternatives button {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text-soft);
+  font-size: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.connection-path-detected button:hover,
+.local-server-alternatives button:hover {
+  border-color: rgba(216, 255, 125, 0.2);
+  color: var(--text);
+  background: rgba(216, 255, 125, 0.035);
+}
+
 .api-kind-picker {
   min-width: 0;
   margin: 0 0 20px;
@@ -4257,6 +4389,47 @@ kbd {
 
 .test-result .test-result-retention {
   color: #a8ab9f;
+}
+
+.local-server-recovery {
+  margin-top: 9px;
+  padding: 9px 10px;
+  border: 1px solid rgba(230, 189, 108, 0.16);
+  border-radius: 7px;
+  color: #aaa085;
+  font-family: inherit;
+  background: rgba(230, 189, 108, 0.035);
+}
+
+.local-server-recovery > strong {
+  color: #c9bd9d;
+  font-size: 11px;
+}
+
+.local-server-recovery ol {
+  margin: 7px 0 0;
+  padding-left: 18px;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.test-result .local-server-recovery > p {
+  margin-top: 7px;
+  color: #a49a80;
+  font-family: inherit;
+  font-size: 10px;
+}
+
+.local-server-alternatives {
+  margin-top: 9px;
+}
+
+.local-server-recovery > small {
+  display: block;
+  margin-top: 7px;
+  color: #797463;
+  font-size: 9px;
+  line-height: 1.45;
 }
 
 .model-suggestions {
@@ -6147,6 +6320,19 @@ kbd,
     grid-template-columns: 1fr 1fr;
   }
 
+  .connection-path-options {
+    grid-template-columns: 1fr;
+  }
+
+  .connection-path-options label > span {
+    min-height: 56px;
+  }
+
+  .connection-path-detected {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .local-preset-row {
     align-items: stretch;
     flex-direction: column;
@@ -6193,5 +6379,15 @@ kbd,
 
   .command-palette-actions > button.selected {
     outline: 1px solid Highlight;
+  }
+
+  .connection-path-options input:checked + span {
+    border-color: Highlight;
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+
+  .connection-path-options input:focus-visible + span {
+    outline-color: Highlight;
   }
 }
