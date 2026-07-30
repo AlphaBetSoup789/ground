@@ -16,6 +16,7 @@ import {
   CircleDot,
   Clock3,
   Code2,
+  Copy,
   FileCode2,
   LoaderCircle,
   Search,
@@ -43,6 +44,12 @@ import {
   assistantRunStartedAnnouncement,
   takeAssistantAnnouncementBatch
 } from '../lib/assistant-announcements'
+import {
+  ASSISTANT_OUTPUT_COPY_LABEL,
+  assistantOutputCopyStatus,
+  assistantOutputCopyText,
+  canCopyAssistantOutput
+} from '../lib/copy-assistant-output'
 
 interface TimelineProps {
   task: DesktopTask
@@ -656,8 +663,18 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
                 <div className="message-body">
                   {item.role === 'assistant' && (
                     <div className="message-author">
-                      Ground
-                      <span>{item.provider?.name ?? props.provider?.name}</span>
+                      <div className="message-author-identity">
+                        Ground
+                        <span>
+                          {item.provider?.name ?? props.provider?.name}
+                        </span>
+                      </div>
+                      {canCopyAssistantOutput(item.content) && (
+                        <AssistantOutputCopyControl
+                          messageId={item.id}
+                          content={item.content}
+                        />
+                      )}
                     </div>
                   )}
                   {item.content ? (
@@ -781,6 +798,56 @@ export function TimelineJumpControl(props: {
         <span key={props.revision}>{props.announcement}</span>
       </div>
     </>
+  )
+}
+
+export function AssistantOutputCopyControl(props: {
+  messageId: string
+  content: string
+}): React.JSX.Element {
+  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>(
+    'idle'
+  )
+  const statusId = useId()
+
+  useEffect(() => {
+    setCopyStatus('idle')
+  }, [props.messageId, props.content])
+
+  const copyExactOutput = async (): Promise<void> => {
+    const exact = assistantOutputCopyText(props.content)
+    try {
+      if (!navigator.clipboard) throw new Error('Clipboard unavailable')
+      await navigator.clipboard.writeText(exact)
+      setCopyStatus('copied')
+    } catch {
+      setCopyStatus('failed')
+    }
+  }
+
+  return (
+    <div className="assistant-output-copy">
+      <button
+        className="assistant-output-copy-button"
+        type="button"
+        aria-label={ASSISTANT_OUTPUT_COPY_LABEL}
+        aria-describedby={statusId}
+        title={ASSISTANT_OUTPUT_COPY_LABEL}
+        onClick={() => void copyExactOutput()}
+      >
+        <Copy size={13} aria-hidden="true" />
+        Copy
+      </button>
+      <span
+        id={statusId}
+        className="visually-hidden assistant-output-copy-status"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {assistantOutputCopyStatus(copyStatus)}
+      </span>
+    </div>
   )
 }
 

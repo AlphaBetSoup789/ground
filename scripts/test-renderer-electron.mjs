@@ -1436,6 +1436,35 @@ try {
     if (await stopRun.count()) await stopRun.click()
   })
 
+  await run('assistant messages expose an exact clipboard copy action', async () => {
+    const exactAssistantOutput =
+      'I found the friction: the page offers three equal-weight actions before the user has any data. I’d make **Create your first project** the single primary path, keep import secondary, and move documentation into supporting copy.\n\nThe implementation is scoped to the empty-state component and its styles.'
+    const copy = page
+      .getByRole('article')
+      .filter({ hasText: 'Create your first project' })
+      .getByRole('button', { name: 'Copy assistant output' })
+
+    await copy.waitFor()
+    await page.evaluate(async () => {
+      await navigator.clipboard.writeText('stale-preview-clipboard')
+    })
+    await copy.click()
+    await waitForValue(
+      () =>
+        page
+          .locator('.assistant-output-copy-status')
+          .filter({ hasText: 'Assistant output copied.' })
+          .count(),
+      1,
+      'copying assistant output should announce success'
+    )
+    assert.equal(
+      await page.evaluate(() => navigator.clipboard.readText()),
+      exactAssistantOutput,
+      'copy must write the exact stored assistant markdown, not rendered HTML'
+    )
+  })
+
   await run('mock run can be sent and cancelled from the real renderer', async () => {
     const composer = page.getByRole('textbox', { name: 'Message' })
     const prompt = 'Cancel this deterministic renderer run'

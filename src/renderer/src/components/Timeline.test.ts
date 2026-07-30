@@ -323,5 +323,66 @@ describe('timeline output following', () => {
     expect(markup).toContain('Ready to implement?')
     expect(markup).toContain('Continue in Agent')
     expect(markup).toContain('Nothing runs until you send it.')
+    expect(markup).toContain('aria-label="Copy assistant output"')
+    expect(markup).toContain('Copy')
+  })
+
+  it('exposes exact-copy controls only when assistant content exists', () => {
+    const emptyTask: DesktopTask = {
+      id: 'task',
+      title: 'Streaming',
+      providerId: 'provider',
+      mode: 'agent',
+      runStatus: 'running',
+      createdAt: '2026-07-29T12:00:00.000Z',
+      updatedAt: '2026-07-29T12:01:00.000Z',
+      items: [
+        {
+          id: 'assistant-empty',
+          kind: 'message',
+          role: 'assistant',
+          content: '',
+          createdAt: '2026-07-29T12:01:00.000Z'
+        }
+      ]
+    }
+    const populatedTask: DesktopTask = {
+      ...emptyTask,
+      runStatus: 'idle',
+      items: [
+        {
+          id: 'assistant-ready',
+          kind: 'message',
+          role: 'assistant',
+          content: 'Exact markdown source to copy.',
+          createdAt: '2026-07-29T12:01:00.000Z'
+        }
+      ]
+    }
+
+    const emptyMarkup = renderToStaticMarkup(
+      createElement(Timeline, {
+        task: emptyTask,
+        suggestions: [],
+        onSuggestion: () => undefined,
+        onResolveApproval: async () => undefined,
+        onSetImportedHistory: () => undefined
+      })
+    )
+    const populatedMarkup = renderToStaticMarkup(
+      createElement(Timeline, {
+        task: populatedTask,
+        suggestions: [],
+        onSuggestion: () => undefined,
+        onResolveApproval: async () => undefined,
+        onSetImportedHistory: () => undefined
+      })
+    )
+
+    expect(emptyMarkup).not.toContain('aria-label="Copy assistant output"')
+    expect(populatedMarkup).toContain('aria-label="Copy assistant output"')
+    expect(populatedMarkup).toContain(
+      'class="visually-hidden assistant-output-copy-status" role="status" aria-live="polite" aria-atomic="true"'
+    )
   })
 })

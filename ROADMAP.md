@@ -59,7 +59,8 @@ are not necessarily release-certified.
 - [x] Keyboard command palette, task-local unsent drafts including draft-only
   preparation during active runs and approval waits, bounded streaming
   announcements, near-bottom timeline following with task-bound jump recovery,
-  responsive layout, forced-color support, and reduced-motion behavior
+  exact assistant-output clipboard copy, responsive layout, forced-color support,
+  and reduced-motion behavior
 - [x] Exact failed-run request recovery into an empty task-local editable draft,
   with occupied drafts and outcome-unknown interruptions preserved
 - [x] Reviewable Ask-to-Agent handoff that awaits the mode change, preserves

@@ -1270,17 +1270,57 @@ kbd {
 .message-author {
   display: flex;
   align-items: baseline;
-  gap: 7px;
+  justify-content: space-between;
+  gap: 10px;
   margin: 0 0 8px;
   color: #dbddd2;
   font-size: 11px;
   font-weight: 670;
 }
 
+.message-author-identity {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 7px;
+}
+
 .message-author span {
   color: var(--muted);
   font-size: 10px;
   font-weight: 450;
+}
+
+.assistant-output-copy {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+}
+
+.assistant-output-copy-button {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid rgba(232, 236, 222, 0.1);
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 560;
+  background: rgba(255, 255, 255, 0.025);
+  cursor: pointer;
+}
+
+.assistant-output-copy-button:hover {
+  border-color: rgba(216, 255, 125, 0.22);
+  color: var(--text);
+  background: rgba(216, 255, 125, 0.05);
+}
+
+.assistant-output-copy-button:focus-visible {
+  outline: 2px solid rgba(216, 255, 125, 0.55);
+  outline-offset: 2px;
 }
 
 .ask-agent-handoff {
@@ -6582,6 +6622,7 @@ kbd {
 .imported-history-note,
 .imported-history-note button,
 .message-author,
+.assistant-output-copy-button,
 .deny-button,
 .approve-button,
 .composer-notice,
@@ -7358,6 +7399,7 @@ kbd,
   .git-diff-hunk-navigation button,
   .ask-agent-handoff,
   .ask-agent-handoff button,
+  .assistant-output-copy-button,
   .timeline-jump-latest,
   .composer-retry-notice,
   .composer-retry-notice > button {

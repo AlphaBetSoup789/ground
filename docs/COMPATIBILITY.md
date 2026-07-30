@@ -343,18 +343,19 @@ the current aggregate. They are not evidence for later source and do not certify
 signing, notarization, DMG/DEB installation, renderer accessibility, live
 providers/CLIs, or supported distribution.
 
-The 18-scenario renderer interaction suite runs the built browser-preview React
-renderer in Electron through Playwright Core. Its current local result is 18/18:
+The 19-scenario renderer interaction suite runs the built browser-preview React
+renderer in Electron through Playwright Core. Its current local result is 19/19:
 command-palette filtering/keyboard/focus restore, task-search shortcut focus and
 current-result keyboard activation, request-bound narrow-sidebar focus, provider
 labels and Chromium constraint validation, local-template/refused-connection
 recovery into a detected CLI, task-local, active-run, and failed-run draft
 preparation, Ask-to-Agent and reviewed-hunk handoffs, paused-streaming
 reading-position recovery across later sends and responsive reconciliation,
-structured Git diff navigation with finished-run refresh, failure/retry,
-late-task isolation, and review-position retention,
-deterministic send/cancel, archive and archived search, and 680px responsive
-settings with reduced motion plus forced-color connection-path selection. CI is
+exact assistant-output clipboard copy of stored markdown, structured Git diff
+navigation with finished-run refresh, failure/retry, late-task isolation, and
+review-position retention, deterministic send/cancel, archive and archived
+search, and 680px responsive settings with reduced motion plus forced-color
+connection-path selection. CI is
 configured to run it directly on macOS/Windows and under Xvfb on Linux. Because
 it uses the explicit preview desktop mock, it is renderer evidence—not production
 main/preload, native permission, provider, screen-reader, or packaged-app

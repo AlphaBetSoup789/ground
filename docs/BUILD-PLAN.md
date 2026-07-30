@@ -328,6 +328,9 @@ Requirements: GR-3, GR-8.1
   task-local draft without implying automatic or side-effect-safe replay.
 - Preserve timeline reading position while follow mode is paused, then offer one
   keyboard-accessible, task-bound action that returns to exact current output.
+- Let a user copy the exact stored assistant markdown for a visible timeline
+  message to the clipboard without starting a run, mutating a draft, or crossing
+  IPC.
 - Bind delayed selection, handoff, and focus work to the exact current task and
   source revision so stale renderer work cannot redirect a draft or selection.
 - Keep every prompt handoff visibly editable and require a separate explicit Send
@@ -349,6 +352,9 @@ Acceptance gate:
 - Streaming output cannot force a paused reader to the bottom; explicit
   jump-to-latest activation resumes follow mode, announces the change, and cannot
   carry stale control or scroll state into another task.
+- Assistant-output copy writes only the exact stored markdown for messages that
+  already have content, announces local success or failure, and never implies
+  trusted destination handling outside Ground.
 - Input-method composition, stale async completion, responsive layout changes,
   and modal focus changes have renderer interaction evidence.
 

@@ -159,18 +159,23 @@ does not read new content, cross IPC, persist a position, or alter a run. A stal
 task cannot present or activate another task’s control, and activation affects
 only the current timeline viewport and follow flag.
 
+Assistant-output copy is renderer-only clipboard presentation. It writes the
+exact stored markdown source for one visible message, announces local success or
+failure, and never crosses IPC, mutates drafts, starts runs, or claims that the
+clipboard destination is trusted.
+
 ## Implemented controls
 
 - Packaged renderer content is local; development origins are loopback-only.
 - Context isolation, restricted navigation, a narrow preload bridge, and strict IPC
   caller validation reduce renderer authority.
-- An 18-scenario Playwright-over-Electron suite drives the real built renderer’s
+- A 19-scenario Playwright-over-Electron suite drives the real built renderer’s
   command and task-search keyboard/focus behavior, including narrow-sidebar focus,
   form validation, task-local, active-run, and failed-run draft preparation,
-  reviewed handoffs, paused-streaming jump recovery, structured Git review and
-  request-bound finished-run refresh, cancellation, archive/search, responsive
-  layout, forced colors, and reduced-motion behavior. It deliberately uses the
-  browser-preview
+  reviewed handoffs, paused-streaming jump recovery, exact assistant-output
+  clipboard copy, structured Git review and request-bound finished-run refresh,
+  cancellation, archive/search, responsive layout, forced colors, and
+  reduced-motion behavior. It deliberately uses the browser-preview
   desktop mock, so it is not evidence for production main/preload authority,
   native approvals, or complete screen-reader accessibility.
 - Workspace grants and CLI authorization are created in the main process.
