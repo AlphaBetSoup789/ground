@@ -570,12 +570,20 @@ partial edit that leaves values blank must resolve the exact old envelope.
 ## Renderer interaction model
 
 The renderer keeps unsent composer drafts in process memory keyed by task, so
-switching tasks does not mix text and no draft gains durable authority. A global
-command palette provides filterable keyboard actions, traps/restores focus, and
-does not interpret command keys while an input method is composing. Modal state
-makes the underlying app surface inert. Task search exposes its current bounded
-result count and navigation instructions to assistive technology, but this
-keyboard baseline is not a complete screen-reader certification.
+switching tasks does not mix text and no draft gains durable authority. A running
+or approval-waiting task keeps its textarea editable, but exposes Stop as the only
+run action and suppresses the Send shortcut without consuming the draft. The text
+is neither queued nor sent to steer the active run; a later turn still requires an
+explicit Send through the ordinary run-start boundary. The unresolved initial
+start request and archived tasks keep the textarea disabled. A failed start
+restores its submitted text only when that exact source task still has no newer
+draft.
+
+A global command palette provides filterable keyboard actions, traps/restores
+focus, and does not interpret command keys while an input method is composing.
+Modal state makes the underlying app surface inert. Task search exposes its
+current bounded result count and navigation instructions to assistive technology,
+but this keyboard baseline is not a complete screen-reader certification.
 
 Assistant streaming remains visually live but uses a separate polite announcer
 that batches and normalizes bounded chunks. Timeline following is conditional on
@@ -585,14 +593,14 @@ reduced-motion rules are part of the public-preview baseline; they are not a cla
 complete cross-platform accessibility certification.
 
 A Playwright-over-Electron suite drives that real built renderer with the
-explicit browser-preview desktop mock. Its 12 scenarios cover palette and
+explicit browser-preview desktop mock. Its 13 scenarios cover palette and
 task-search keyboard/focus, including narrow-sidebar focus, provider-form labels
 and Chromium constraint validation, local-template/refused-connection recovery
-into a detected CLI, task-local drafts, Ask-to-Agent and reviewed-hunk handoffs,
-structured Git diff navigation, deterministic send/cancel, archive/search,
-responsive settings, reduced-motion CSS, and forced-color connection-path
-selection. It does not load production main/preload authority or replace manual
-screen-reader/native review.
+into a detected CLI, task-local and active-run draft preparation, Ask-to-Agent and
+reviewed-hunk handoffs, structured Git diff navigation, deterministic send/cancel,
+archive/search, responsive settings, reduced-motion CSS, and forced-color
+connection-path selection. It does not load production main/preload authority or
+replace manual screen-reader/native review.
 
 ## Current composition and migration
 

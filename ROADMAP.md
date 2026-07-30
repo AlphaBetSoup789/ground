@@ -55,7 +55,8 @@ are not necessarily release-certified.
 - [x] First-run Hosted API, Local server, and Installed CLI paths that identify the
   local values as a template, keep passive CLI detection non-authoritative, and
   limit stopped-server recovery to confirmed refused loopback connections
-- [x] Keyboard command palette, task-local unsent drafts, bounded streaming
+- [x] Keyboard command palette, task-local unsent drafts including draft-only
+  preparation during active runs and approval waits, bounded streaming
   announcements, near-bottom timeline following, responsive layout, forced-color
   support, and reduced-motion behavior
 - [x] Reviewable Ask-to-Agent handoff that awaits the mode change, preserves

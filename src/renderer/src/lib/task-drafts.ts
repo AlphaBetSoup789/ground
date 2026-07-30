@@ -15,3 +15,12 @@ export function updateTaskDraft(
   if (drafts[taskId] === value) return drafts
   return { ...drafts, [taskId]: value }
 }
+
+export function restoreTaskDraftIfEmpty(
+  drafts: TaskDrafts,
+  taskId: string,
+  value: string
+): TaskDrafts {
+  if ((drafts[taskId] ?? '').length > 0) return drafts
+  return updateTaskDraft(drafts, taskId, value)
+}

@@ -110,8 +110,9 @@ conformance runner; npm publication remains a separate maintainer release step.
   redaction, opaque activity identities, abort-safe projection, and
   compatibility-bound session persistence
 - Run cancellation, command timeouts, and process-group termination
-- Per-task unsent composer drafts while Ground is open, plus a keyboard command
-  palette for common workspace and provider actions
+- Per-task unsent composer drafts while Ground is open, including draft-only
+  preparation during a run or approval wait, plus a keyboard command palette for
+  common workspace and provider actions
 - A bounded, atomic local state document plus three rotating last-known-good
   snapshots, corruption quarantine, an in-app recovery browser, credential-free
   export, and native-confirmed retained-snapshot restore that drains and seals
@@ -156,9 +157,13 @@ focus, and ignores execution keys during input-method composition. Streaming tex
 uses a separate batched polite announcement instead of repeatedly announcing the
 whole message, and the timeline follows new output only while the reader remains
 near the bottom. Unsent composer text is kept separately for each task for the
-current app process; it is not written to durable task state. Responsive layouts,
-forced-color styles, reduced motion, and focus-visible states are implemented, but
-the project does not yet claim a complete cross-platform accessibility audit.
+current app process; it is not written to durable task state. While a task is
+running or waiting for approval, its textarea remains editable so the next prompt
+can be prepared. That text is not queued, sent, or used to steer the active run;
+the Stop control remains the only run action and `Ctrl/⌘ + Enter` is inert until
+the run finishes. Responsive layouts, forced-color styles, reduced motion, and
+focus-visible states are implemented, but the project does not yet claim a
+complete cross-platform accessibility audit.
 
 `Ctrl/⌘ + K` opens the sidebar when necessary and focuses the search field for the
 current active or archived scope. In that field, Enter opens the first current
@@ -681,13 +686,14 @@ dependencies.
 `test:e2e:renderer` launches the real built React renderer in Electron with the
 explicit browser-preview desktop mock and drives it through Playwright. It covers
 command-palette focus/navigation, keyboard-complete task search and narrow-sidebar
-focus, native HTML provider-form validation, task-local drafts, Ask-to-Agent and
-reviewed-hunk draft handoffs, structured Git diff navigation, mock send/cancel,
-archive/search, responsive settings, reduced-motion and forced-color styles, plus
-the local-template/refused-connection recovery path into a detected CLI. The
-current suite contains 12 scenarios. CI runs it on macOS, Windows, and Linux/Xvfb.
-It does not load the production preload/main process, invoke native permissions,
-use a real provider, or replace screen-reader/manual accessibility testing.
+focus, native HTML provider-form validation, task-local and active-run draft
+preparation, Ask-to-Agent and reviewed-hunk draft handoffs, structured Git diff
+navigation, mock send/cancel, archive/search, responsive settings, reduced-motion
+and forced-color styles, plus the local-template/refused-connection recovery path
+into a detected CLI. The current suite contains 13 scenarios. CI runs it on macOS,
+Windows, and Linux/Xvfb. It does not load the production preload/main process,
+invoke native permissions, use a real provider, or replace screen-reader/manual
+accessibility testing.
 
 The suite covers provider event normalization and output bounds, CLI argv/event
 parsing and cancellation, native session metadata, renderer/IPC trust checks,

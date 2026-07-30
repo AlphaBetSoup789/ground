@@ -24,6 +24,8 @@ const taskSearchShortcut =
   process.platform === 'darwin' ? 'Meta+K' : 'Control+K'
 const taskSearchShortcutLabel =
   process.platform === 'darwin' ? 'Cmd+K' : 'Ctrl+K'
+const composerSendShortcut =
+  process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter'
 
 async function resetRenderer() {
   await page.setViewportSize({ width: 1_280, height: 860 })
@@ -514,6 +516,205 @@ try {
 
     await page.getByRole('button', { name: /Explain the auth flow/ }).click()
     assert.equal(await composer.inputValue(), 'Auth-flow-specific working draft')
+  })
+
+  await run('active runs keep exact next drafts local until a later explicit send', async () => {
+    const composer = page.locator('#task-message-composer')
+    const userMessages = page.locator('.message-user')
+    const firstTask = page.getByRole('button', {
+      name: /Refine the project dashboard/
+    })
+    const secondTask = page.getByRole('button', {
+      name: /Explain the auth flow/
+    })
+    const initialUserMessageCount = await userMessages.count()
+    const firstPrompt = 'Start the active-run drafting evidence'
+
+    await composer.fill(firstPrompt)
+    await page.getByRole('button', { name: 'Send message' }).click()
+    await page.getByText(firstPrompt, { exact: true }).waitFor()
+    const firstStop = page.getByRole('button', { name: 'Stop run' })
+    await firstStop.waitFor()
+    const draftOnlyStatus = page.locator('.composer-caption [role="status"]')
+    await waitForValue(
+      () => draftOnlyStatus.textContent(),
+      'Draft only — not queued, sent, or steering this run',
+      'the active composer should visibly identify the text as a draft only'
+    )
+    assert.equal(await draftOnlyStatus.isVisible(), true)
+    assert.equal(await draftOnlyStatus.getAttribute('aria-live'), 'polite')
+    assert.equal(await composer.getAttribute('aria-label'), 'Message')
+    assert.equal(
+      await composer.getAttribute('aria-keyshortcuts'),
+      null,
+      'the active composer must not advertise a Send shortcut'
+    )
+    assert.equal(
+      await userMessages.count(),
+      initialUserMessageCount + 1,
+      'the initial explicit Send should create exactly one user message'
+    )
+
+    const stoppedDraft =
+      '  Review the first run, then tighten the empty state.\nPreserve these draft bytes.  '
+    await composer.fill(stoppedDraft)
+    assert.equal(
+      await composer.inputValue(),
+      stoppedDraft,
+      'the composer should accept an exact next-turn draft during an active run'
+    )
+    await composer.press(composerSendShortcut)
+    await page.waitForTimeout(100)
+    assert.equal(
+      await composer.inputValue(),
+      stoppedDraft,
+      'the send shortcut must leave the active-run draft untouched'
+    )
+    assert.equal(
+      await userMessages.count(),
+      initialUserMessageCount + 1,
+      'the send shortcut must not create a second user message during an active run'
+    )
+    assert.equal(
+      await page.getByRole('button', { name: 'Stop run' }).count(),
+      1,
+      'the original run should remain the only active run after the send shortcut'
+    )
+    assert.equal(
+      await page.getByRole('button', { name: 'Send message' }).count(),
+      0,
+      'Stop should remain the only run action while the task is active'
+    )
+    assert.equal(
+      await page
+        .getByRole('alert')
+        .filter({ hasText: 'Task already running' })
+        .count(),
+      0,
+      'the inert shortcut must not attempt a duplicate preview run'
+    )
+
+    await secondTask.click()
+    await waitForValue(
+      () => page.getByLabel('Task title').inputValue(),
+      'Explain the auth flow',
+      'the second task should be selected while the first task runs'
+    )
+    assert.equal(
+      await composer.inputValue(),
+      '',
+      'the active-run draft must not leak into another task'
+    )
+    const otherTaskDraft = '  Auth task notes stay independent.  '
+    await composer.fill(otherTaskDraft)
+
+    await firstTask.click()
+    await waitForValue(
+      () => page.getByLabel('Task title').inputValue(),
+      'Refine the project dashboard',
+      'the running task should remain selectable'
+    )
+    assert.equal(
+      await composer.inputValue(),
+      stoppedDraft,
+      'returning to the running task should restore its exact draft'
+    )
+
+    await page.getByRole('button', { name: 'Stop run' }).click()
+    await page.getByRole('button', { name: 'Send message' }).waitFor()
+    assert.equal(
+      await composer.inputValue(),
+      stoppedDraft,
+      'stopping the run must retain the prepared draft'
+    )
+    assert.equal(
+      await userMessages.count(),
+      initialUserMessageCount + 1,
+      'stopping the run must not dispatch the prepared draft'
+    )
+
+    await page.getByRole('button', { name: 'Send message' }).click()
+    await userMessages
+      .filter({
+        hasText: 'Review the first run, then tighten the empty state.'
+      })
+      .waitFor()
+    assert.equal(
+      await userMessages.count(),
+      initialUserMessageCount + 2,
+      'a later explicit Send should dispatch the draft retained after Stop'
+    )
+    await page.getByRole('button', { name: 'Stop run' }).waitFor()
+
+    const completedDraft =
+      '  Compare the completed run with the requested dashboard behavior.\nDo not auto-send this.  '
+    await composer.fill(completedDraft)
+    const taskTitle = page.getByLabel('Task title')
+    await taskTitle.focus()
+    assert.equal(
+      await taskTitle.evaluate((element) => element === document.activeElement),
+      true,
+      'the user should be able to move focus away from an active-run draft'
+    )
+    const completingStop = page.getByRole('button', { name: 'Stop run' })
+    await completingStop.waitFor({ state: 'detached', timeout: 15_000 })
+    assert.equal(
+      await taskTitle.evaluate((element) => element === document.activeElement),
+      true,
+      'natural run completion must not steal focus from another same-task control'
+    )
+    assert.equal(
+      await composer.inputValue(),
+      completedDraft,
+      'natural run completion must retain the prepared draft exactly'
+    )
+    await page.getByRole('button', { name: 'Send message' }).waitFor()
+    assert.equal(
+      await userMessages.count(),
+      initialUserMessageCount + 2,
+      'completion must not dispatch the prepared draft automatically'
+    )
+
+    await secondTask.click()
+    await waitForValue(
+      () => page.getByLabel('Task title').inputValue(),
+      'Explain the auth flow',
+      'the other task should remain available after the run completes'
+    )
+    assert.equal(
+      await composer.inputValue(),
+      otherTaskDraft,
+      'the other task should restore its own exact draft'
+    )
+
+    await firstTask.click()
+    await waitForValue(
+      () => page.getByLabel('Task title').inputValue(),
+      'Refine the project dashboard',
+      'the completed task should remain selectable'
+    )
+    assert.equal(
+      await composer.inputValue(),
+      completedDraft,
+      'task switching after completion should preserve its exact draft'
+    )
+
+    await page.getByRole('button', { name: 'Send message' }).click()
+    await userMessages
+      .filter({
+        hasText:
+          'Compare the completed run with the requested dashboard behavior.'
+      })
+      .waitFor()
+    assert.equal(
+      await userMessages.count(),
+      initialUserMessageCount + 3,
+      'only a later explicit Send should dispatch the completion-retained draft'
+    )
+    const finalStop = page.getByRole('button', { name: 'Stop run' })
+    await finalStop.waitFor()
+    await finalStop.click()
+    await page.getByRole('button', { name: 'Send message' }).waitFor()
   })
 
   await run('Ask response hands off to an editable Agent draft before explicit Send', async () => {

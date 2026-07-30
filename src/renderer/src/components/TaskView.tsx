@@ -39,6 +39,7 @@ interface TaskViewProps {
   providers: ProviderProfile[]
   draft: string
   onDraftChange: (value: string) => void
+  onRestoreDraft: (value: string) => void
   askToAgentPending: boolean
   sidebarOpen: boolean
   onCloseSidebar: () => void
@@ -507,6 +508,7 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
       <Composer
         draft={props.draft}
         onDraftChange={props.onDraftChange}
+        onRestoreDraft={props.onRestoreDraft}
         task={props.task}
         provider={provider}
         disabled={isArchived}

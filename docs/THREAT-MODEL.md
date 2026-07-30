@@ -139,18 +139,26 @@ request, task, and user-interaction context, so a stale completion cannot retarg
 focus. These controls affect renderer navigation only and grant no provider, run,
 tool, approval, Git, credential, or workspace authority.
 
+Active-run draft preparation is renderer-local text editing, not a second run or
+continuation command. While a task is running or awaiting approval, Ground keeps
+Stop as the only run action and does not dispatch `Ctrl/⌘ + Enter`. The draft is
+keyed to the exact task, does not steer the active provider/runtime request, and
+crosses the ordinary provider-egress boundary only after the current run ends and
+the user explicitly sends it. A failed start restores submitted text only if no
+newer draft occupies that exact task.
+
 ## Implemented controls
 
 - Packaged renderer content is local; development origins are loopback-only.
 - Context isolation, restricted navigation, a narrow preload bridge, and strict IPC
   caller validation reduce renderer authority.
-- A 12-scenario Playwright-over-Electron suite drives the real built renderer’s
+- A 13-scenario Playwright-over-Electron suite drives the real built renderer’s
   command and task-search keyboard/focus behavior, including narrow-sidebar focus,
-  form validation, task-local drafts and reviewed handoffs, structured Git review,
-  cancellation, archive/search, responsive layout, forced colors, and
-  reduced-motion behavior. It deliberately uses the browser-preview desktop mock,
-  so it is not evidence for production main/preload authority, native approvals,
-  or complete screen-reader accessibility.
+  form validation, task-local and active-run draft preparation, reviewed handoffs,
+  structured Git review, cancellation, archive/search, responsive layout, forced
+  colors, and reduced-motion behavior. It deliberately uses the browser-preview
+  desktop mock, so it is not evidence for production main/preload authority,
+  native approvals, or complete screen-reader accessibility.
 - Workspace grants and CLI authorization are created in the main process.
   Renderer task DTOs contain only fresh process-scoped grant IDs and sanitized
   path-free labels; canonical paths, runtime sessions, and model continuation
@@ -233,6 +241,9 @@ tool, approval, Git, credential, or workspace authority.
   assistant response. It changes the persisted mode and prepares an unsent
   task-local draft only; it does not start a run, reuse an Ask-mode provider
   session with Agent authority, or carry an approval forward.
+- Drafting during an active run or approval wait changes only renderer-local
+  task-keyed text. It neither queues another run nor sends input to the current
+  provider/runtime, and failed-start recovery cannot overwrite a newer draft.
 - Provider, workspace, and mode are captured for an active run. Assistant/activity
   items retain per-run provider attribution, and provider switching rebuilds
   normalized tool-call/tool-result context without replaying foreign opaque state.

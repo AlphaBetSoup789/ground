@@ -343,18 +343,19 @@ the current aggregate. They are not evidence for later source and do not certify
 signing, notarization, DMG/DEB installation, renderer accessibility, live
 providers/CLIs, or supported distribution.
 
-The 12-scenario renderer interaction suite runs the built browser-preview React
-renderer in Electron through Playwright Core. Its current local result is 12/12:
+The 13-scenario renderer interaction suite runs the built browser-preview React
+renderer in Electron through Playwright Core. Its current local result is 13/13:
 command-palette filtering/keyboard/focus restore, task-search shortcut focus and
 current-result keyboard activation, request-bound narrow-sidebar focus, provider
 labels and Chromium constraint validation, local-template/refused-connection
-recovery into a detected CLI, task-local drafts, Ask-to-Agent and reviewed-hunk
-handoffs, structured Git diff navigation, deterministic send/cancel, archive and
-archived search, and 680px responsive settings with reduced motion plus
-forced-color connection-path selection. CI is configured to run it directly on
-macOS/Windows and under Xvfb on Linux. Because it uses the explicit preview desktop
-mock, it is renderer evidence—not production-main/preload, native permission,
-provider, screen-reader, or packaged-app certification.
+recovery into a detected CLI, task-local and active-run draft preparation,
+Ask-to-Agent and reviewed-hunk handoffs, structured Git diff navigation,
+deterministic send/cancel, archive and archived search, and 680px responsive
+settings with reduced motion plus forced-color connection-path selection. CI is
+configured to run it directly on macOS/Windows and under Xvfb on Linux. Because it
+uses the explicit preview desktop mock, it is renderer evidence—not
+production-main/preload, native permission, provider, screen-reader, or
+packaged-app certification.
 
 The pinned compatibility suite performs no authenticated request and launches no
 coding CLI. Its separate loopback SSE integration drives only Ground’s production

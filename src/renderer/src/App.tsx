@@ -44,7 +44,11 @@ import {
   selectTaskInSnapshot,
   type TaskSelectionRequest
 } from './lib/task-selection'
-import { updateTaskDraft, type TaskDrafts } from './lib/task-drafts'
+import {
+  restoreTaskDraftIfEmpty,
+  updateTaskDraft,
+  type TaskDrafts
+} from './lib/task-drafts'
 import { Sidebar } from './components/Sidebar'
 import { TaskView } from './components/TaskView'
 import { ProviderModal } from './components/ProviderModal'
@@ -753,10 +757,11 @@ export default function App(): React.JSX.Element {
         await desktop.startRun({ taskId: selectedTask.id, prompt })
       } catch (error) {
         showError(error)
+        await refresh()
         throw error
       }
     },
-    [selectedTask, showError]
+    [refresh, selectedTask, showError]
   )
 
   const stopRun = useCallback(async () => {
@@ -993,6 +998,15 @@ export default function App(): React.JSX.Element {
             onDraftChange={(value) =>
               setTaskDrafts((current) =>
                 updateTaskDraft(current, selectedTask.id, value)
+              )
+            }
+            onRestoreDraft={(value) =>
+              setTaskDrafts((current) =>
+                restoreTaskDraftIfEmpty(
+                  current,
+                  selectedTask.id,
+                  value
+                )
               )
             }
             sidebarOpen={sidebarOpen}

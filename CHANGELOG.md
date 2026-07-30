@@ -71,6 +71,9 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
   keyboard hunk navigation, hostile-presentation escaping, bounded raw-patch
   fallback, and a reviewed-hunk-to-prompt action that preserves existing draft
   text without applying or sending the patch.
+- Draft-only prompt preparation while a task is running or awaiting approval.
+  Stop remains the only active-run action, the Send shortcut is inert, task
+  switching preserves exact drafts, and nothing queues or steers the current run.
 - Three rotating validated state snapshots, automatic fallback from a corrupt or
   missing primary, unreadable-file quarantine, an in-app recovery browser,
   credential-free native export, and native-confirmed retained-snapshot restore.
@@ -143,14 +146,14 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
 - Add a keyboard command palette, task-local process-memory composer drafts,
   near-bottom-only timeline following, and bounded batched screen-reader
   announcements for streamed assistant text.
-- Expand the Playwright-over-Electron renderer interaction suite to twelve
+- Expand the Playwright-over-Electron renderer interaction suite to thirteen
   scenarios covering command-palette and task-search keyboard/focus behavior,
   accessible provider-form validation, truthful local-provider refusal recovery
-  into a detected CLI, task-local drafts, Ask-to-Agent and reviewed-hunk prompt
-  handoffs, deterministic send cancellation, archive/search, responsive settings
-  and sidebar selection, reduced-motion CSS, and forced-color connection-path
-  selection. It uses the explicit browser-preview desktop mock and is not
-  production-main/native/provider certification.
+  into a detected CLI, task-local and active-run draft preparation, Ask-to-Agent
+  and reviewed-hunk prompt handoffs, deterministic send cancellation,
+  archive/search, responsive settings and sidebar selection, reduced-motion CSS,
+  and forced-color connection-path selection. It uses the explicit browser-preview
+  desktop mock and is not production-main/native/provider certification.
 - Recover interrupted managed writes, commands, and MCP calls as explicit
   outcome-unknown activity, without automatically replaying the side effect or
   retaining continuation authority.
