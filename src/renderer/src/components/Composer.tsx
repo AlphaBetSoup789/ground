@@ -14,6 +14,7 @@ interface ComposerProps {
   task: DesktopTask
   provider?: ProviderProfile
   disabled?: boolean
+  sendBlocked?: boolean
   onChooseWorkspace: () => void
   onSend: (prompt: string) => Promise<void>
   onStop: () => Promise<void>
@@ -51,7 +52,14 @@ export function Composer(props: ComposerProps): React.JSX.Element {
 
   const send = async (): Promise<void> => {
     const prompt = props.draft.trim()
-    if (!prompt || interactionDisabled || needsWorkspace) return
+    if (
+      !prompt ||
+      interactionDisabled ||
+      needsWorkspace ||
+      props.sendBlocked
+    ) {
+      return
+    }
     props.onDraftChange('')
     setSending(true)
     try {
@@ -116,7 +124,7 @@ export function Composer(props: ComposerProps): React.JSX.Element {
               type="button"
               onClick={props.onChooseWorkspace}
               title={props.task.workspace?.name}
-              disabled={interactionDisabled}
+              disabled={interactionDisabled || props.sendBlocked}
             >
               <span className="context-chip-icon">
                 {props.provider?.kind === 'cli' ? (
@@ -158,9 +166,16 @@ export function Composer(props: ComposerProps): React.JSX.Element {
                 !props.draft.trim() ||
                 needsWorkspace ||
                 sending ||
+                props.sendBlocked ||
                 Boolean(props.disabled)
               }
-              aria-label={sending ? 'Sending message' : 'Send message'}
+              aria-label={
+                props.sendBlocked
+                  ? 'Preparing Agent draft'
+                  : sending
+                    ? 'Sending message'
+                    : 'Send message'
+              }
               aria-busy={sending}
               title="Send · ⌘/Ctrl Enter"
             >
@@ -174,9 +189,11 @@ export function Composer(props: ComposerProps): React.JSX.Element {
         <span>
           {props.disabled
             ? 'Restore to continue'
-            : sending
-              ? 'Sending…'
-              : '⌘/Ctrl Enter to send'}
+            : props.sendBlocked
+              ? 'Preparing Agent draft…'
+              : sending
+                ? 'Sending…'
+                : '⌘/Ctrl Enter to send'}
         </span>
       </div>
     </div>

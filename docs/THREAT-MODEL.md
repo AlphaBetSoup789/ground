@@ -205,6 +205,10 @@ repository backup or rollback mechanism.
   launch; other batch and PowerShell launchers are rejected.
 - API Ask mode advertises only bounded list/read/search tools. Writes, commands, and
   MCP are Agent-only, and an unadvertised call is rejected.
+- Ask-to-Agent handoff is bound to the exact task, provider, and non-imported
+  assistant response. It changes the persisted mode and prepares an unsent
+  task-local draft only; it does not start a run, reuse an Ask-mode provider
+  session with Agent authority, or carry an approval forward.
 - Provider, workspace, and mode are captured for an active run. Assistant/activity
   items retain per-run provider attribution, and provider switching rebuilds
   normalized tool-call/tool-result context without replaying foreign opaque state.

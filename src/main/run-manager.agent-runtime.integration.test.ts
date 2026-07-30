@@ -147,6 +147,7 @@ async function runFixture(options: {
     adapterId: string
     sessionCompatibilityId: string
     sessionId?: string
+    mode?: Task['mode']
   }
   environmentSecret?: string
   onEvent?: (event: RunEvent, manager: RunManager) => void
@@ -201,7 +202,7 @@ async function runFixture(options: {
           providerFingerprint:
             providerConfigurationFingerprint(provider),
           workspacePath: workspace,
-          mode: task.mode,
+          mode: options.savedSession.mode ?? task.mode,
           updatedAt: TIMESTAMP
         }
       }
@@ -1025,6 +1026,35 @@ describe('RunManager registered agent-runtime integration', () => {
     expect(run.task.runtimeSessions?.[PROVIDER_ID]?.sessionId).toBe(
       'runtime-session-next'
     )
+  })
+
+  it('does not resume an Ask-mode native session after the task switches to Agent', async () => {
+    const requests: AgentRunRequest[] = []
+    const adapter = scriptedRuntime({
+      id: 'community.mode-bound-runtime',
+      events: successfulRuntimeEvents,
+      onRequest: (request) => requests.push(request)
+    })
+    const run = await runFixture({
+      factory: runtimeFactory(adapter, 'mode-bound-session-v1'),
+      savedSession: {
+        adapterId: adapter.id,
+        sessionCompatibilityId: 'mode-bound-session-v1',
+        sessionId: 'ask-session-must-not-resume',
+        mode: 'ask'
+      }
+    })
+
+    expect(run.terminal).toMatchObject({ type: 'run-completed' })
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.mode).toBe('agent')
+    expect(requests[0]?.resume).toBeUndefined()
+    expect(run.task.runtimeSessions?.[PROVIDER_ID]).toMatchObject({
+      adapterId: adapter.id,
+      sessionCompatibilityId: 'mode-bound-session-v1',
+      sessionId: 'runtime-session-next',
+      mode: 'agent'
+    })
   })
 
   it('never persists a native session without a compatibility identity', async () => {

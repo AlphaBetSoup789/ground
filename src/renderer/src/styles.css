@@ -1241,6 +1241,58 @@ kbd {
   font-weight: 450;
 }
 
+.ask-agent-handoff {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  margin-top: 18px;
+  padding: 11px 12px;
+  border: 1px solid rgba(216, 255, 125, 0.12);
+  border-radius: 10px;
+  background: rgba(216, 255, 125, 0.035);
+}
+
+.ask-agent-handoff > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.ask-agent-handoff strong {
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.ask-agent-handoff span {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.ask-agent-handoff button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid rgba(216, 255, 125, 0.18);
+  border-radius: 8px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 620;
+  background: rgba(216, 255, 125, 0.1);
+  white-space: nowrap;
+}
+
+.ask-agent-handoff button:hover:not(:disabled) {
+  border-color: rgba(216, 255, 125, 0.3);
+  color: var(--text);
+  background: rgba(216, 255, 125, 0.14);
+}
+
 .markdown {
   color: #d8dacf;
   font-size: 13px;
@@ -6932,6 +6984,14 @@ kbd,
     width: calc(100% - 28px);
   }
 
+  .ask-agent-handoff {
+    grid-template-columns: 1fr;
+  }
+
+  .ask-agent-handoff button {
+    width: 100%;
+  }
+
   .composer-wrap {
     width: calc(100% - 24px);
   }
@@ -7146,7 +7206,9 @@ kbd,
   .git-diff-raw-toggle,
   .git-diff-copy-exact,
   .git-diff-show-more,
-  .git-diff-hunk-navigation button {
+  .git-diff-hunk-navigation button,
+  .ask-agent-handoff,
+  .ask-agent-handoff button {
     border: 1px solid ButtonText;
   }
 

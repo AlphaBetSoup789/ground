@@ -146,7 +146,23 @@ let mockSnapshot: AppSnapshot = {
       runStatus: 'idle',
       createdAt: timestamp,
       updatedAt: timestamp,
-      items: []
+      items: [
+        {
+          id: 'preview-auth-user',
+          kind: 'message',
+          role: 'user',
+          content: 'Explain the current authentication flow and propose a safe cleanup.',
+          createdAt: timestamp
+        },
+        {
+          id: 'preview-auth-assistant',
+          kind: 'message',
+          role: 'assistant',
+          content:
+            'The flow keeps credential access in the main process and gives the renderer only provider-safe metadata. I would keep that boundary, consolidate duplicated readiness checks, and add a regression around expired workspace access before changing the UI.',
+          createdAt: timestamp
+        }
+      ]
     }
   ],
   settings: {
@@ -389,6 +405,11 @@ const mockApi: DesktopApi = {
     mockSnapshot.settings.selectedTaskId = taskId
   },
   updateTask: async (taskId, patch: TaskPatch) => {
+    if (taskId === 'preview-task-two' && patch.mode === 'agent') {
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, 200)
+      })
+    }
     const task = mockSnapshot.tasks.find((candidate) => candidate.id === taskId)
     if (!task) throw new Error('Task not found')
     const {

@@ -2285,6 +2285,58 @@ describe('RunManager model runtime', () => {
     ).toBe(providerConfigurationFingerprint(replacement))
   })
 
+  it('does not reuse an Ask-mode model session after the task switches to Agent', async () => {
+    const run = await harness([
+      (request) => textResponse(request, 'Fresh Agent response.')
+    ])
+    const providerId = run.store.getTask(run.taskId).providerId
+    const provider = run.store.getProvider(providerId)
+    if (provider.kind === 'cli') throw new Error('Expected a model provider')
+    await run.store.mutateTask(run.taskId, (task) => {
+      task.mode = 'ask'
+      task.modelSessions = {
+        [provider.id]: {
+          adapterId: 'test.model',
+          providerRevision: provider.updatedAt,
+          providerFingerprint:
+            providerConfigurationFingerprint(provider),
+          model: provider.model,
+          workspacePath: task.workspacePath,
+          mode: task.mode,
+          origin: 'ground',
+          conversation: [
+            {
+              kind: 'message',
+              id: 'ask-only-conversation',
+              role: 'assistant',
+              parts: [
+                {
+                  kind: 'text',
+                  text: 'Ask-only continuation must not reach Agent mode.'
+                }
+              ]
+            }
+          ],
+          updatedAt: task.updatedAt
+        }
+      }
+      task.mode = 'agent'
+    })
+
+    await run.manager.start(run.taskId, 'Implement with fresh Agent context')
+    await run.terminal
+
+    const conversation = JSON.stringify(run.requests[0]?.conversation)
+    expect(conversation).not.toContain(
+      'Ask-only continuation must not reach Agent mode.'
+    )
+    expect(conversation).toContain('Implement with fresh Agent context')
+    expect(run.store.getTask(run.taskId).modelSessions?.[provider.id]).toMatchObject({
+      mode: 'agent',
+      origin: 'ground'
+    })
+  })
+
   it('invalidates an imported provider continuation while history stays excluded', async () => {
     const run = await harness([
       (request) => textResponse(request, 'Fresh response.')

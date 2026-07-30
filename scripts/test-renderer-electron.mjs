@@ -222,6 +222,150 @@ try {
     assert.equal(await composer.inputValue(), 'Auth-flow-specific working draft')
   })
 
+  await run('Ask response hands off to an editable Agent draft before explicit Send', async () => {
+    const preparedDraft =
+      'Use the response above as context. Re-check the current workspace state before implementing the requested changes.'
+    await page.getByRole('button', { name: /Explain the auth flow/ }).click()
+    await waitForValue(
+      () => page.getByLabel('Task title').inputValue(),
+      'Explain the auth flow',
+      'the Ask task should be selected'
+    )
+
+    const composer = page.getByRole('textbox', { name: 'Message' })
+    const messages = page.locator('.timeline .message')
+    const messagesBeforeHandoff = await messages.count()
+    const continueButton = page.getByRole('button', {
+      name: 'Continue in Agent'
+    })
+    await continueButton.waitFor()
+    await continueButton.focus()
+    assert.equal(
+      await continueButton.evaluate(
+        (element) => element === document.activeElement
+      ),
+      true,
+      'the handoff action should be keyboard focusable'
+    )
+    await continueButton.press('Enter')
+
+    const pendingSend = page.getByRole('button', {
+      name: 'Preparing Agent draft',
+      exact: true
+    })
+    await pendingSend.waitFor()
+    assert.equal(
+      await pendingSend.isEnabled(),
+      false,
+      'Send should remain unavailable while the mode update is pending'
+    )
+    await page
+      .getByRole('button', { name: /Refine the project dashboard/ })
+      .click()
+    await waitForValue(
+      () => page.getByLabel('Task title').inputValue(),
+      'Refine the project dashboard',
+      'the user should be able to switch tasks during the handoff'
+    )
+    await page.waitForTimeout(250)
+    assert.equal(
+      await composer.inputValue(),
+      '',
+      'a delayed handoff must not populate the newly selected task'
+    )
+
+    await page.getByRole('button', { name: /Explain the auth flow/ }).click()
+    await waitForValue(
+      () => page.getByLabel('Task title').inputValue(),
+      'Explain the auth flow',
+      'the original handoff task should remain selectable'
+    )
+    const modeGroup = page.getByRole('group', { name: 'Run mode' })
+    const askMode = modeGroup.getByRole('button', {
+      name: 'Ask',
+      exact: true
+    })
+    const agentMode = modeGroup.getByRole('button', {
+      name: 'Agent',
+      exact: true
+    })
+    await waitForValue(
+      () => agentMode.getAttribute('aria-pressed'),
+      'true',
+      'the delayed handoff should persist Agent mode on its original task'
+    )
+    await waitForValue(
+      () => composer.inputValue(),
+      preparedDraft,
+      'the handoff should prepare the documented editable draft'
+    )
+
+    await askMode.click()
+    await waitForValue(
+      () => askMode.getAttribute('aria-pressed'),
+      'true',
+      'the task should return to Ask for a focused handoff check'
+    )
+    const reviewedDraft = `${preparedDraft}\n\nKeep my task-specific verification note.`
+    await composer.fill(reviewedDraft)
+    const focusedContinueButton = page.getByRole('button', {
+      name: 'Continue in Agent'
+    })
+    await focusedContinueButton.waitFor()
+    await focusedContinueButton.focus()
+    await focusedContinueButton.press('Enter')
+    await waitForValue(
+      () => agentMode.getAttribute('aria-pressed'),
+      'true',
+      'the handoff should persist Agent mode before focusing the draft'
+    )
+    await waitForValue(
+      () => composer.evaluate((element) => element === document.activeElement),
+      true,
+      'the prepared draft should receive focus'
+    )
+    assert.equal(
+      await composer.inputValue(),
+      reviewedDraft,
+      'a handoff must preserve a nonblank draft edited by the user'
+    )
+    assert.equal(
+      await messages.count(),
+      messagesBeforeHandoff,
+      'the handoff must not dispatch a run before Send'
+    )
+    assert.equal(
+      await page
+        .locator('.message-user')
+        .filter({ hasText: reviewedDraft })
+        .count(),
+      0,
+      'the prepared draft must remain outside the conversation before Send'
+    )
+    assert.equal(
+      await page.getByRole('button', { name: 'Stop run' }).count(),
+      0,
+      'the handoff must leave the task idle before Send'
+    )
+
+    await page
+      .getByRole('button', { name: /Refine the project dashboard/ })
+      .click()
+    await page.getByRole('button', { name: /Explain the auth flow/ }).click()
+    assert.equal(
+      await composer.inputValue(),
+      reviewedDraft,
+      'the unsent Agent draft should remain task-local across task switches'
+    )
+
+    await page.getByRole('button', { name: 'Send message' }).click()
+    await page.getByText(reviewedDraft, { exact: true }).waitFor()
+    const stop = page.getByRole('button', { name: 'Stop run' })
+    await stop.waitFor()
+    await stop.click()
+    await page.getByRole('button', { name: 'Send message' }).waitFor()
+  })
+
   await run('mock run can be sent and cancelled from the real renderer', async () => {
     const composer = page.getByRole('textbox', { name: 'Message' })
     const prompt = 'Cancel this deterministic renderer run'

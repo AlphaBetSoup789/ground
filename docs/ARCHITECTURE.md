@@ -100,6 +100,15 @@ than a characters-per-token ratio but is not the model’s exact tokenizer. Thes
 numeric/reasoning settings are user-supplied protocol hints, not model capability
 certification.
 
+The renderer’s Ask-to-Agent handoff is a two-step convenience, not a new authority
+path. It binds the action to an idle task’s exact non-imported assistant response
+and Agent-capable provider, awaits the existing persisted mode update, and fills
+only that task’s unsent composer draft. A task switch during the update cannot
+redirect the draft or focus. The existing run-start boundary still requires an
+explicit Send, exact provider readiness, and the normal managed approvals or
+disclosed native CLI permission policy. Model and native runtime continuation
+records remain mode-bound and are not reused across the handoff.
+
 Provider configuration has a separate persisted readiness state. Saving creates an
 unverified provider revision. **Test** can persist `passed` or `failed` only when
 the submitted form still exactly matches the complete configuration fingerprint,

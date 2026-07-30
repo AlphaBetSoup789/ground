@@ -3,7 +3,8 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type {
   DesktopTask,
-  ProviderFailureKind
+  ProviderFailureKind,
+  ProviderProfile
 } from '../../../shared/types'
 import { shouldFollowTimeline, Timeline } from './Timeline'
 
@@ -166,5 +167,54 @@ describe('timeline output following', () => {
     expect(markup).toContain('Run failed')
     expect(markup).toContain('Credential-safe provider diagnostic.')
     expect(markup).not.toContain('provider-failure-guidance')
+  })
+
+  it('offers an explicit, unsent Agent handoff after an eligible Ask response', () => {
+    const provider: ProviderProfile = {
+      id: 'provider',
+      name: 'Local model',
+      kind: 'openai-compatible',
+      baseUrl: 'http://127.0.0.1:11434/v1',
+      model: 'test-model',
+      hasApiKey: false,
+      supportsTools: true,
+      createdAt: '2026-07-29T12:00:00.000Z',
+      updatedAt: '2026-07-29T12:00:00.000Z'
+    }
+    const task: DesktopTask = {
+      id: 'task',
+      title: 'Plan a change',
+      workspace: { id: 'workspace', name: 'ground' },
+      providerId: provider.id,
+      mode: 'ask',
+      runStatus: 'idle',
+      createdAt: '2026-07-29T12:00:00.000Z',
+      updatedAt: '2026-07-29T12:01:00.000Z',
+      items: [
+        {
+          id: 'assistant',
+          kind: 'message',
+          role: 'assistant',
+          content: 'Here is a bounded implementation plan.',
+          createdAt: '2026-07-29T12:01:00.000Z'
+        }
+      ]
+    }
+
+    const markup = renderToStaticMarkup(
+      createElement(Timeline, {
+        task,
+        provider,
+        suggestions: [],
+        onSuggestion: () => undefined,
+        onResolveApproval: async () => undefined,
+        onSetImportedHistory: () => undefined,
+        onContinueInAgent: async () => true
+      })
+    )
+
+    expect(markup).toContain('Ready to implement?')
+    expect(markup).toContain('Continue in Agent')
+    expect(markup).toContain('Nothing runs until you send it.')
   })
 })

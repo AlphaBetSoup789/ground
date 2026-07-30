@@ -28,6 +28,11 @@ import {
   applyRunEventEnvelope,
   reconcileSnapshotWithEvents
 } from './lib/run-events'
+import {
+  prepareAskToAgentDraft,
+  taskMatchesAskToAgentHandoff,
+  type AskToAgentHandoffSource
+} from './lib/ask-agent-handoff'
 import { updateTaskDraft, type TaskDrafts } from './lib/task-drafts'
 import { Sidebar } from './components/Sidebar'
 import { TaskView } from './components/TaskView'
@@ -44,6 +49,8 @@ export default function App(): React.JSX.Element {
   const [settingsProviderId, setSettingsProviderId] = useState<string>()
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
   const [taskDrafts, setTaskDrafts] = useState<TaskDrafts>({})
+  const [askToAgentPendingTaskIds, setAskToAgentPendingTaskIds] =
+    useState<ReadonlySet<string>>(() => new Set())
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [narrowSidebarLayout, setNarrowSidebarLayout] = useState(() =>
     window.matchMedia(NARROW_SIDEBAR_MEDIA_QUERY).matches
@@ -52,6 +59,11 @@ export default function App(): React.JSX.Element {
   const pendingRunEventsRef = useRef<DesktopRunEventEnvelope[]>([])
   const refreshQueueRef = useRef<Promise<void>>(Promise.resolve())
   const pendingRefreshesRef = useRef(0)
+  const snapshotRef = useRef<AppSnapshot | undefined>(undefined)
+  const selectedTaskIdRef = useRef<string | undefined>(undefined)
+  const pendingAskToAgentHandoffsRef = useRef(new Set<string>())
+  const taskMutationRevisionRef = useRef(new Map<string, number>())
+  const activeTaskMutationsRef = useRef(new Map<string, number>())
   const [toast, setToast] = useState<{
     message: string
     tone: 'error' | 'success'
@@ -205,6 +217,8 @@ export default function App(): React.JSX.Element {
       snapshot.tasks.find((task) => !task.archivedAt)
     )
   }, [snapshot])
+  snapshotRef.current = snapshot
+  selectedTaskIdRef.current = selectedTask?.id
 
   const selectTask = useCallback(
     async (taskId: string) => {
@@ -249,28 +263,140 @@ export default function App(): React.JSX.Element {
 
   const updateTask = useCallback(
     async (taskId: string, patch: TaskPatch) => {
+      const mutationRevision =
+        (taskMutationRevisionRef.current.get(taskId) ?? 0) + 1
+      taskMutationRevisionRef.current.set(taskId, mutationRevision)
+      activeTaskMutationsRef.current.set(
+        taskId,
+        (activeTaskMutationsRef.current.get(taskId) ?? 0) + 1
+      )
       try {
         const updated = await desktop.updateTask(taskId, patch)
+        const isCurrent =
+          taskMutationRevisionRef.current.get(taskId) ===
+          mutationRevision
+        const applyUpdate = (current: AppSnapshot): AppSnapshot => ({
+          ...current,
+          tasks: current.tasks.map((task) =>
+            task.id === taskId ? updated : task
+          ),
+          settings:
+            patch.providerId === undefined
+              ? current.settings
+              : {
+                  ...current.settings,
+                  defaultProviderId: patch.providerId
+                }
+        })
+        if (snapshotRef.current) {
+          snapshotRef.current = applyUpdate(snapshotRef.current)
+        }
         setSnapshot((current) =>
-          current
-            ? {
-                ...current,
-                tasks: current.tasks.map((task) => (task.id === taskId ? updated : task)),
-                settings:
-                  patch.providerId === undefined
-                    ? current.settings
-                    : {
-                        ...current.settings,
-                        defaultProviderId: patch.providerId
-                      }
-              }
-            : current
+          current ? applyUpdate(current) : current
         )
+        return { task: updated, isCurrent }
       } catch (error) {
         showError(error)
+        return undefined
+      } finally {
+        const activeCount =
+          (activeTaskMutationsRef.current.get(taskId) ?? 1) - 1
+        if (activeCount > 0) {
+          activeTaskMutationsRef.current.set(taskId, activeCount)
+        } else {
+          activeTaskMutationsRef.current.delete(taskId)
+        }
       }
     },
     [showError]
+  )
+
+  const continueAskTaskInAgent = useCallback(
+    async (source: AskToAgentHandoffSource): Promise<boolean> => {
+      const requestKey = `${source.taskId}:${source.assistantMessageId}`
+      if (pendingAskToAgentHandoffsRef.current.has(requestKey)) {
+        return false
+      }
+      if ((activeTaskMutationsRef.current.get(source.taskId) ?? 0) > 0) {
+        return false
+      }
+
+      const currentSnapshot = snapshotRef.current
+      const currentTask = currentSnapshot?.tasks.find(
+        (task) => task.id === source.taskId
+      )
+      const currentProvider = currentSnapshot?.providers.find(
+        (provider) => provider.id === source.providerId
+      )
+      if (
+        !taskMatchesAskToAgentHandoff(
+          currentTask,
+          currentProvider,
+          source,
+          'ask'
+        )
+      ) {
+        return false
+      }
+
+      pendingAskToAgentHandoffsRef.current.add(requestKey)
+      setAskToAgentPendingTaskIds((current) => {
+        const next = new Set(current)
+        next.add(source.taskId)
+        return next
+      })
+      try {
+        const result = await updateTask(source.taskId, {
+          mode: 'agent'
+        })
+        if (!result?.isCurrent) return false
+
+        const latestTask = snapshotRef.current?.tasks.find(
+          (task) => task.id === source.taskId
+        )
+        const latestProvider = snapshotRef.current?.providers.find(
+          (provider) => provider.id === source.providerId
+        )
+        if (
+          !taskMatchesAskToAgentHandoff(
+            latestTask,
+            latestProvider,
+            source,
+            'agent'
+          )
+        ) {
+          return false
+        }
+
+        setTaskDrafts((current) =>
+          updateTaskDraft(
+            current,
+            source.taskId,
+            prepareAskToAgentDraft(current[source.taskId] ?? '')
+          )
+        )
+        if (selectedTaskIdRef.current === source.taskId) {
+          window.requestAnimationFrame(() => {
+            if (selectedTaskIdRef.current !== source.taskId) return
+            document
+              .querySelector<HTMLTextAreaElement>(
+                '#task-message-composer'
+              )
+              ?.focus()
+          })
+        }
+        return true
+      } finally {
+        pendingAskToAgentHandoffsRef.current.delete(requestKey)
+        setAskToAgentPendingTaskIds((current) => {
+          if (!current.has(source.taskId)) return current
+          const next = new Set(current)
+          next.delete(source.taskId)
+          return next
+        })
+      }
+    },
+    [updateTask]
   )
 
   const acceptCreatedTask = useCallback((task: DesktopTask) => {
@@ -645,6 +771,10 @@ export default function App(): React.JSX.Element {
             sidebarOpen={sidebarOpen}
             onCloseSidebar={closeSidebar}
             onUpdateTask={(patch) => void updateTask(selectedTask.id, patch)}
+            onContinueInAgent={continueAskTaskInAgent}
+            askToAgentPending={askToAgentPendingTaskIds.has(
+              selectedTask.id
+            )}
             onChooseWorkspace={() => void chooseWorkspace()}
             onRevealWorkspace={() => {
               if (selectedTask.workspace) {

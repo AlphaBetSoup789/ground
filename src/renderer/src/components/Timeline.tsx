@@ -8,6 +8,7 @@ import {
 } from 'react'
 import {
   AlertTriangle,
+  Bot,
   Check,
   ChevronRight,
   CircleDot,
@@ -31,6 +32,10 @@ import type {
 } from '../../../shared/types'
 import { providerFailureGuidance } from '../../../shared/provider-failure-guidance'
 import {
+  askToAgentHandoffSource,
+  type AskToAgentHandoffSource
+} from '../lib/ask-agent-handoff'
+import {
   ASSISTANT_ANNOUNCEMENT_INTERVAL_MS,
   assistantRunFinishedAnnouncement,
   assistantRunStartedAnnouncement,
@@ -47,6 +52,9 @@ interface TimelineProps {
     approved: boolean
   ) => Promise<void>
   onSetImportedHistory: (include: boolean) => void
+  onContinueInAgent?: (
+    source: AskToAgentHandoffSource
+  ) => Promise<boolean>
 }
 
 const TIMELINE_PAGE_SIZE = 200
@@ -195,12 +203,57 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   const timelineRef = useRef<HTMLElement>(null)
   const followOutputRef = useRef(true)
   const previousItemCountRef = useRef(props.task.items.length)
+  const taskIdRef = useRef(props.task.id)
+  const handoffButtonRef = useRef<HTMLButtonElement>(null)
   const [visibleCount, setVisibleCount] = useState(TIMELINE_PAGE_SIZE)
+  const [handoffPending, setHandoffPending] = useState<string>()
+  const [handoffStatus, setHandoffStatus] = useState('')
+  const handoffDescriptionId = useId()
   const assistantAnnouncement = useAssistantRunAnnouncement(props.task)
   const lastItem = props.task.items.at(-1)
   const lastAssistant = [...props.task.items]
     .reverse()
     .find((item) => item.kind === 'message' && item.role === 'assistant')
+  const handoffSource = props.onContinueInAgent
+    ? askToAgentHandoffSource(props.task, props.provider)
+    : undefined
+  taskIdRef.current = props.task.id
+  const requestAgentHandoff = useCallback(
+    (source: AskToAgentHandoffSource): void => {
+      const continueInAgent = props.onContinueInAgent
+      if (handoffPending || !continueInAgent) return
+
+      setHandoffPending(source.assistantMessageId)
+      setHandoffStatus('Switching this task to Agent mode.')
+      void (async () => {
+        let prepared = false
+        try {
+          prepared = await continueInAgent(source)
+          if (taskIdRef.current !== source.taskId) return
+          setHandoffStatus(
+            prepared
+              ? 'Agent mode selected. Review the draft, then send when ready.'
+              : 'The Agent draft was not prepared.'
+          )
+        } catch {
+          if (taskIdRef.current === source.taskId) {
+            setHandoffStatus('The Agent draft was not prepared.')
+          }
+        } finally {
+          if (taskIdRef.current !== source.taskId) return
+          setHandoffPending(undefined)
+          if (!prepared) {
+            window.requestAnimationFrame(() => {
+              if (taskIdRef.current === source.taskId) {
+                handoffButtonRef.current?.focus()
+              }
+            })
+          }
+        }
+      })()
+    },
+    [handoffPending, props.onContinueInAgent]
+  )
   const contentKey = useMemo(
     () => `${props.task.id}:${props.task.items.length}:${
       lastItem?.kind === 'message'
@@ -212,6 +265,8 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
 
   useEffect(() => {
     setVisibleCount(TIMELINE_PAGE_SIZE)
+    setHandoffPending(undefined)
+    setHandoffStatus('')
     followOutputRef.current = true
     previousItemCountRef.current = props.task.items.length
   }, [props.task.id])
@@ -315,7 +370,8 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
                 disabled={
                   Boolean(props.task.archivedAt) ||
                   props.task.runStatus === 'running' ||
-                  props.task.runStatus === 'awaiting-approval'
+                  props.task.runStatus === 'awaiting-approval' ||
+                  Boolean(handoffPending)
                 }
                 onClick={() =>
                   props.onSetImportedHistory(
@@ -404,6 +460,32 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
                       <span />
                     </div>
                   )}
+                  {handoffSource?.assistantMessageId === item.id && (
+                    <div className="ask-agent-handoff">
+                      <div>
+                        <strong>Ready to implement?</strong>
+                        <span id={handoffDescriptionId}>
+                          Switches this task to Agent and prepares an editable
+                          draft. Nothing runs until you send it.
+                        </span>
+                      </div>
+                      <button
+                        ref={handoffButtonRef}
+                        type="button"
+                        aria-describedby={handoffDescriptionId}
+                        disabled={handoffPending === item.id}
+                        onClick={() =>
+                          requestAgentHandoff(handoffSource)
+                        }
+                      >
+                        <Bot size={14} aria-hidden="true" />
+                        {handoffPending === item.id
+                          ? 'Preparing Agent draft…'
+                          : 'Continue in Agent'}
+                        <ChevronRight size={13} aria-hidden="true" />
+                      </button>
+                    </div>
+                  )}
                 </div>
               </article>
             ) : (
@@ -422,6 +504,14 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
           )}
         </div>
       </section>
+      <div
+        className="visually-hidden"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {handoffStatus}
+      </div>
       <AssistantAnnouncement announcement={assistantAnnouncement} />
     </>
   )

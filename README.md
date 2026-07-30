@@ -79,6 +79,8 @@ conformance runner; npm publication remains a separate maintainer release step.
 - Streaming assistant output and normalized runtime activity
 - Ask mode with bounded read-only workspace tools, and Agent mode with the full
   Ground-managed tool set
+- Reviewable Ask-to-Agent handoff that switches the task mode and prepares an
+  editable task-local draft without starting a run
 - Provider switching with per-item provider attribution and normalized tool-call
   and tool-result context
 - First-run provider setup split into Hosted API, Local server, and Installed CLI
@@ -263,6 +265,15 @@ writes, and commands are not advertised in Ask mode. The provider’s advanced
 settings can override the context-window estimate and maximum response tokens, and
 can opt into low, medium, or high reasoning effort. These values are best-effort
 provider inputs: an incompatible endpoint or model may reject them.
+
+After a completed, non-imported Ask response, an idle task with a workspace and an
+Agent-capable provider offers **Continue in Agent**. The action is bound to that
+exact task, provider, and assistant response. It persists Agent mode, then prepares
+an editable task-local draft and focuses the composer; it preserves any draft the
+user already wrote. The response remains context, not execution authority: Ground
+does not start a run, carry an approval forward, or contact the provider until the
+user explicitly sends the draft. Provider sessions are mode-bound, so an
+Ask/read-only session is not silently resumed with Agent authority.
 
 ### CLI agent
 
