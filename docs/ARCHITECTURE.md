@@ -121,6 +121,15 @@ context only: it adds no Git, IPC, provider, approval, or persistence authority,
 and provider egress still requires an explicit Send through the normal run-start
 boundary.
 
+While Git review is mounted, the renderer observes only the selected task's
+materialized run status. One `running`/`awaiting-approval` to `idle`/`failed`
+edge invokes the existing read-only overview request without clearing the last
+successful result. Request versions and task-tagged overviews reject late
+responses. File selection uses path/status/occurrence identity; hunk selection
+adds its exact range/header identity, so an unchanged review position survives
+unrelated patch insertion while a removed or shifted target falls back
+conservatively. This adds no watcher, polling, IPC, or Git mutation authority.
+
 Provider configuration has a separate persisted readiness state. Saving creates an
 unverified provider revision. **Test** can persist `passed` or `failed` only when
 the submitted form still exactly matches the complete configuration fingerprint,
@@ -593,11 +602,13 @@ reduced-motion rules are part of the public-preview baseline; they are not a cla
 complete cross-platform accessibility certification.
 
 A Playwright-over-Electron suite drives that real built renderer with the
-explicit browser-preview desktop mock. Its 13 scenarios cover palette and
+explicit browser-preview desktop mock. Its 16 scenarios cover palette and
 task-search keyboard/focus, including narrow-sidebar focus, provider-form labels
 and Chromium constraint validation, local-template/refused-connection recovery
 into a detected CLI, task-local and active-run draft preparation, Ask-to-Agent and
-reviewed-hunk handoffs, structured Git diff navigation, deterministic send/cancel,
+reviewed-hunk handoffs, structured Git diff navigation and request-bound
+finished-run refresh including failure/retry and late-task isolation,
+deterministic send/cancel,
 archive/search, responsive settings, reduced-motion CSS, and forced-color
 connection-path selection. It does not load production main/preload authority or
 replace manual screen-reader/native review.

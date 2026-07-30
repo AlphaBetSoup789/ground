@@ -152,11 +152,12 @@ newer draft occupies that exact task.
 - Packaged renderer content is local; development origins are loopback-only.
 - Context isolation, restricted navigation, a narrow preload bridge, and strict IPC
   caller validation reduce renderer authority.
-- A 13-scenario Playwright-over-Electron suite drives the real built renderer’s
+- A 16-scenario Playwright-over-Electron suite drives the real built renderer’s
   command and task-search keyboard/focus behavior, including narrow-sidebar focus,
   form validation, task-local and active-run draft preparation, reviewed handoffs,
-  structured Git review, cancellation, archive/search, responsive layout, forced
-  colors, and reduced-motion behavior. It deliberately uses the browser-preview
+  structured Git review and request-bound finished-run refresh, cancellation,
+  archive/search, responsive layout, forced colors, and reduced-motion behavior.
+  It deliberately uses the browser-preview
   desktop mock, so it is not evidence for production main/preload authority,
   native approvals, or complete screen-reader accessibility.
 - Workspace grants and CLI authorization are created in the main process.

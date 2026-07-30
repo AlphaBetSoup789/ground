@@ -33,15 +33,18 @@ import type {
   GitOverview,
   GitRecoverySummary,
   GitStatusSummary,
-  GitWorktreeSummary
+  GitWorktreeSummary,
+  RunStatus
 } from '../../../shared/types'
 import { desktop } from '../lib/desktop'
+import { shouldRefreshGitOverviewAfterRun } from '../lib/git-refresh'
 import { DiffReview } from './DiffReview'
 
 type GitPanelTab = 'changes' | 'history' | 'worktrees'
 
 interface GitPanelProps {
   taskId: string
+  runStatus: RunStatus
   workspaceReady: boolean
   onAddHunkToPrompt: (taskId: string, block: string) => void
   onTaskCreated: (task: DesktopTask) => void
@@ -98,6 +101,7 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
   const [undoingRecovery, setUndoingRecovery] = useState<string>()
   const [choosingGit, setChoosingGit] = useState(false)
   const requestVersion = useRef(0)
+  const previousRunStatus = useRef(props.runStatus)
   const tabButtons = useRef<Array<HTMLButtonElement | null>>([])
   const idPrefix = useId()
 
@@ -122,11 +126,23 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
           })
           setAuthorName((current) => current || nextOverview.identity?.name || '')
           setAuthorEmail((current) => current || nextOverview.identity?.email || '')
-          const eligibleRestorePaths = new Set(
-            eligibleGitRestorePaths(nextOverview.status)
+          const eligibleStagePaths = eligibleGitStagePaths(
+            nextOverview.status
+          )
+          const eligibleUnstagePaths = eligibleGitUnstagePaths(
+            nextOverview.status
+          )
+          const eligibleRestorePaths = eligibleGitRestorePaths(
+            nextOverview.status
+          )
+          setSelectedStagePaths((current) =>
+            retainEligibleGitPaths(current, eligibleStagePaths)
+          )
+          setSelectedUnstagePaths((current) =>
+            retainEligibleGitPaths(current, eligibleUnstagePaths)
           )
           setSelectedRestorePaths((current) =>
-            current.filter((candidate) => eligibleRestorePaths.has(candidate))
+            retainEligibleGitPaths(current, eligibleRestorePaths)
           )
         }
       } catch (error) {
@@ -161,6 +177,16 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
       requestVersion.current += 1
     }
   }, [loadOverview])
+
+  useEffect(() => {
+    const previous = previousRunStatus.current
+    previousRunStatus.current = props.runStatus
+    if (
+      shouldRefreshGitOverviewAfterRun(previous, props.runStatus)
+    ) {
+      void loadOverview()
+    }
+  }, [loadOverview, props.runStatus])
 
   const changedFileCount = useMemo(() => {
     const status = overview?.status
@@ -721,6 +747,36 @@ export function eligibleGitRestorePaths(
     .sort((left, right) => left.localeCompare(right))
 }
 
+export function eligibleGitStagePaths(
+  status: GitStatusSummary | undefined
+): string[] {
+  if (!status) return []
+  const conflicts = new Set(status.conflicted)
+  return [
+    ...new Set([
+      ...status.conflicted,
+      ...status.unstaged.filter((filePath) => !conflicts.has(filePath)),
+      ...status.untracked
+    ])
+  ]
+}
+
+export function eligibleGitUnstagePaths(
+  status: GitStatusSummary | undefined
+): string[] {
+  if (!status) return []
+  const conflicts = new Set(status.conflicted)
+  return status.staged.filter((filePath) => !conflicts.has(filePath))
+}
+
+export function retainEligibleGitPaths(
+  selected: readonly string[],
+  eligible: readonly string[]
+): string[] {
+  const eligiblePaths = new Set(eligible)
+  return selected.filter((candidate) => eligiblePaths.has(candidate))
+}
+
 export function RecoveryRequiredNotice(props: {
   recoveries: GitRecoverySummary[]
 }): React.JSX.Element {
@@ -780,7 +836,7 @@ function ChangesView(props: {
   )
   const hasDiff = Boolean(overview.stagedDiff?.text || overview.unstagedDiff?.text)
   const conflicts = new Set(status?.conflicted ?? [])
-  const stagedPaths = status?.staged.filter((filePath) => !conflicts.has(filePath)) ?? []
+  const stagedPaths = eligibleGitUnstagePaths(status)
   const modifiedPaths =
     status?.unstaged.filter((filePath) => !conflicts.has(filePath)) ?? []
   const restorePaths = eligibleGitRestorePaths(status)

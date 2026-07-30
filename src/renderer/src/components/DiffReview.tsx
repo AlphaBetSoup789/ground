@@ -80,6 +80,11 @@ interface DiffFileEntry {
   selectionKey: string
 }
 
+interface DiffHunkEntry {
+  hunk: UnifiedDiffHunk
+  selectionKey: string
+}
+
 export function DiffReview(props: DiffReviewProps): React.JSX.Element {
   const parsed = useMemo(
     () => parseUnifiedDiff(props.diff.text),
@@ -92,11 +97,26 @@ export function DiffReview(props: DiffReviewProps): React.JSX.Element {
   const [selectedFileKey, setSelectedFileKey] = useState(
     fileEntries[0]?.selectionKey ?? ''
   )
+  const selectedEntry =
+    fileEntries.find(
+      (entry) => entry.selectionKey === selectedFileKey
+    ) ?? fileEntries[0]
+  const selectedFile = selectedEntry?.file
+  const hunkEntries = useMemo(
+    () =>
+      indexDiffHunks(
+        selectedEntry?.selectionKey ?? '',
+        selectedFile?.hunks ?? []
+      ),
+    [selectedEntry?.selectionKey, selectedFile?.hunks]
+  )
+  const [selectedHunkKey, setSelectedHunkKey] = useState(
+    hunkEntries[0]?.selectionKey ?? ''
+  )
   const [rawVisible, setRawVisible] = useState(false)
   const [visibleLineLimit, setVisibleLineLimit] = useState(
     INITIAL_VISIBLE_LINES
   )
-  const [activeHunkIndex, setActiveHunkIndex] = useState(0)
   const [followupActivationCount, setFollowupActivationCount] =
     useState(0)
   const fileButtons = useRef<Array<HTMLButtonElement | null>>([])
@@ -104,12 +124,6 @@ export function DiffReview(props: DiffReviewProps): React.JSX.Element {
   const titleId = useId()
   const followupDescriptionId = useId()
   const followupStatusId = useId()
-
-  const selectedEntry =
-    fileEntries.find(
-      (entry) => entry.selectionKey === selectedFileKey
-    ) ?? fileEntries[0]
-  const selectedFile = selectedEntry?.file
 
   useEffect(() => {
     if (
@@ -124,17 +138,27 @@ export function DiffReview(props: DiffReviewProps): React.JSX.Element {
   }, [fileEntries, selectedFileKey])
 
   useEffect(() => {
+    if (
+      selectedHunkKey &&
+      hunkEntries.some(
+        (entry) => entry.selectionKey === selectedHunkKey
+      )
+    ) {
+      return
+    }
+    setSelectedHunkKey(hunkEntries[0]?.selectionKey ?? '')
+  }, [hunkEntries, selectedHunkKey])
+
+  useEffect(() => {
     setRawVisible(false)
     setVisibleLineLimit(INITIAL_VISIBLE_LINES)
-    setActiveHunkIndex(0)
     setFollowupActivationCount(0)
   }, [props.diff.text])
 
   useEffect(() => {
     setVisibleLineLimit(INITIAL_VISIBLE_LINES)
-    setActiveHunkIndex(0)
     setFollowupActivationCount(0)
-  }, [selectedFile?.id])
+  }, [selectedEntry?.selectionKey])
 
   const selectFile = (index: number, moveFocus = false): void => {
     const entry = fileEntries[index]
@@ -166,27 +190,34 @@ export function DiffReview(props: DiffReviewProps): React.JSX.Element {
   }
 
   const showHunk = (nextIndex: number): void => {
-    if (!selectedFile?.hunks.length) return
+    if (!hunkEntries.length) return
     const boundedIndex = Math.max(
       0,
-      Math.min(selectedFile.hunks.length - 1, nextIndex)
+      Math.min(hunkEntries.length - 1, nextIndex)
     )
-    const target = selectedFile.hunks[boundedIndex]
+    const target = hunkEntries[boundedIndex]
     if (!target) return
-    setActiveHunkIndex(boundedIndex)
+    setSelectedHunkKey(target.selectionKey)
     setVisibleLineLimit(INITIAL_VISIBLE_LINES)
     setFollowupActivationCount(0)
-    requestAnimationFrame(() => hunkHeadings.current.get(target.id)?.focus())
+    requestAnimationFrame(() =>
+      hunkHeadings.current.get(target.selectionKey)?.focus()
+    )
   }
 
-  const displayedHunkIndex = selectedFile?.hunks.length
-    ? Math.min(activeHunkIndex, selectedFile.hunks.length - 1)
-    : 0
-  const activeHunk = selectedFile?.hunks[displayedHunkIndex]
+  const selectedHunkIndex = hunkEntries.findIndex(
+    (entry) => entry.selectionKey === selectedHunkKey
+  )
+  const displayedHunkIndex =
+    selectedHunkIndex >= 0 ? selectedHunkIndex : 0
+  const activeHunk = hunkEntries[displayedHunkIndex]?.hunk
+  const activeHunkKey =
+    hunkEntries[displayedHunkIndex]?.selectionKey ?? ''
   const visibleHunks = activeHunk
     ? [
         {
           hunk: activeHunk,
+          selectionKey: activeHunkKey,
           lines: activeHunk.lines.slice(0, visibleLineLimit),
           index: displayedHunkIndex
         }
@@ -262,7 +293,7 @@ export function DiffReview(props: DiffReviewProps): React.JSX.Element {
               const selected = selectionKey === selectedEntry.selectionKey
               return (
                 <button
-                  key={file.id}
+                  key={selectionKey}
                   ref={(element) => {
                     fileButtons.current[index] = element
                   }}
@@ -416,9 +447,9 @@ export function DiffReview(props: DiffReviewProps): React.JSX.Element {
                     <DiffTable
                       file={selectedFile}
                       hunks={visibleHunks}
-                      setHunkHeading={(hunkId, element) => {
-                        if (element) hunkHeadings.current.set(hunkId, element)
-                        else hunkHeadings.current.delete(hunkId)
+                      setHunkHeading={(hunkKey, element) => {
+                        if (element) hunkHeadings.current.set(hunkKey, element)
+                        else hunkHeadings.current.delete(hunkKey)
                       }}
                     />
                     {hiddenLineCount > 0 ? (
@@ -519,6 +550,7 @@ function DiffTable(props: {
   file: UnifiedDiffFile
   hunks: ReadonlyArray<{
     hunk: UnifiedDiffHunk
+    selectionKey: string
     lines: readonly UnifiedDiffLine[]
     index: number
   }>
@@ -534,10 +566,11 @@ function DiffTable(props: {
           Line changes for {props.file.displayPath}
         </caption>
         <tbody>
-          {props.hunks.map(({ hunk, lines, index }) => (
+          {props.hunks.map(({ hunk, selectionKey, lines, index }) => (
             <DiffHunkRows
-              key={hunk.id}
+              key={selectionKey}
               hunk={hunk}
+              selectionKey={selectionKey}
               lines={lines}
               index={index}
               total={props.file.hunks.length}
@@ -552,6 +585,7 @@ function DiffTable(props: {
 
 function DiffHunkRows(props: {
   hunk: UnifiedDiffHunk
+  selectionKey: string
   lines: readonly UnifiedDiffLine[]
   index: number
   total: number
@@ -565,7 +599,9 @@ function DiffHunkRows(props: {
       <tr className="git-diff-hunk-row">
         <th colSpan={3}>
           <h4
-            ref={(element) => props.setHunkHeading(props.hunk.id, element)}
+            ref={(element) =>
+              props.setHunkHeading(props.selectionKey, element)
+            }
             tabIndex={-1}
             aria-label={`Hunk ${props.index + 1} of ${props.total}: ${safeDiffDisplayText(
               props.hunk.header
@@ -580,7 +616,7 @@ function DiffHunkRows(props: {
       </tr>
       {props.lines.map((line, index) => (
         <DiffLineRow
-          key={`${props.hunk.id}:${index}`}
+          key={`${props.selectionKey}:${index}`}
           line={line}
         />
       ))}
@@ -723,18 +759,68 @@ function fileSelectionKey(file: UnifiedDiffFile): string {
   ].join('\u0000')
 }
 
+export function diffFileSelectionKeys(
+  files: readonly UnifiedDiffFile[]
+): string[] {
+  return occurrenceKeys(files, fileSelectionKey)
+}
+
 function indexDiffFiles(
   files: readonly UnifiedDiffFile[]
 ): DiffFileEntry[] {
+  const keys = diffFileSelectionKeys(files)
+  return files.map((file, index) => ({
+    file,
+    selectionKey: keys[index] ?? ''
+  }))
+}
+
+function hunkSelectionKey(
+  fileKey: string,
+  hunk: UnifiedDiffHunk
+): string {
+  return [
+    fileKey,
+    hunk.header,
+    hunk.oldStart,
+    hunk.oldCount,
+    hunk.newStart,
+    hunk.newCount,
+    hunk.section ?? ''
+  ].join('\u0000')
+}
+
+export function diffHunkSelectionKeys(
+  fileKey: string,
+  hunks: readonly UnifiedDiffHunk[]
+): string[] {
+  return occurrenceKeys(
+    hunks,
+    (hunk) => hunkSelectionKey(fileKey, hunk)
+  )
+}
+
+function indexDiffHunks(
+  fileKey: string,
+  hunks: readonly UnifiedDiffHunk[]
+): DiffHunkEntry[] {
+  const keys = diffHunkSelectionKeys(fileKey, hunks)
+  return hunks.map((hunk, index) => ({
+    hunk,
+    selectionKey: keys[index] ?? ''
+  }))
+}
+
+function occurrenceKeys<Value>(
+  values: readonly Value[],
+  baseKey: (value: Value) => string
+): string[] {
   const occurrences = new Map<string, number>()
-  return files.map((file) => {
-    const baseKey = fileSelectionKey(file)
-    const occurrence = occurrences.get(baseKey) ?? 0
-    occurrences.set(baseKey, occurrence + 1)
-    return {
-      file,
-      selectionKey: `${baseKey}\u0000${occurrence}`
-    }
+  return values.map((value) => {
+    const key = baseKey(value)
+    const occurrence = occurrences.get(key) ?? 0
+    occurrences.set(key, occurrence + 1)
+    return `${key}\u0000${occurrence}`
   })
 }
 

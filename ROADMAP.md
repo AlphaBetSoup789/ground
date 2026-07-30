@@ -26,7 +26,8 @@ are not necessarily release-certified.
   opaque renderer attachments, detach/reattach, and bounded in-memory scrollback
 - [x] Git status, staged/unstaged diff, path staging/unstaging, exact-tree commits,
   exact-ref conditional updates, bounded history, recoverable selected-file
-  restore/undo, and clean managed-worktree create/remove
+  restore/undo, clean managed-worktree create/remove, and one request-bound
+  refresh of an open review after a run finishes
 - [x] Passive workspace-excluding Git discovery, native executable selection,
   private fingerprint preference, Git 2.23+ verification after confirmation, and
   exact identity revalidation before every launch
@@ -106,6 +107,8 @@ are not necessarily release-certified.
   writes, commands, and MCP calls as outcome unknown without automatic replay
 - [x] Add Git status/diff/history, selected-path staging/unstaging, exact-tree
   commits, and clean managed-worktree create/remove
+- [x] Refresh a mounted Git review after an active run settles while retaining the
+  last overview and exact surviving file/hunk selection
 - [x] Add a recoverable selected-file restore/undo workflow
 - [x] Add fixed packaged-app identity, encrypted-vault, native-dialog, PTY, Git,
   deterministic compatible/first-class provider turns, expected provider

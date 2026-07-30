@@ -13,6 +13,11 @@ import type {
 } from '../../../shared/types'
 import { resolveDesktopBridge } from './desktop-bridge'
 
+const previewBuild =
+  import.meta.env.VITE_GROUND_BROWSER_PREVIEW === 'true'
+const previewGitReadControlEvent =
+  'ground:preview-git-read-control'
+const previewGitReadEvent = 'ground:preview-git-read'
 const listeners = new Set<(event: DesktopRunEventEnvelope) => void>()
 const terminalListeners = new Set<(event: TerminalEvent) => void>()
 const mockTerminals = new Map<string, TerminalSessionInfo>()
@@ -25,6 +30,13 @@ const mockRuns = new Map<
     timers: Set<number>
   }
 >()
+const mockGitRevisionByTask = new Map<string, number>()
+const pendingMockGitReads = new Map<
+  number,
+  (outcome: 'released' | 'failed') => void
+>()
+let mockGitReadGateEnabled = false
+let mockGitReadRequestId = 0
 const timestamp = new Date().toISOString()
 const previewUnstagedDiff = `diff --git a/src/renderer/src/App.tsx b/src/renderer/src/App.tsx
 index 1234567..89abcde 100644
@@ -59,6 +71,17 @@ index 2345678..9abcdef 100644
 \\ No newline at end of file`
 const previewUnstagedDiffBytes = new TextEncoder().encode(
   previewUnstagedDiff
+).byteLength
+const previewRunFinishedDiff = `diff --git a/src/agent-output.ts b/src/agent-output.ts
+index 3456789..abcdef0 100644
+--- a/src/agent-output.ts
++++ b/src/agent-output.ts
+@@ -1 +1,2 @@
+ export const agentOutput = 'reviewed'
++export const refreshSource = 'finished run'
+${previewUnstagedDiff}`
+const previewRunFinishedDiffBytes = new TextEncoder().encode(
+  previewRunFinishedDiff
 ).byteLength
 const previewWorkspace = {
   id: 'workspace_00000000-0000-4000-8000-000000000001',
@@ -206,6 +229,89 @@ function scheduleMockRun(
     callback()
   }, delayMs)
   run.timers.add(timer)
+}
+
+function markMockGitChanged(taskId: string): void {
+  mockGitRevisionByTask.set(
+    taskId,
+    (mockGitRevisionByTask.get(taskId) ?? 0) + 1
+  )
+}
+
+function handlePreviewGitReadControl(event: Event): void {
+  if (!(event instanceof CustomEvent)) return
+  const detail = event.detail as unknown
+  if (!detail || typeof detail !== 'object') return
+  const record = detail as Record<string, unknown>
+  const action = record.action
+  if (action === 'enable') {
+    mockGitReadGateEnabled = true
+    return
+  }
+  if (action === 'disable') {
+    mockGitReadGateEnabled = false
+    for (const [requestId, settle] of pendingMockGitReads) {
+      pendingMockGitReads.delete(requestId)
+      settle('released')
+    }
+    return
+  }
+  if (action !== 'release' && action !== 'fail') return
+  const requestId = record.requestId
+  if (
+    typeof requestId !== 'number' ||
+    !Number.isSafeInteger(requestId)
+  ) {
+    return
+  }
+  const settle = pendingMockGitReads.get(requestId)
+  if (!settle) return
+  pendingMockGitReads.delete(requestId)
+  settle(action === 'fail' ? 'failed' : 'released')
+}
+
+async function waitForPreviewGitRead(
+  taskId: string,
+  runRevision: number
+): Promise<void> {
+  if (!mockGitReadGateEnabled || runRevision <= 0) return
+  const requestId = ++mockGitReadRequestId
+  const outcome = await new Promise<'released' | 'failed'>(
+    (resolve) => {
+      pendingMockGitReads.set(requestId, resolve)
+      window.dispatchEvent(
+        new CustomEvent(previewGitReadEvent, {
+          detail: {
+            phase: 'pending',
+            requestId,
+            taskId,
+            runRevision
+          }
+        })
+      )
+    }
+  )
+  window.dispatchEvent(
+    new CustomEvent(previewGitReadEvent, {
+      detail: {
+        phase: 'settled',
+        requestId,
+        taskId,
+        runRevision,
+        outcome
+      }
+    })
+  )
+  if (outcome === 'failed') {
+    throw new Error('Deterministic preview Git refresh failure.')
+  }
+}
+
+if (previewBuild) {
+  window.addEventListener(
+    previewGitReadControlEvent,
+    handlePreviewGitReadControl
+  )
 }
 
 const mockApi: DesktopApi = {
@@ -620,6 +726,7 @@ const mockApi: DesktopApi = {
         if (index === words.length - 1) {
           mockRuns.delete(taskId)
           task.runStatus = 'idle'
+          markMockGitChanged(taskId)
           emit({ type: 'run-completed', taskId, runId })
         }
       }, 1_000 + index * 500)
@@ -634,6 +741,7 @@ const mockApi: DesktopApi = {
     run.timers.clear()
     const task = mockSnapshot.tasks.find((candidate) => candidate.id === taskId)
     if (task) task.runStatus = 'idle'
+    markMockGitChanged(taskId)
     emit({ type: 'run-stopped', taskId, runId: run.runId })
   },
   resolveApproval: async () => undefined,
@@ -733,61 +841,71 @@ const mockApi: DesktopApi = {
     terminalListeners.add(listener)
     return () => terminalListeners.delete(listener)
   },
-  getGitOverview: async () => ({
-    isRepository: true,
-    status: {
-      branch: 'main',
-      detached: false,
-      staged: [],
-      unstaged: [
-        'src/renderer/src/App.tsx',
-        'src/renderer/src/styles.css'
-      ],
-      untracked: ['src/renderer/src/components/GitPanel.tsx'],
-      conflicted: []
-    },
-    unstagedDiff: {
-      text: previewUnstagedDiff,
-      truncated: false,
-      bytes: previewUnstagedDiffBytes
-    },
-    stagedDiff: { text: '', truncated: false, bytes: 0 },
-    commits: [
-      {
-        hash: '8a72fbcddb2c3c516cd92dfbc12579ec9ab35121',
-        shortHash: '8a72fbc',
-        authorName: 'Ground contributor',
-        authorEmail: 'contributor@example.com',
-        authoredAt: timestamp,
-        parents: [],
-        subject: 'Build provider-neutral agent workspace',
-        body: ''
-      }
-    ],
-    historyTruncated: false,
-    recoveries: [
-      {
-        id: '12345678-1234-4123-8123-123456789abc',
-        createdAt: timestamp,
-        status: 'applied',
-        trackedPaths: ['src/renderer/src/App.tsx'],
-        untrackedPaths: [],
-        canUndo: true
-      }
-    ],
-    recoveriesTruncated: false,
-    worktrees: [
-      {
-        relativePath: '.',
-        isMain: true,
-        head: '8a72fbcddb2c3c516cd92dfbc12579ec9ab35121',
+  getGitOverview: async (taskId) => {
+    const runRevision = mockGitRevisionByTask.get(taskId) ?? 0
+    await waitForPreviewGitRead(taskId, runRevision)
+    const unstagedDiff =
+      runRevision > 0 ? previewRunFinishedDiff : previewUnstagedDiff
+    return {
+      isRepository: true,
+      status: {
         branch: 'main',
         detached: false,
-        locked: false,
-        prunable: false
-      }
-    ]
-  }),
+        staged: [],
+        unstaged: [
+          ...(runRevision > 0 ? ['src/agent-output.ts'] : []),
+          'src/renderer/src/App.tsx',
+          'src/renderer/src/styles.css'
+        ],
+        untracked: ['src/renderer/src/components/GitPanel.tsx'],
+        conflicted: []
+      },
+      unstagedDiff: {
+        text: unstagedDiff,
+        truncated: false,
+        bytes:
+          runRevision > 0
+            ? previewRunFinishedDiffBytes
+            : previewUnstagedDiffBytes
+      },
+      stagedDiff: { text: '', truncated: false, bytes: 0 },
+      commits: [
+        {
+          hash: '8a72fbcddb2c3c516cd92dfbc12579ec9ab35121',
+          shortHash: '8a72fbc',
+          authorName: 'Ground contributor',
+          authorEmail: 'contributor@example.com',
+          authoredAt: timestamp,
+          parents: [],
+          subject: 'Build provider-neutral agent workspace',
+          body: ''
+        }
+      ],
+      historyTruncated: false,
+      recoveries: [
+        {
+          id: '12345678-1234-4123-8123-123456789abc',
+          createdAt: timestamp,
+          status: 'applied',
+          trackedPaths: ['src/renderer/src/App.tsx'],
+          untrackedPaths: [],
+          canUndo: true
+        }
+      ],
+      recoveriesTruncated: false,
+      worktrees: [
+        {
+          relativePath: '.',
+          isMain: true,
+          head: '8a72fbcddb2c3c516cd92dfbc12579ec9ab35121',
+          branch: 'main',
+          detached: false,
+          locked: false,
+          prunable: false
+        }
+      ]
+    }
+  },
   chooseGitExecutable: async () => true,
   createGitWorktree: async (taskId, input) => {
     const source = mockSnapshot.tasks.find((candidate) => candidate.id === taskId)
@@ -899,9 +1017,6 @@ const mockApi: DesktopApi = {
     drift: { added: [], removed: [], changed: [] }
   })
 }
-
-const previewBuild =
-  import.meta.env.VITE_GROUND_BROWSER_PREVIEW === 'true'
 
 export const desktopBridge = resolveDesktopBridge(
   window.ground,

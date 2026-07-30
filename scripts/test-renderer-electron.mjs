@@ -26,6 +26,9 @@ const taskSearchShortcutLabel =
   process.platform === 'darwin' ? 'Cmd+K' : 'Ctrl+K'
 const composerSendShortcut =
   process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter'
+const previewGitReadControlEvent =
+  'ground:preview-git-read-control'
+const previewGitReadEvent = 'ground:preview-git-read'
 
 async function resetRenderer() {
   await page.setViewportSize({ width: 1_280, height: 860 })
@@ -46,6 +49,75 @@ async function waitForValue(read, expected, description) {
     await page.waitForTimeout(25)
   }
   assert.equal(actual, expected, description)
+}
+
+async function enablePreviewGitReadGate() {
+  await page.evaluate(
+    ({ controlEvent, readEvent }) => {
+      window.__groundPreviewGitReadEvents = []
+      window.addEventListener(readEvent, (event) => {
+        window.__groundPreviewGitReadEvents.push(
+          structuredClone(event.detail)
+        )
+      })
+      window.dispatchEvent(
+        new CustomEvent(controlEvent, {
+          detail: { action: 'enable' }
+        })
+      )
+    },
+    {
+      controlEvent: previewGitReadControlEvent,
+      readEvent: previewGitReadEvent
+    }
+  )
+}
+
+async function previewGitReadEvents() {
+  return page.evaluate(
+    () => structuredClone(window.__groundPreviewGitReadEvents ?? [])
+  )
+}
+
+async function waitForPendingPreviewGitRead(taskId, expectedCount) {
+  await waitForValue(
+    async () =>
+      (await previewGitReadEvents()).filter(
+        (event) =>
+          event.phase === 'pending' && event.taskId === taskId
+      ).length,
+    expectedCount,
+    `expected ${expectedCount} pending Git ${
+      expectedCount === 1 ? 'read' : 'reads'
+    } for ${taskId}`
+  )
+  const pending = (await previewGitReadEvents()).filter(
+    (event) =>
+      event.phase === 'pending' && event.taskId === taskId
+  )
+  const request = pending.at(-1)
+  assert.ok(request, `expected a pending Git read for ${taskId}`)
+  return request
+}
+
+async function settlePreviewGitRead(requestId, action = 'release') {
+  await page.evaluate(
+    ({ controlEvent, requestId: targetRequestId, action: outcome }) => {
+      window.dispatchEvent(
+        new CustomEvent(controlEvent, {
+          detail: {
+            action: outcome,
+            requestId: targetRequestId
+          }
+        })
+      )
+    },
+    {
+      controlEvent: previewGitReadControlEvent,
+      requestId,
+      action
+    }
+  )
 }
 
 async function run(name, test) {
@@ -1007,6 +1079,351 @@ try {
     await stop.waitFor()
     await stop.click()
     await page.getByRole('button', { name: 'Send message' }).waitFor()
+  })
+
+  await run('finished runs refresh the mounted Git review once without losing position', async () => {
+    await enablePreviewGitReadGate()
+    await page.getByRole('button', { name: 'Show Git panel' }).click()
+    const gitWorkspace = page.locator(
+      '#workspace-tool-panel[role="region"][aria-label="Git workspace"]'
+    )
+    await gitWorkspace.waitFor()
+    const workingTreeFiles = gitWorkspace.getByRole('listbox', {
+      name: 'Working tree diff files'
+    })
+    await workingTreeFiles.waitFor()
+    const stylesFile = workingTreeFiles.getByRole('option', {
+      name: /src\/renderer\/src\/styles\.css/
+    })
+    await stylesFile.click()
+    const stylesElement = await stylesFile.elementHandle()
+    assert.ok(stylesElement, 'the selected styles file should have a DOM identity')
+    await gitWorkspace.getByRole('button', { name: 'Next hunk' }).click()
+    const secondHunk = gitWorkspace.getByRole('heading', {
+      name: /^Hunk 2 of 2\b/
+    })
+    await secondHunk.waitFor()
+    await waitForValue(
+      () => stylesFile.getAttribute('aria-selected'),
+      'true',
+      'the review should start on the chosen file'
+    )
+
+    const composer = page.getByRole('textbox', { name: 'Message' })
+    await composer.fill('Make one deterministic workspace change')
+    await page.getByRole('button', { name: 'Send message' }).click()
+    const stop = page.getByRole('button', { name: 'Stop run' })
+    await stop.waitFor()
+    await stop.click()
+
+    const pendingRead = await waitForPendingPreviewGitRead(
+      'preview-task',
+      1
+    )
+    const refreshing = gitWorkspace.getByRole('button', {
+      name: 'Refreshing Git status'
+    })
+    await refreshing.waitFor()
+    assert.equal(
+      await workingTreeFiles.isVisible(),
+      true,
+      'the prior file overview should remain mounted during refresh'
+    )
+    assert.equal(
+      await stylesFile.getAttribute('aria-selected'),
+      'true',
+      'the prior file selection should remain active during refresh'
+    )
+    await secondHunk.waitFor()
+    assert.equal(
+      await workingTreeFiles
+        .getByRole('option', { name: /src\/agent-output\.ts/ })
+        .count(),
+      0,
+      'the gated finished-run result should not appear before its read completes'
+    )
+    await secondHunk.focus()
+    await settlePreviewGitRead(pendingRead.requestId)
+
+    const agentOutputFile = workingTreeFiles.getByRole('option', {
+      name: /src\/agent-output\.ts/
+    })
+    await agentOutputFile.waitFor()
+    await gitWorkspace.getByRole('button', {
+      name: 'Refresh Git status'
+    }).waitFor()
+    assert.equal(
+      await stylesFile.getAttribute('aria-selected'),
+      'true',
+      'an unrelated new file should not replace the selected review file'
+    )
+    await secondHunk.waitFor()
+    assert.equal(
+      await secondHunk.evaluate(
+        (element) => element === document.activeElement
+      ),
+      true,
+      'the exact surviving hunk should retain keyboard focus after refresh'
+    )
+    const retainedStylesIdentity = await stylesElement.evaluate(
+      (element) => ({
+        connected: element.isConnected,
+        selected: element.getAttribute('aria-selected'),
+        text: element.textContent
+      })
+    )
+    assert.equal(
+      retainedStylesIdentity.connected,
+      true,
+      'the selected file option should retain its DOM identity'
+    )
+    assert.equal(
+      retainedStylesIdentity.selected,
+      'true',
+      'the retained file option should remain selected'
+    )
+    assert.match(
+      retainedStylesIdentity.text ?? '',
+      /src\/renderer\/src\/styles\.css/,
+      'a prepended patch must not retarget the prior file option DOM node'
+    )
+    assert.match(
+      (await secondHunk.textContent()) ?? '',
+      /@media \(prefers-reduced-motion: reduce\)/,
+      'the exact surviving second hunk should remain selected after refresh'
+    )
+    assert.equal(
+      await page.getByRole('button', { name: 'Send message' }).count(),
+      1,
+      'the terminal run status should settle independently of Git refresh'
+    )
+    const reads = (await previewGitReadEvents()).filter(
+      (event) =>
+        event.phase === 'pending' && event.taskId === 'preview-task'
+    )
+    assert.equal(
+      reads.length,
+      1,
+      'one active-to-terminal transition should request exactly one Git overview'
+    )
+  })
+
+  await run('failed automatic Git refresh keeps the prior overview and retries', async () => {
+    await enablePreviewGitReadGate()
+    await page.getByRole('button', { name: 'Show Git panel' }).click()
+    const gitWorkspace = page.locator(
+      '#workspace-tool-panel[role="region"][aria-label="Git workspace"]'
+    )
+    await gitWorkspace.waitFor()
+    const workingTreeFiles = gitWorkspace.getByRole('listbox', {
+      name: 'Working tree diff files'
+    })
+    await workingTreeFiles.waitFor()
+    const composer = page.getByRole('textbox', { name: 'Message' })
+    await composer.fill('Exercise deterministic Git refresh failure')
+    await page.getByRole('button', { name: 'Send message' }).click()
+    const stop = page.getByRole('button', { name: 'Stop run' })
+    await stop.waitFor()
+    await stop.click()
+    const failedRead = await waitForPendingPreviewGitRead(
+      'preview-task',
+      1
+    )
+    await gitWorkspace.getByRole('button', {
+      name: 'Refreshing Git status'
+    }).waitFor()
+    assert.equal(
+      await workingTreeFiles.isVisible(),
+      true,
+      'the last successful overview should remain visible before failure'
+    )
+    await settlePreviewGitRead(failedRead.requestId, 'fail')
+    const inlineFailure = gitWorkspace
+      .getByRole('alert')
+      .filter({
+        hasText: 'Deterministic preview Git refresh failure.'
+      })
+    await inlineFailure.waitFor()
+    assert.equal(
+      await workingTreeFiles.isVisible(),
+      true,
+      'a failed automatic refresh must retain the last successful overview'
+    )
+    assert.equal(
+      await workingTreeFiles
+        .getByRole('option', { name: /src\/agent-output\.ts/ })
+        .count(),
+      0,
+      'a failed result must not partially publish its newer patch'
+    )
+    await inlineFailure.getByRole('button', { name: 'Retry' }).click()
+    const retryRead = await waitForPendingPreviewGitRead(
+      'preview-task',
+      2
+    )
+    assert.equal(
+      await workingTreeFiles.isVisible(),
+      true,
+      'retry should also retain the prior overview while pending'
+    )
+    await settlePreviewGitRead(retryRead.requestId)
+    await workingTreeFiles
+      .getByRole('option', { name: /src\/agent-output\.ts/ })
+      .waitFor()
+    await inlineFailure.waitFor({ state: 'detached' })
+    const events = await previewGitReadEvents()
+    assert.deepEqual(
+      events
+        .filter(
+          (event) =>
+            event.phase === 'settled' &&
+            event.taskId === 'preview-task'
+        )
+        .map((event) => event.outcome),
+      ['failed', 'released'],
+      'the automatic failure and explicit retry should settle independently'
+    )
+  })
+
+  await run('late Git refresh results cannot cross task boundaries', async () => {
+    await enablePreviewGitReadGate()
+    await page.getByRole('button', { name: 'Show Git panel' }).click()
+    const gitWorkspace = page.locator(
+      '#workspace-tool-panel[role="region"][aria-label="Git workspace"]'
+    )
+    await gitWorkspace.waitFor()
+    await gitWorkspace.getByRole('listbox', {
+      name: 'Working tree diff files'
+    }).waitFor()
+    const composer = page.getByRole('textbox', { name: 'Message' })
+    await composer.fill('Create a task-bound delayed Git refresh')
+    await page.getByRole('button', { name: 'Send message' }).click()
+    const stop = page.getByRole('button', { name: 'Stop run' })
+    await stop.waitFor()
+    await stop.click()
+    const supersededRead = await waitForPendingPreviewGitRead(
+      'preview-task',
+      1
+    )
+    await gitWorkspace.getByRole('button', {
+      name: 'Refreshing Git status'
+    }).waitFor()
+    await composer.fill('Create a newer task-bound delayed Git refresh')
+    await page.getByRole('button', { name: 'Send message' }).click()
+    const secondStop = page.getByRole('button', { name: 'Stop run' })
+    await secondStop.waitFor()
+    await secondStop.click()
+    const crossTaskSuccessRead = await waitForPendingPreviewGitRead(
+      'preview-task',
+      2
+    )
+    await settlePreviewGitRead(supersededRead.requestId)
+    await waitForValue(
+      async () =>
+        (await previewGitReadEvents()).filter(
+          (event) =>
+            event.phase === 'settled' &&
+            event.requestId === supersededRead.requestId
+        ).length,
+      1,
+      'the superseded same-task Git read should settle'
+    )
+    assert.equal(
+      await gitWorkspace
+        .getByRole('button', { name: 'Refreshing Git status' })
+        .count(),
+      1,
+      'a superseded response must not clear the latest same-task loading state'
+    )
+    assert.equal(
+      await gitWorkspace
+        .getByRole('listbox', { name: 'Working tree diff files' })
+        .getByRole('option', { name: /src\/agent-output\.ts/ })
+        .count(),
+      0,
+      'a superseded same-task response must not publish its overview'
+    )
+    await composer.fill('Create a latest cross-task Git refresh')
+    await page.getByRole('button', { name: 'Send message' }).click()
+    const thirdStop = page.getByRole('button', { name: 'Stop run' })
+    await thirdStop.waitFor()
+    await thirdStop.click()
+    const crossTaskFailureRead = await waitForPendingPreviewGitRead(
+      'preview-task',
+      3
+    )
+    await page.getByRole('button', {
+      name: /Explain the auth flow/
+    }).click()
+    await waitForValue(
+      () => page.getByLabel('Task title').inputValue(),
+      'Explain the auth flow',
+      'the user should be able to switch tasks during a delayed Git refresh'
+    )
+    const otherTaskFiles = gitWorkspace.getByRole('listbox', {
+      name: 'Working tree diff files'
+    })
+    await otherTaskFiles.waitFor()
+    assert.equal(
+      await otherTaskFiles
+        .getByRole('option', { name: /src\/agent-output\.ts/ })
+        .count(),
+      0,
+      'the selected task should start with only its own overview'
+    )
+    assert.equal(
+      (await previewGitReadEvents()).filter(
+        (event) =>
+          event.phase === 'settled' &&
+          (event.requestId === crossTaskSuccessRead.requestId ||
+            event.requestId === crossTaskFailureRead.requestId)
+      ).length,
+      0,
+      'both remaining source-task reads must still be pending across the task switch'
+    )
+    await settlePreviewGitRead(crossTaskSuccessRead.requestId)
+    await settlePreviewGitRead(crossTaskFailureRead.requestId, 'fail')
+    await waitForValue(
+      async () =>
+        (await previewGitReadEvents()).filter(
+          (event) =>
+            event.phase === 'settled' &&
+            (event.requestId === crossTaskSuccessRead.requestId ||
+              event.requestId === crossTaskFailureRead.requestId)
+        ).length,
+      2,
+      'both source-task Git reads should settle after explicit control'
+    )
+    await page.evaluate(
+      () =>
+        new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve))
+        )
+    )
+    assert.equal(
+      await otherTaskFiles
+        .getByRole('option', { name: /src\/agent-output\.ts/ })
+        .count(),
+      0,
+      'a late overview from the prior task must not paint the selected task'
+    )
+    assert.equal(
+      await page
+        .getByRole('alert')
+        .filter({
+          hasText: 'Deterministic preview Git refresh failure.'
+        })
+        .count(),
+      0,
+      'a late source-task error must not surface on the selected task'
+    )
+    assert.equal(
+      await gitWorkspace
+        .getByRole('button', { name: 'Refresh Git status' })
+        .count(),
+      1,
+      'the selected task should own the settled Git panel state'
+    )
   })
 
   await run('structured Git diff review supports keyboard and raw-patch inspection', async () => {

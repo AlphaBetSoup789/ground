@@ -535,6 +535,7 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
             <GitPanel
               key={props.task.id}
               taskId={props.task.id}
+              runStatus={props.task.runStatus}
               workspaceReady={Boolean(props.task.workspace)}
               onAddHunkToPrompt={props.onAddHunkToPrompt}
               onTaskCreated={props.onTaskCreated}

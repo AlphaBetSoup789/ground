@@ -296,6 +296,8 @@ Requirements: GR-3, GR-4
   capability checks and egress previews.
 - Add focused changed-file review, per-hunk discussion, approval summaries, and
   test-result presentation.
+- Refresh an already-open Git review once when its task leaves an active run,
+  retaining the prior overview and any still-valid file/hunk position.
 - Preserve accessibility and portable export behavior for supported attachment
   metadata.
 
@@ -304,7 +306,9 @@ Acceptance gate:
 - Unsupported providers fail before egress with a clear capability explanation.
 - Attachment bytes, parsed text, previews, and exports have explicit size,
   persistence, and deletion rules.
-- Diff review remains bound to current file/index identities.
+- Diff review remains bound to current file and hunk review identities.
+- Late or overlapping repository reads cannot cross task boundaries or blank a
+  usable review while a finished-run refresh is pending.
 
 ### M3.4 Task interaction and navigation — P1
 

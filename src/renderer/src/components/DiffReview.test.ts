@@ -3,7 +3,12 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type { GitDiffResult } from '../../../shared/types'
 import type { DiffFollowupSource } from '../lib/diff-followup'
-import { DiffReview } from './DiffReview'
+import { parseUnifiedDiff } from '../lib/unified-diff'
+import {
+  diffFileSelectionKeys,
+  diffHunkSelectionKeys,
+  DiffReview
+} from './DiffReview'
 
 function render(
   text: string,
@@ -32,6 +37,163 @@ function addPromptButton(markup: string): string | undefined {
 }
 
 describe('structured diff review', () => {
+  it('keeps file selection keys stable across unrelated insertion and reordering', () => {
+    const firstPatch = parseUnifiedDiff(`diff --git a/src/app.ts b/src/app.ts
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -1 +1 @@
+-old app
++new app
+diff --git a/src/styles.css b/src/styles.css
+--- a/src/styles.css
++++ b/src/styles.css
+@@ -1 +1 @@
+-color: red;
++color: green;
+`)
+    const refreshedPatch = parseUnifiedDiff(`diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-Old heading
++New heading
+diff --git a/src/styles.css b/src/styles.css
+--- a/src/styles.css
++++ b/src/styles.css
+@@ -1 +1 @@
+-color: red;
++color: green;
+diff --git a/src/app.ts b/src/app.ts
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -1 +1 @@
+-old app
++new app
+`)
+    const firstKeys = diffFileSelectionKeys(firstPatch.files)
+    const refreshedKeys = diffFileSelectionKeys(refreshedPatch.files)
+    expect(firstKeys).toHaveLength(2)
+    expect(refreshedKeys).toHaveLength(3)
+    const firstByPath = new Map(
+      firstPatch.files.map((file, index) => [
+        file.displayPath,
+        firstKeys[index]
+      ])
+    )
+    const refreshedByPath = new Map(
+      refreshedPatch.files.map((file, index) => [
+        file.displayPath,
+        refreshedKeys[index]
+      ])
+    )
+
+    expect(refreshedByPath.get('src/app.ts')).toBe(
+      firstByPath.get('src/app.ts')
+    )
+    expect(refreshedByPath.get('src/styles.css')).toBe(
+      firstByPath.get('src/styles.css')
+    )
+  })
+
+  it('keeps exact hunk keys stable when an unrelated hunk is added', () => {
+    const firstPatch = parseUnifiedDiff(`diff --git a/src/app.ts b/src/app.ts
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -1 +1 @@
+-old one
++new one
+@@ -10 +10 @@
+-old ten
++new ten
+`)
+    const refreshedPatch = parseUnifiedDiff(`diff --git a/src/app.ts b/src/app.ts
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -1 +1 @@
+-old one
++new one
+@@ -5 +5 @@
+-old five
++new five
+@@ -10 +10 @@
+-old ten
++new ten
+`)
+    const firstFile = firstPatch.files[0]
+    const refreshedFile = refreshedPatch.files[0]
+    expect(firstFile).toBeDefined()
+    expect(refreshedFile).toBeDefined()
+    const firstFileKey = diffFileSelectionKeys(firstPatch.files)[0]
+    const refreshedFileKey = diffFileSelectionKeys(refreshedPatch.files)[0]
+    expect(refreshedFileKey).toBe(firstFileKey)
+
+    const firstKeys = diffHunkSelectionKeys(
+      firstFileKey ?? '',
+      firstFile?.hunks ?? []
+    )
+    const refreshedKeys = diffHunkSelectionKeys(
+      refreshedFileKey ?? '',
+      refreshedFile?.hunks ?? []
+    )
+
+    expect(firstKeys).toHaveLength(2)
+    expect(refreshedKeys).toHaveLength(3)
+    expect(refreshedKeys[0]).toBe(firstKeys[0])
+    expect(refreshedKeys[2]).toBe(firstKeys[1])
+  })
+
+  it('does not retain a hunk key after its range shifts', () => {
+    const firstPatch = parseUnifiedDiff(`diff --git a/src/app.ts b/src/app.ts
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -10 +10 @@ render()
+-old value
++new value
+`)
+    const shiftedPatch = parseUnifiedDiff(`diff --git a/src/app.ts b/src/app.ts
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -11 +11 @@ render()
+-old value
++new value
+`)
+    const firstFileKey = diffFileSelectionKeys(firstPatch.files)[0] ?? ''
+    const shiftedFileKey =
+      diffFileSelectionKeys(shiftedPatch.files)[0] ?? ''
+    const firstHunkKey = diffHunkSelectionKeys(
+      firstFileKey,
+      firstPatch.files[0]?.hunks ?? []
+    )[0]
+    const shiftedHunkKeys = diffHunkSelectionKeys(
+      shiftedFileKey,
+      shiftedPatch.files[0]?.hunks ?? []
+    )
+
+    expect(firstHunkKey).toBeDefined()
+    expect(shiftedHunkKeys).not.toContain(firstHunkKey)
+  })
+
+  it('gives duplicate identical hunks distinct occurrence keys', () => {
+    const parsed = parseUnifiedDiff(`diff --git a/src/app.ts b/src/app.ts
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -1 +1 @@
+-old value
++new value
+@@ -1 +1 @@
+-old value
++new value
+`)
+    const fileKey = diffFileSelectionKeys(parsed.files)[0] ?? ''
+    const hunkKeys = diffHunkSelectionKeys(
+      fileKey,
+      parsed.files[0]?.hunks ?? []
+    )
+
+    expect(hunkKeys).toHaveLength(2)
+    expect(new Set(hunkKeys)).toHaveProperty('size', 2)
+  })
+
   it('renders a focused, accessible multi-file and multi-hunk review', () => {
     const markup = render(`diff --git a/src/App.tsx b/src/App.tsx
 index 1111111..2222222 100644

@@ -71,6 +71,9 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
   keyboard hunk navigation, hostile-presentation escaping, bounded raw-patch
   fallback, and a reviewed-hunk-to-prompt action that preserves existing draft
   text without applying or sending the patch.
+- Mounted Git review now refreshes once when the selected task leaves an active
+  run, retaining the last successful overview during the read and preserving an
+  exact surviving file and hunk selection across the new patch.
 - Draft-only prompt preparation while a task is running or awaiting approval.
   Stop remains the only active-run action, the Send shortcut is inert, task
   switching preserves exact drafts, and nothing queues or steers the current run.
@@ -146,14 +149,16 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
 - Add a keyboard command palette, task-local process-memory composer drafts,
   near-bottom-only timeline following, and bounded batched screen-reader
   announcements for streamed assistant text.
-- Expand the Playwright-over-Electron renderer interaction suite to thirteen
+- Expand the Playwright-over-Electron renderer interaction suite to sixteen
   scenarios covering command-palette and task-search keyboard/focus behavior,
   accessible provider-form validation, truthful local-provider refusal recovery
   into a detected CLI, task-local and active-run draft preparation, Ask-to-Agent
-  and reviewed-hunk prompt handoffs, deterministic send cancellation,
-  archive/search, responsive settings and sidebar selection, reduced-motion CSS,
-  and forced-color connection-path selection. It uses the explicit browser-preview
-  desktop mock and is not production-main/native/provider certification.
+  and reviewed-hunk prompt handoffs, finished-run Git refresh with review-position
+  retention, failure/retry, and late-task isolation, deterministic send
+  cancellation, archive/search, responsive settings and sidebar selection,
+  reduced-motion CSS, and forced-color connection-path selection. It uses the
+  explicit browser-preview desktop mock and is not
+  production-main/native/provider certification.
 - Recover interrupted managed writes, commands, and MCP calls as explicit
   outcome-unknown activity, without automatically replaying the side effect or
   retaining continuation authority.

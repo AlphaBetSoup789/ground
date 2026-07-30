@@ -546,6 +546,14 @@ escapes, with an explicit copy-exact action for the underlying captured text.
 Large structured patches are disclosed incrementally instead of mounting every
 line at once.
 
+If the panel is open when the selected task's run completes, stops, or fails,
+Ground reads the repository once more without blanking the last successful
+overview. An exact file and hunk selection survives when that review identity
+still exists; removed or identity-changed targets fall back to a valid current
+selection. Late or superseded reads remain bound to the task and request that
+started them. If the refresh fails, the last overview remains visible with an
+inline error and explicit **Retry** action.
+
 For a complete structured hunk, **Add hunk to prompt** appends only that active
 hunk to the exact task's process-local editable draft. The block records staged
 or working-tree provenance, the parsed path reported by Git, and visibly escaped
@@ -688,10 +696,11 @@ explicit browser-preview desktop mock and drives it through Playwright. It cover
 command-palette focus/navigation, keyboard-complete task search and narrow-sidebar
 focus, native HTML provider-form validation, task-local and active-run draft
 preparation, Ask-to-Agent and reviewed-hunk draft handoffs, structured Git diff
-navigation, mock send/cancel, archive/search, responsive settings, reduced-motion
-and forced-color styles, plus the local-template/refused-connection recovery path
-into a detected CLI. The current suite contains 13 scenarios. CI runs it on macOS,
-Windows, and Linux/Xvfb. It does not load the production preload/main process,
+navigation and finished-run refresh, mock send/cancel, archive/search, responsive
+settings, reduced-motion and forced-color styles, plus the
+local-template/refused-connection recovery path into a detected CLI. The current
+suite contains 16 scenarios. CI runs it on macOS, Windows, and Linux/Xvfb. It does
+not load the production preload/main process,
 invoke native permissions, use a real provider, or replace screen-reader/manual
 accessibility testing.
 
