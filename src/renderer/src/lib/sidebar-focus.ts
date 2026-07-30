@@ -6,12 +6,18 @@ type SidebarFocusDocument = Pick<
   'activeElement' | 'querySelector'
 >
 
+type TaskSelectionFocusDocument = Pick<
+  Document,
+  'activeElement' | 'body'
+>
+
 const TRANSIENT_SIDEBAR_FOCUS =
   '.sidebar, .sidebar-scrim, .header-sidebar-button'
 
 const TASK_FOCUS_TARGETS = [
   '#task-message-composer:not(:disabled)',
   '.task-title-input:not(:disabled)',
+  '.archived-task-restore',
   '.sidebar-reopen'
 ] as const
 
@@ -20,6 +26,18 @@ export function shouldInertMainSurface(
   narrowLayout: boolean
 ): boolean {
   return sidebarOpen && narrowLayout
+}
+
+export function shouldRestoreTaskSelectionFocus(
+  root: TaskSelectionFocusDocument,
+  focusOrigin: Element | null
+): boolean {
+  const activeElement = root.activeElement
+  return (
+    !activeElement ||
+    activeElement === root.body ||
+    activeElement === focusOrigin
+  )
 }
 
 export function releaseFocusBeforeSidebarClose(

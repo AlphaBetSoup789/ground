@@ -127,16 +127,30 @@ can still contain secrets or semantic prompt injection; the user must review the
 editable draft and explicitly Send before the existing provider-egress boundary
 is crossed.
 
+Task search consumes only the bounded renderer-safe task projection. Keyboard
+activation takes the opaque task ID from the exact current committed filtered
+order; display titles, workspace labels, and earlier result lists are not
+authorities. The renderer rechecks that ID against its latest snapshot, applies
+selection functionally without replacing concurrent task/run state, and delegates
+to main, where a missing task is refused. A rejected current selection refreshes
+authoritative state, while every refresh preserves a selection begun after its
+captured request boundary. Post-selection focus is bound to the initiating
+request, task, and user-interaction context, so a stale completion cannot retarget
+focus. These controls affect renderer navigation only and grant no provider, run,
+tool, approval, Git, credential, or workspace authority.
+
 ## Implemented controls
 
 - Packaged renderer content is local; development origins are loopback-only.
 - Context isolation, restricted navigation, a narrow preload bridge, and strict IPC
   caller validation reduce renderer authority.
-- A six-scenario Playwright-over-Electron suite drives the real built renderer’s
-  keyboard/focus, form validation, task-local drafts, cancellation, archive/search,
-  responsive layout, and reduced-motion behavior. It deliberately uses the
-  browser-preview desktop mock, so it is not evidence for production main/preload
-  authority or native approvals.
+- A 12-scenario Playwright-over-Electron suite drives the real built renderer’s
+  command and task-search keyboard/focus behavior, including narrow-sidebar focus,
+  form validation, task-local drafts and reviewed handoffs, structured Git review,
+  cancellation, archive/search, responsive layout, forced colors, and
+  reduced-motion behavior. It deliberately uses the browser-preview desktop mock,
+  so it is not evidence for production main/preload authority, native approvals,
+  or complete screen-reader accessibility.
 - Workspace grants and CLI authorization are created in the main process.
   Renderer task DTOs contain only fresh process-scoped grant IDs and sanitized
   path-free labels; canonical paths, runtime sessions, and model continuation

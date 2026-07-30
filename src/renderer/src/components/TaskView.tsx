@@ -165,6 +165,7 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
 
   return (
     <div
+      data-task-id={props.task.id}
       className={`task-view${workspacePanel ? ' workspace-panel-open' : ''}${
         workspacePanel ? ` workspace-panel-${workspacePanel}` : ''
       }${
@@ -475,6 +476,7 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
             This task is archived. Its history is read-only until you restore it.
           </span>
           <button
+            className="archived-task-restore"
             type="button"
             onClick={() => props.onSetArchived(false)}
           >

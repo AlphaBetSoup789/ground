@@ -41,6 +41,9 @@ are not necessarily release-certified.
 - [x] Versioned task bundle import/export, Markdown export, and confirmed task
   deletion
 - [x] Safe task fork, reversible archive/restore, and bounded active/archive search
+- [x] Keyboard-complete task switching over the exact current filtered order,
+  including direct Enter activation, Arrow-key result focus, query clearing,
+  IME/modifier/no-result refusal, and request-bound narrow-sidebar focus
 - [x] Strict persisted-state validation, three rotating validated snapshots,
   automatic fallback, bounded no-follow reads, private atomic replacement,
   unreadable-file quarantine, and in-app recovery controls
@@ -59,9 +62,10 @@ are not necessarily release-certified.
   task-local drafts, and requires explicit Send before any run or provider egress
 - [x] Bounded reviewed-hunk-to-prompt handoff that preserves the source task's
   editable draft and requires explicit Send before provider egress
-- [x] Cross-platform CI renderer interaction suite in Electron for keyboard/focus,
-  provider-form validation, local-provider refusal recovery, drafts, cancellation,
-  archive/search, responsive settings, forced colors, and reduced-motion behavior
+- [x] Cross-platform CI renderer interaction suite in Electron for command and
+  task-search keyboard/focus, provider-form validation, local-provider refusal
+  recovery, drafts, cancellation, archive/search, responsive settings, forced
+  colors, and reduced-motion behavior
 - [x] Baseline CI, CodeQL, issue forms, and contributor/security documentation
 
 ## Public alpha hardening

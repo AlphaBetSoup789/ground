@@ -20,6 +20,10 @@ const page = await electronApplication.firstWindow()
 page.setDefaultTimeout(20_000)
 
 const results = []
+const taskSearchShortcut =
+  process.platform === 'darwin' ? 'Meta+K' : 'Control+K'
+const taskSearchShortcutLabel =
+  process.platform === 'darwin' ? 'Cmd+K' : 'Ctrl+K'
 
 async function resetRenderer() {
   await page.setViewportSize({ width: 1_280, height: 860 })
@@ -99,6 +103,296 @@ try {
       () => composer.evaluate((element) => element === document.activeElement),
       true,
       'closing the command palette should restore focus'
+    )
+
+    await page.keyboard.press('F1')
+    await palette.waitFor()
+    await search.fill('search tasks')
+    await search.press('Enter')
+    await palette.waitFor({ state: 'detached' })
+    const taskSearch = page.getByRole('searchbox', {
+      name: 'Search tasks'
+    })
+    await waitForValue(
+      () => taskSearch.evaluate(
+        (element) => element === document.activeElement
+      ),
+      true,
+      'executing Search tasks from the palette should focus task search'
+    )
+  })
+
+  await run('task search switches tasks without leaving the keyboard', async () => {
+    const sidebarShell = page.locator(
+      'aside[aria-label="Task navigation"]'
+    )
+    const sidebar = page.getByRole('complementary', {
+      name: 'Task navigation'
+    })
+    await sidebar
+      .getByRole('button', { name: 'Close sidebar' })
+      .click()
+    await waitForValue(
+      () => sidebarShell.getAttribute('aria-hidden'),
+      'true',
+      'closing the sidebar should hide it before the search shortcut runs'
+    )
+    await page.keyboard.press(`Shift+${taskSearchShortcut}`)
+    assert.equal(
+      await sidebarShell.getAttribute('aria-hidden'),
+      'true',
+      'extra modifiers must not open task search'
+    )
+
+    await page.keyboard.press(taskSearchShortcut)
+    const search = page.getByRole('searchbox', {
+      name: 'Search tasks'
+    })
+    await search.waitFor()
+    await waitForValue(
+      () => search.evaluate(
+        (element) => element === document.activeElement
+      ),
+      true,
+      `${taskSearchShortcutLabel} should open the sidebar and focus task search`
+    )
+
+    await search.fill('auth')
+    const authTask = page.getByRole('button', {
+      name: /Explain the auth flow/
+    })
+    await authTask.waitFor()
+    await search.press('Enter')
+    await waitForValue(
+      () => page.getByLabel('Task title').inputValue(),
+      'Explain the auth flow',
+      'Enter should select the first current task-search result'
+    )
+    assert.equal(
+      await search.inputValue(),
+      '',
+      'direct search activation should clear the query'
+    )
+    await page.keyboard.press(taskSearchShortcut)
+    await search.fill('codex')
+    const dashboardTask = page.getByRole('button', {
+      name: /Refine the project dashboard/
+    })
+    await dashboardTask.waitFor()
+    await search.press('ArrowDown')
+    await waitForValue(
+      () => dashboardTask.evaluate(
+        (element) => element === document.activeElement
+      ),
+      true,
+      'ArrowDown should move from search to the first current result'
+    )
+    await page.keyboard.press('Enter')
+    await waitForValue(
+      () => page.getByLabel('Task title').inputValue(),
+      'Refine the project dashboard',
+      'Enter on a focused result should use the existing task selection path'
+    )
+    assert.equal(
+      await search.inputValue(),
+      '',
+      'row activation should clear the query'
+    )
+    await page.keyboard.press(taskSearchShortcut)
+    await search.press('ArrowUp')
+    await waitForValue(
+      () => authTask.evaluate(
+        (element) => element === document.activeElement
+      ),
+      true,
+      'ArrowUp should move from search to the last current result'
+    )
+
+    await page.keyboard.press(taskSearchShortcut)
+    await search.fill('auth')
+    const composingEventWasNotCanceled = await search.evaluate((element) =>
+      element.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          bubbles: true,
+          cancelable: true,
+          isComposing: true
+        })
+      )
+    )
+    const legacyImeEventWasNotCanceled = await search.evaluate((element) => {
+      const event = new KeyboardEvent('keydown', {
+        key: 'Enter',
+        code: 'Enter',
+        bubbles: true,
+        cancelable: true
+      })
+      Object.defineProperty(event, 'keyCode', { value: 229 })
+      return element.dispatchEvent(event)
+    })
+    assert.equal(
+      composingEventWasNotCanceled,
+      true,
+      'an IME composition key should remain available to the platform'
+    )
+    assert.equal(
+      legacyImeEventWasNotCanceled,
+      true,
+      'a legacy keyCode 229 IME key should remain available to the platform'
+    )
+    assert.equal(
+      await page.getByLabel('Task title').inputValue(),
+      'Refine the project dashboard',
+      'a composing Enter key must not switch tasks'
+    )
+    assert.equal(
+      await search.inputValue(),
+      'auth',
+      'a composing Enter key must preserve the in-progress search value'
+    )
+    assert.equal(
+      await search.evaluate(
+        (element) => element === document.activeElement
+      ),
+      true,
+      'a composing Enter key should leave task search focused'
+    )
+    await search.press('Escape')
+    assert.equal(await search.inputValue(), '')
+
+    await search.fill('does-not-exist')
+    await sidebar
+      .getByRole('status')
+      .filter({ hasText: '0 active tasks found' })
+      .waitFor()
+    await search.press('Enter')
+    await search.press('ArrowDown')
+    await search.press('ArrowUp')
+    assert.equal(
+      await page.getByLabel('Task title').inputValue(),
+      'Refine the project dashboard',
+      'empty result navigation must not switch tasks'
+    )
+    assert.equal(
+      await search.evaluate(
+        (element) => element === document.activeElement
+      ),
+      true,
+      'empty result navigation should leave search focused'
+    )
+    assert.equal(
+      await search.inputValue(),
+      'does-not-exist',
+      'empty result navigation should preserve the query'
+    )
+    await sidebar
+      .getByRole('button', { name: 'Clear search', exact: true })
+      .click()
+    assert.equal(await search.inputValue(), '')
+    assert.equal(
+      await search.evaluate(
+        (element) => element === document.activeElement
+      ),
+      true,
+      'the no-result clear action should return focus to task search'
+    )
+    await search.fill('does-not-exist')
+    await search.press('Escape')
+    assert.equal(await search.inputValue(), '')
+    await search.press('Escape')
+    await waitForValue(
+      () => dashboardTask.evaluate(
+        (element) => element === document.activeElement
+      ),
+      true,
+      'Escape on an empty query should focus the selected task row'
+    )
+  })
+
+  await run('narrow task search closes its overlay and restores task focus', async () => {
+    await page.setViewportSize({ width: 680, height: 760 })
+    const sidebarShell = page.locator(
+      'aside[aria-label="Task navigation"]'
+    )
+    const sidebar = page.getByRole('complementary', {
+      name: 'Task navigation'
+    })
+    const mainSurface = page.locator('.main-surface')
+    const composer = page.locator('#task-message-composer')
+    const searchInput = page.locator('#task-search')
+
+    await waitForValue(
+      () => mainSurface.evaluate((element) => element.inert),
+      true,
+      'the open narrow sidebar should inert the task surface'
+    )
+    await sidebar
+      .getByRole('button', { name: 'Close sidebar' })
+      .click()
+    await waitForValue(
+      () => sidebarShell.getAttribute('aria-hidden'),
+      'true',
+      'closing the narrow sidebar should hide its overlay'
+    )
+
+    await page.keyboard.press(taskSearchShortcut)
+    const search = page.getByRole('searchbox', {
+      name: 'Search tasks'
+    })
+    await waitForValue(
+      () => search.evaluate(
+        (element) => element === document.activeElement
+      ),
+      true,
+      `${taskSearchShortcutLabel} should focus search in the narrow overlay`
+    )
+    await search.press('Escape')
+    await waitForValue(
+      () => sidebarShell.getAttribute('aria-hidden'),
+      'true',
+      'Escape on an empty narrow search should close the overlay'
+    )
+    await waitForValue(
+      () => composer.evaluate(
+        (element) => element === document.activeElement
+      ),
+      true,
+      'Escape on an empty narrow search should return focus to the task'
+    )
+
+    await page.keyboard.press(taskSearchShortcut)
+    await waitForValue(
+      () => search.evaluate(
+        (element) => element === document.activeElement
+      ),
+      true,
+      `${taskSearchShortcutLabel} should reopen narrow task search`
+    )
+    await search.fill('auth')
+    await search.press('Enter')
+
+    await waitForValue(
+      () => page.getByLabel('Task title').inputValue(),
+      'Explain the auth flow',
+      'narrow task search should select its first current result'
+    )
+    await waitForValue(
+      () => sidebarShell.getAttribute('aria-hidden'),
+      'true',
+      'selecting a narrow search result should close the sidebar overlay'
+    )
+    assert.equal(
+      await searchInput.inputValue(),
+      '',
+      'narrow task selection should clear the hidden search query'
+    )
+    await waitForValue(
+      () => composer.evaluate(
+        (element) => element === document.activeElement
+      ),
+      true,
+      'narrow task selection should restore focus to the task composer'
     )
   })
 
@@ -698,19 +992,101 @@ try {
   })
 
   await run('archive and search flows update the visible task scope', async () => {
+    const sidebar = page.getByRole('complementary', {
+      name: 'Task navigation'
+    })
+    const taskScope = sidebar.getByRole('group', { name: 'Task view' })
     await page.getByRole('button', { name: 'Task actions' }).click()
     await page.getByRole('menuitem', { name: 'Archive task' }).click()
     await page.getByRole('status').filter({ hasText: 'Task archived' }).waitFor()
     assert.equal(await page.getByLabel('Task title').inputValue(), 'Explain the auth flow')
 
-    await page.getByRole('button', { name: /Archived/ }).click()
-    await page.getByText(/This task is archived/).waitFor()
-    const archivedSearch = page.getByLabel('Search archived tasks')
-    await archivedSearch.fill('dashboard')
-    await page.getByRole('button', { name: /Refine the project dashboard/ }).waitFor()
+    const activeSearch = sidebar.getByRole('searchbox', {
+      name: 'Search tasks'
+    })
+    await activeSearch.fill('codex')
+    await sidebar
+      .getByRole('status')
+      .filter({ hasText: '0 active tasks found' })
+      .waitFor()
+    await sidebar
+      .getByText('No matching active tasks', { exact: true })
+      .waitFor()
+    await activeSearch.press('Enter')
+    assert.equal(
+      await page.getByLabel('Task title').inputValue(),
+      'Explain the auth flow',
+      'active search must not activate a matching archived task'
+    )
+    assert.equal(
+      await activeSearch.inputValue(),
+      'codex',
+      'an inert active-scope Enter should preserve its query'
+    )
+    await activeSearch.press('Escape')
 
-    await archivedSearch.fill('does-not-exist')
-    await page.getByText('No matching tasks', { exact: true }).waitFor()
+    await taskScope
+      .getByRole('button', { name: /^Archived\b/ })
+      .click()
+    await page.getByText(/This task is archived/).waitFor()
+    const archivedSearch = sidebar.getByRole('searchbox', {
+      name: 'Search archived tasks'
+    })
+    await archivedSearch.fill('auth')
+    await sidebar
+      .getByRole('status')
+      .filter({ hasText: '0 archived tasks found' })
+      .waitFor()
+    await sidebar
+      .getByText('No matching archived tasks', { exact: true })
+      .waitFor()
+    await archivedSearch.press('Enter')
+    assert.equal(
+      await page.getByLabel('Task title').inputValue(),
+      'Refine the project dashboard',
+      'archived search must not activate a matching active task'
+    )
+    assert.equal(
+      await archivedSearch.inputValue(),
+      'auth',
+      'an inert archived-scope Enter should preserve its query'
+    )
+    await archivedSearch.press('Escape')
+
+    await archivedSearch.fill('codex')
+    await sidebar
+      .getByRole('status')
+      .filter({ hasText: '1 archived task found' })
+      .waitFor()
+    await sidebar
+      .getByRole('button', { name: /Refine the project dashboard/ })
+      .waitFor()
+    await archivedSearch.press('Enter')
+    assert.equal(
+      await archivedSearch.inputValue(),
+      '',
+      'activating an archived search result should clear its query'
+    )
+    await waitForValue(
+      () =>
+        page
+          .getByRole('button', { name: 'Restore task', exact: true })
+          .evaluate((element) => element === document.activeElement),
+      true,
+      'same-task archived activation should focus its restore action'
+    )
+
+    await taskScope
+      .getByRole('button', { name: /^Tasks\b/ })
+      .click()
+    await waitForValue(
+      () => page.getByLabel('Task title').inputValue(),
+      'Explain the auth flow',
+      'returning to active scope should select the current active task'
+    )
+    await sidebar
+      .getByRole('searchbox', { name: 'Search tasks' })
+      .waitFor()
   })
 
   await run('responsive settings and reduced-motion rules apply', async () => {

@@ -21,6 +21,7 @@ import {
   NARROW_SIDEBAR_MEDIA_QUERY,
   releaseFocusBeforeSidebarClose,
   restoreFocusAfterSidebarClose,
+  shouldRestoreTaskSelectionFocus,
   shouldInertMainSurface,
   type SidebarCloseFocusTarget
 } from './lib/sidebar-focus'
@@ -38,6 +39,11 @@ import {
   canAppendDiffFollowupBlock,
   shouldFocusDiffFollowupComposer
 } from './lib/diff-followup'
+import {
+  preserveNewerTaskSelection,
+  selectTaskInSnapshot,
+  type TaskSelectionRequest
+} from './lib/task-selection'
 import { updateTaskDraft, type TaskDrafts } from './lib/task-drafts'
 import { Sidebar } from './components/Sidebar'
 import { TaskView } from './components/TaskView'
@@ -60,6 +66,7 @@ export default function App(): React.JSX.Element {
   const [narrowSidebarLayout, setNarrowSidebarLayout] = useState(() =>
     window.matchMedia(NARROW_SIDEBAR_MEDIA_QUERY).matches
   )
+  const narrowSidebarLayoutRef = useRef(narrowSidebarLayout)
   const mainSurfaceRef = useRef<HTMLElement>(null)
   const pendingRunEventsRef = useRef<DesktopRunEventEnvelope[]>([])
   const refreshQueueRef = useRef<Promise<void>>(Promise.resolve())
@@ -67,6 +74,30 @@ export default function App(): React.JSX.Element {
   const snapshotRef = useRef<AppSnapshot | undefined>(undefined)
   const selectedTaskIdRef = useRef<string | undefined>(undefined)
   const selectedTaskEpochRef = useRef(0)
+  const taskSelectionRequestRef = useRef(0)
+  const taskSelectionFocusRef = useRef(0)
+  const taskSelectionInteractionCleanupRef = useRef<
+    (() => void) | undefined
+  >(undefined)
+  const latestTaskSelectionRef = useRef<TaskSelectionRequest | undefined>(
+    undefined
+  )
+  const pendingTaskFocusRef = useRef<
+    | {
+        request: number
+        focusRequest: number
+        focusOrigin: Element | null
+        taskId: string
+      }
+    | undefined
+  >(undefined)
+  const pendingSidebarCloseFocusRef = useRef<
+    | {
+        focusRequest: number
+        target: SidebarCloseFocusTarget
+      }
+    | undefined
+  >(undefined)
   const pendingAskToAgentHandoffsRef = useRef(new Set<string>())
   const taskMutationRevisionRef = useRef(new Map<string, number>())
   const activeTaskMutationsRef = useRef(new Map<string, number>())
@@ -96,15 +127,49 @@ export default function App(): React.JSX.Element {
     showToast(readableError(error), 'error', 6_000)
   }, [showToast])
 
-  const openSettings = useCallback((providerId?: string) => {
-    setSettingsProviderId(providerId)
-    setSettingsOpen(true)
+  const cancelPendingTaskFocus = useCallback(() => {
+    taskSelectionFocusRef.current += 1
+    taskSelectionInteractionCleanupRef.current?.()
+    pendingTaskFocusRef.current = undefined
+    pendingSidebarCloseFocusRef.current = undefined
   }, [])
 
+  const openSettings = useCallback(
+    (providerId?: string) => {
+      cancelPendingTaskFocus()
+      setSettingsProviderId(providerId)
+      setSettingsOpen(true)
+    },
+    [cancelPendingTaskFocus]
+  )
+
+  const openCommandPalette = useCallback(() => {
+    cancelPendingTaskFocus()
+    setCommandPaletteOpen(true)
+  }, [cancelPendingTaskFocus])
+
   const openSidebar = useCallback((focusSearch = false) => {
+    const focusRequest = ++taskSelectionFocusRef.current
+    taskSelectionInteractionCleanupRef.current?.()
+    pendingTaskFocusRef.current = undefined
+    pendingSidebarCloseFocusRef.current = undefined
     setSidebarOpen(true)
     if (focusSearch) {
+      let userInteracted = false
+      const markUserInteraction = (): void => {
+        userInteracted = true
+      }
+      window.addEventListener('keydown', markUserInteraction, true)
+      window.addEventListener('pointerdown', markUserInteraction, true)
       window.requestAnimationFrame(() => {
+        window.removeEventListener('keydown', markUserInteraction, true)
+        window.removeEventListener('pointerdown', markUserInteraction, true)
+        if (
+          taskSelectionFocusRef.current !== focusRequest ||
+          userInteracted
+        ) {
+          return
+        }
         document.querySelector<HTMLInputElement>('#task-search')?.focus()
       })
     }
@@ -112,11 +177,15 @@ export default function App(): React.JSX.Element {
 
   const closeSidebar = useCallback(
     (focusTarget: SidebarCloseFocusTarget = 'reopen') => {
+      const focusRequest = ++taskSelectionFocusRef.current
+      taskSelectionInteractionCleanupRef.current?.()
+      pendingTaskFocusRef.current = undefined
+      pendingSidebarCloseFocusRef.current = {
+        focusRequest,
+        target: focusTarget
+      }
       releaseFocusBeforeSidebarClose(document)
       setSidebarOpen(false)
-      window.requestAnimationFrame(() => {
-        restoreFocusAfterSidebarClose(document, focusTarget)
-      })
     },
     []
   )
@@ -124,6 +193,7 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     const media = window.matchMedia(NARROW_SIDEBAR_MEDIA_QUERY)
     const updateLayout = (): void => {
+      narrowSidebarLayoutRef.current = media.matches
       setNarrowSidebarLayout(media.matches)
     }
     updateLayout()
@@ -136,6 +206,21 @@ export default function App(): React.JSX.Element {
     narrowSidebarLayout
   )
   const modalOpen = settingsOpen || commandPaletteOpen
+
+  useLayoutEffect(() => {
+    if (
+      sidebarOpen ||
+      mainSurfaceInert ||
+      mainSurfaceRef.current?.inert
+    ) {
+      return
+    }
+    const pending = pendingSidebarCloseFocusRef.current
+    if (!pending) return
+    pendingSidebarCloseFocusRef.current = undefined
+    if (taskSelectionFocusRef.current !== pending.focusRequest) return
+    restoreFocusAfterSidebarClose(document, pending.target)
+  }, [mainSurfaceInert, sidebarOpen])
 
   useLayoutEffect(() => {
     const activeElement = document.activeElement
@@ -151,44 +236,56 @@ export default function App(): React.JSX.Element {
       ?.focus({ preventScroll: true })
   }, [mainSurfaceInert])
 
-  const refresh = useCallback((): Promise<void> => {
-    pendingRefreshesRef.current += 1
-    const executeRefresh = async (): Promise<void> => {
-      try {
-        const nextSnapshot = await desktop.getSnapshot()
-        const pendingEvents = pendingRunEventsRef.current
-        pendingRunEventsRef.current = []
-        snapshotLoadedRef.current = true
-        setSnapshot(
-          reconcileSnapshotWithEvents(nextSnapshot, pendingEvents)
-        )
-        setSnapshotError(undefined)
-      } catch (error) {
-        if (snapshotLoadedRef.current) showError(error)
-        else setSnapshotError(readableError(error))
-      } finally {
-        pendingRefreshesRef.current -= 1
-        if (
-          pendingRefreshesRef.current === 0 &&
-          pendingRunEventsRef.current.length
-        ) {
+  const refresh = useCallback(
+    (): Promise<void> => {
+      const selectionRequestBoundary = taskSelectionRequestRef.current
+      pendingRefreshesRef.current += 1
+      const executeRefresh = async (): Promise<void> => {
+        try {
+          const nextSnapshot = await desktop.getSnapshot()
           const pendingEvents = pendingRunEventsRef.current
           pendingRunEventsRef.current = []
-          setSnapshot((current) =>
-            current
-              ? pendingEvents.reduce(applyRunEventEnvelope, current)
-              : current
+          snapshotLoadedRef.current = true
+          const reconciled = reconcileSnapshotWithEvents(
+            nextSnapshot,
+            pendingEvents
           )
+          setSnapshot(
+            preserveNewerTaskSelection(
+              reconciled,
+              selectionRequestBoundary,
+              latestTaskSelectionRef.current
+            )
+          )
+          setSnapshotError(undefined)
+        } catch (error) {
+          if (snapshotLoadedRef.current) showError(error)
+          else setSnapshotError(readableError(error))
+        } finally {
+          pendingRefreshesRef.current -= 1
+          if (
+            pendingRefreshesRef.current === 0 &&
+            pendingRunEventsRef.current.length
+          ) {
+            const pendingEvents = pendingRunEventsRef.current
+            pendingRunEventsRef.current = []
+            setSnapshot((current) =>
+              current
+                ? pendingEvents.reduce(applyRunEventEnvelope, current)
+                : current
+            )
+          }
         }
       }
-    }
-    const queued = refreshQueueRef.current.then(
-      executeRefresh,
-      executeRefresh
-    )
-    refreshQueueRef.current = queued.catch(() => undefined)
-    return queued
-  }, [showError])
+      const queued = refreshQueueRef.current.then(
+        executeRefresh,
+        executeRefresh
+      )
+      refreshQueueRef.current = queued.catch(() => undefined)
+      return queued
+    },
+    [showError]
+  )
 
   useEffect(() => {
     const unsubscribe = desktop.onRunEvent((envelope) => {
@@ -212,6 +309,7 @@ export default function App(): React.JSX.Element {
       if (toastTimerRef.current !== undefined) {
         window.clearTimeout(toastTimerRef.current)
       }
+      taskSelectionInteractionCleanupRef.current?.()
     },
     []
   )
@@ -229,23 +327,99 @@ export default function App(): React.JSX.Element {
     selectedTaskIdRef.current = selectedTask?.id
   }
 
+  useLayoutEffect(() => {
+    if (mainSurfaceInert || mainSurfaceRef.current?.inert) return
+    const pending = pendingTaskFocusRef.current
+    if (!pending) return
+    pendingTaskFocusRef.current = undefined
+    if (
+      taskSelectionRequestRef.current !== pending.request ||
+      taskSelectionFocusRef.current !== pending.focusRequest ||
+      selectedTaskIdRef.current !== pending.taskId ||
+      !shouldRestoreTaskSelectionFocus(document, pending.focusOrigin) ||
+      document.querySelector<HTMLElement>('.task-view')?.dataset.taskId !==
+        pending.taskId
+    ) {
+      return
+    }
+    restoreFocusAfterSidebarClose(document, 'task')
+  }, [mainSurfaceInert, selectedTask?.id])
+
   const selectTask = useCallback(
     async (taskId: string) => {
-      if (!snapshot) return
-      setSnapshot({
-        ...snapshot,
-        settings: { ...snapshot.settings, selectedTaskId: taskId }
-      })
+      if (
+        !snapshotRef.current?.tasks.some((task) => task.id === taskId)
+      ) {
+        return
+      }
+      const request = ++taskSelectionRequestRef.current
+      const focusRequest = ++taskSelectionFocusRef.current
+      const focusOrigin = document.activeElement
+      taskSelectionInteractionCleanupRef.current?.()
+      let userInteracted = false
+      const markUserInteraction = (): void => {
+        userInteracted = true
+      }
+      const stopWatchingInteraction = (): void => {
+        window.removeEventListener('keydown', markUserInteraction, true)
+        window.removeEventListener('pointerdown', markUserInteraction, true)
+        window.removeEventListener('blur', markUserInteraction)
+        if (
+          taskSelectionInteractionCleanupRef.current ===
+          stopWatchingInteraction
+        ) {
+          taskSelectionInteractionCleanupRef.current = undefined
+        }
+      }
+      window.addEventListener('keydown', markUserInteraction, true)
+      window.addEventListener('pointerdown', markUserInteraction, true)
+      window.addEventListener('blur', markUserInteraction)
+      taskSelectionInteractionCleanupRef.current = stopWatchingInteraction
+      latestTaskSelectionRef.current = { request, taskId }
+      pendingSidebarCloseFocusRef.current = undefined
+      setSnapshot((current) => selectTaskInSnapshot(current, taskId))
       try {
         await desktop.selectTask(taskId)
-        if (narrowSidebarLayout) {
-          closeSidebar('task')
+        if (taskSelectionRequestRef.current !== request) {
+          stopWatchingInteraction()
+          return
         }
+        window.requestAnimationFrame(() => {
+          stopWatchingInteraction()
+          if (
+            taskSelectionRequestRef.current !== request ||
+            taskSelectionFocusRef.current !== focusRequest ||
+            selectedTaskIdRef.current !== taskId ||
+            userInteracted ||
+            !shouldRestoreTaskSelectionFocus(document, focusOrigin)
+          ) {
+            return
+          }
+          const taskView = document.querySelector<HTMLElement>('.task-view')
+          if (taskView?.dataset.taskId !== taskId) return
+          const narrowLayout = narrowSidebarLayoutRef.current
+          if (!narrowLayout && mainSurfaceRef.current?.inert) return
+          if (narrowLayout) {
+            pendingTaskFocusRef.current = {
+              request,
+              focusRequest,
+              focusOrigin,
+              taskId
+            }
+            releaseFocusBeforeSidebarClose(document)
+            setSidebarOpen(false)
+            return
+          }
+          restoreFocusAfterSidebarClose(document, 'task')
+        })
       } catch (error) {
+        stopWatchingInteraction()
+        if (taskSelectionRequestRef.current !== request) return
         showError(error)
+        await refresh()
       }
     },
-    [closeSidebar, narrowSidebarLayout, snapshot, showError]
+    [refresh, showError]
   )
 
   const createTask = useCallback(
@@ -680,7 +854,7 @@ export default function App(): React.JSX.Element {
       if (opensCommandPalette) {
         if (document.querySelector('[role="dialog"]')) return
         event.preventDefault()
-        setCommandPaletteOpen(true)
+        openCommandPalette()
         return
       }
       if (!(event.metaKey || event.ctrlKey)) return
@@ -695,6 +869,8 @@ export default function App(): React.JSX.Element {
         openSettings()
       }
       if (
+        !event.altKey &&
+        !event.shiftKey &&
         event.key.toLowerCase() === 'k'
       ) {
         event.preventDefault()
@@ -703,7 +879,7 @@ export default function App(): React.JSX.Element {
     }
     window.addEventListener('keydown', handleShortcut)
     return () => window.removeEventListener('keydown', handleShortcut)
-  }, [createTask, openSettings, openSidebar])
+  }, [createTask, openCommandPalette, openSettings, openSidebar])
 
   if (!snapshot) {
     if (snapshotError) {
@@ -741,15 +917,17 @@ export default function App(): React.JSX.Element {
       <Sidebar
         open={sidebarOpen}
         backgroundInert={modalOpen}
+        narrowLayout={narrowSidebarLayout}
         snapshot={snapshot}
         selectedTaskId={selectedTask?.id}
         onSelectTask={selectTask}
         onCreateTask={() => void createTask()}
         onChooseWorkspace={() => void chooseWorkspace()}
         onImportTask={() => void importTask()}
-        onOpenCommands={() => setCommandPaletteOpen(true)}
+        onOpenCommands={openCommandPalette}
         onOpenSettings={() => openSettings()}
-        onClose={closeSidebar}
+        onClose={() => closeSidebar()}
+        onCloseToTask={() => closeSidebar('task')}
       />
       {sidebarOpen && (
         <button
@@ -818,7 +996,7 @@ export default function App(): React.JSX.Element {
               )
             }
             sidebarOpen={sidebarOpen}
-            onCloseSidebar={closeSidebar}
+            onCloseSidebar={() => closeSidebar()}
             onUpdateTask={(patch) => void updateTask(selectedTask.id, patch)}
             onContinueInAgent={continueAskTaskInAgent}
             askToAgentPending={askToAgentPendingTaskIds.has(

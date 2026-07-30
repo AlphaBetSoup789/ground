@@ -94,8 +94,8 @@ conformance runner; npm publication remains a separate maintainer release step.
 - Sensitive-path filtering and workspace-relative model-visible paths
 - Portable JSON task bundles, Markdown transcript export, and confirmed task
   deletion
-- Safe task forks, reversible archive/restore, and bounded search across active or
-  archived task history
+- Safe task forks, reversible archive/restore, and bounded, keyboard-complete
+  search across active or archived task history
 - Interactive, multi-session task terminals backed by a real local PTY
 - Git branch/status, structured per-file staged and unstaged diff review with
   keyboard hunk navigation, a bounded reviewed-hunk-to-editable-prompt action,
@@ -159,6 +159,15 @@ near the bottom. Unsent composer text is kept separately for each task for the
 current app process; it is not written to durable task state. Responsive layouts,
 forced-color styles, reduced motion, and focus-visible states are implemented, but
 the project does not yet claim a complete cross-platform accessibility audit.
+
+`Ctrl/⌘ + K` opens the sidebar when necessary and focuses the search field for the
+current active or archived scope. In that field, Enter opens the first current
+result, Arrow Down and Arrow Up focus the first and last current results, and
+Escape clears a nonempty query before a second Escape leaves search. Activation
+clears the query and selects the exact current result by its opaque task ID.
+Input-method composition, modified key combinations, and an empty result set are
+left alone. After activation, narrow-layout close and returned focus run only
+while the originating selection request and task remain current.
 
 ## Connect a model
 
@@ -505,7 +514,10 @@ provider-owned state, and incomplete tool exchanges; and preserves the source
 task’s readable canonical history and workspace selection. Archiving is reversible
 and disables new Ground run/workspace actions until restored. An already running
 PTY is detached rather than killed and may continue at the OS level. Sidebar search
-is local, bounded, and can be scoped to active or archived tasks.
+is local, bounded, and can be scoped to active or archived tasks. Keyboard
+activation uses the displayed current filtered order and delegates the selected
+opaque task ID to the same selection path as a pointer activation; it does not
+cache an earlier result identity.
 
 ## Workspace terminal and Git
 
@@ -668,13 +680,14 @@ dependencies.
 
 `test:e2e:renderer` launches the real built React renderer in Electron with the
 explicit browser-preview desktop mock and drives it through Playwright. It covers
-command-palette focus/navigation, native HTML provider-form validation, task-local
-drafts, mock send/cancel, archive/search, responsive settings, reduced-motion and
-forced-color styles, plus the local-template/refused-connection recovery path into
-a detected CLI. The current suite contains seven scenarios. CI runs it on macOS,
-Windows, and Linux/Xvfb. It does not load the production preload/main process,
-invoke native permissions, use a real provider, or replace screen-reader/manual
-accessibility testing.
+command-palette focus/navigation, keyboard-complete task search and narrow-sidebar
+focus, native HTML provider-form validation, task-local drafts, Ask-to-Agent and
+reviewed-hunk draft handoffs, structured Git diff navigation, mock send/cancel,
+archive/search, responsive settings, reduced-motion and forced-color styles, plus
+the local-template/refused-connection recovery path into a detected CLI. The
+current suite contains 12 scenarios. CI runs it on macOS, Windows, and Linux/Xvfb.
+It does not load the production preload/main process, invoke native permissions,
+use a real provider, or replace screen-reader/manual accessibility testing.
 
 The suite covers provider event normalization and output bounds, CLI argv/event
 parsing and cancellation, native session metadata, renderer/IPC trust checks,

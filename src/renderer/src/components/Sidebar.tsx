@@ -25,6 +25,7 @@ import { timeAgo } from '../lib/format'
 interface SidebarProps {
   open: boolean
   backgroundInert?: boolean
+  narrowLayout: boolean
   snapshot: AppSnapshot
   selectedTaskId?: string
   onSelectTask: (taskId: string) => void
@@ -34,12 +35,22 @@ interface SidebarProps {
   onOpenCommands: () => void
   onOpenSettings: () => void
   onClose: () => void
+  onCloseToTask: () => void
 }
+
+export type TaskSearchKeyAction =
+  | 'clear'
+  | 'focus-first'
+  | 'focus-last'
+  | 'leave-search'
+  | 'select-first'
 
 export function Sidebar(props: SidebarProps): React.JSX.Element {
   const [query, setQuery] = useState('')
   const [showArchived, setShowArchived] = useState(false)
   const searchRef = useRef<HTMLInputElement>(null)
+  const resultsRef = useRef<HTMLDivElement>(null)
+  const scopeRef = useRef<HTMLDivElement>(null)
   const normalizedQuery = query.trim().slice(0, 200).toLocaleLowerCase()
   const activeCount = props.snapshot.tasks.filter((task) => !task.archivedAt).length
   const archivedCount = props.snapshot.tasks.length - activeCount
@@ -54,11 +65,11 @@ export function Sidebar(props: SidebarProps): React.JSX.Element {
   const groups = useMemo(() => {
     const filtered = props.snapshot.tasks.filter((task) => {
       if (Boolean(task.archivedAt) !== showArchived) return false
-      if (!normalizedQuery) return true
-      const provider = props.snapshot.providers.find(
-        (candidate) => candidate.id === task.providerId
+      return snapshotTaskMatchesQuery(
+        props.snapshot,
+        task,
+        normalizedQuery
       )
-      return taskMatchesQuery(task, provider?.name, provider?.model, normalizedQuery)
     })
     return groupTasksByWorkspace(filtered)
   }, [
@@ -68,10 +79,28 @@ export function Sidebar(props: SidebarProps): React.JSX.Element {
     showArchived
   ])
 
-  const resultCount = groups.reduce((count, [, tasks]) => count + tasks.length, 0)
+  const searchTasks = useMemo(
+    () => groups.flatMap(([, tasks]) => tasks),
+    [groups]
+  )
+  const resultCount = searchTasks.length
+  const selectTask = (taskId: string): void => {
+    setQuery('')
+    props.onSelectTask(taskId)
+  }
   const moveTaskFocus = (
     event: React.KeyboardEvent<HTMLButtonElement>
   ): void => {
+    if (
+      event.nativeEvent.isComposing ||
+      event.nativeEvent.keyCode === 229 ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.shiftKey
+    ) {
+      return
+    }
     if (
       event.key !== 'ArrowDown' &&
       event.key !== 'ArrowUp' &&
@@ -142,7 +171,12 @@ export function Sidebar(props: SidebarProps): React.JSX.Element {
         </button>
       </div>
 
-      <div className="task-scope-switch" role="group" aria-label="Task view">
+      <div
+        ref={scopeRef}
+        className="task-scope-switch"
+        role="group"
+        aria-label="Task view"
+      >
         <button
           type="button"
           className={!showArchived ? 'active' : ''}
@@ -153,7 +187,15 @@ export function Sidebar(props: SidebarProps): React.JSX.Element {
               (task) => task.id === props.selectedTaskId
             )
             if (selected?.archivedAt) {
-              const firstActive = props.snapshot.tasks.find((task) => !task.archivedAt)
+              const firstActive = props.snapshot.tasks.find(
+                (task) =>
+                  !task.archivedAt &&
+                  snapshotTaskMatchesQuery(
+                    props.snapshot,
+                    task,
+                    normalizedQuery
+                  )
+              )
               if (firstActive) props.onSelectTask(firstActive.id)
             }
           }}
@@ -173,7 +215,13 @@ export function Sidebar(props: SidebarProps): React.JSX.Element {
             )
             if (!selected?.archivedAt) {
               const firstArchived = props.snapshot.tasks.find(
-                (task) => task.archivedAt
+                (task) =>
+                  Boolean(task.archivedAt) &&
+                  snapshotTaskMatchesQuery(
+                    props.snapshot,
+                    task,
+                    normalizedQuery
+                  )
               )
               if (firstArchived) props.onSelectTask(firstArchived.id)
             }
@@ -195,13 +243,67 @@ export function Sidebar(props: SidebarProps): React.JSX.Element {
           maxLength={200}
           onChange={(event) => setQuery(event.target.value.slice(0, 200))}
           onKeyDown={(event) => {
-            if (event.key !== 'Escape') return
-            if (query) setQuery('')
-            else event.currentTarget.blur()
+            const action = taskSearchKeyAction({
+              key: event.key,
+              isComposing:
+                event.nativeEvent.isComposing ||
+                event.nativeEvent.keyCode === 229,
+              isRepeat: event.repeat,
+              hasModifier:
+                event.altKey ||
+                event.ctrlKey ||
+                event.metaKey ||
+                event.shiftKey,
+              hasQuery: query.length > 0,
+              resultCount
+            })
+            if (!action) return
+            if (action === 'clear') {
+              event.preventDefault()
+              setQuery('')
+              return
+            }
+            if (action === 'leave-search') {
+              event.preventDefault()
+              if (props.narrowLayout) {
+                props.onCloseToTask()
+                return
+              }
+              const target =
+                resultsRef.current?.querySelector<HTMLButtonElement>(
+                  '.task-row[aria-current="page"]'
+                ) ??
+                scopeRef.current?.querySelector<HTMLButtonElement>(
+                  'button[aria-pressed="true"]'
+                )
+              if (target) target.focus()
+              else props.onClose()
+              return
+            }
+            if (action === 'select-first') {
+              const firstTask = searchTasks[0]
+              if (!firstTask) return
+              event.preventDefault()
+              selectTask(firstTask.id)
+              return
+            }
+            const rows = [
+              ...(resultsRef.current?.querySelectorAll<HTMLButtonElement>(
+                '.task-row'
+              ) ?? [])
+            ]
+            const target =
+              action === 'focus-first'
+                ? rows[0]
+                : rows[rows.length - 1]
+            if (!target) return
+            event.preventDefault()
+            target.focus()
           }}
           placeholder={showArchived ? 'Search archived' : 'Search tasks'}
           aria-label={showArchived ? 'Search archived tasks' : 'Search tasks'}
           aria-controls="task-search-results"
+          aria-describedby="task-search-instructions"
           aria-keyshortcuts="Meta+K Control+K"
         />
         {query && (
@@ -218,17 +320,33 @@ export function Sidebar(props: SidebarProps): React.JSX.Element {
           </button>
         )}
       </label>
+      <span
+        className="visually-hidden"
+        id="task-search-instructions"
+      >
+        Press Enter to open the first result. Press Arrow Down or Arrow
+        Up to move into the result list. Press Escape to clear or leave
+        search.
+      </span>
       <span className="visually-hidden" role="status" aria-live="polite">
         {normalizedQuery
-          ? `${resultCount} ${resultCount === 1 ? 'task' : 'tasks'} found`
+          ? `${resultCount} ${showArchived ? 'archived' : 'active'} ${
+              resultCount === 1 ? 'task' : 'tasks'
+            } found`
           : `${showArchived ? archivedCount : activeCount} ${
+              showArchived ? 'archived' : 'active'
+            } ${
               (showArchived ? archivedCount : activeCount) === 1
                 ? 'task'
                 : 'tasks'
             }`}
       </span>
 
-      <div className="task-groups" id="task-search-results">
+      <div
+        ref={resultsRef}
+        className="task-groups"
+        id="task-search-results"
+      >
         {groups.length ? (
           groups.map(([workspaceGrantId, tasks]) => (
             <section
@@ -248,7 +366,7 @@ export function Sidebar(props: SidebarProps): React.JSX.Element {
                     className={`task-row ${
                       props.selectedTaskId === task.id ? 'task-row-selected' : ''
                     }`}
-                    onClick={() => props.onSelectTask(task.id)}
+                    onClick={() => selectTask(task.id)}
                     onKeyDown={moveTaskFocus}
                     aria-current={props.selectedTaskId === task.id ? 'page' : undefined}
                   >
@@ -271,13 +389,21 @@ export function Sidebar(props: SidebarProps): React.JSX.Element {
             {showArchived && !query ? <Archive size={18} /> : <Search size={18} />}
             <p>
               {query
-                ? 'No matching tasks'
+                ? `No matching ${
+                    showArchived ? 'archived' : 'active'
+                  } tasks`
                 : showArchived
                   ? 'No archived tasks'
                   : 'No active tasks'}
             </p>
             {query && (
-              <button type="button" onClick={() => setQuery('')}>
+              <button
+                type="button"
+                onClick={() => {
+                  setQuery('')
+                  searchRef.current?.focus()
+                }}
+              >
                 Clear search
               </button>
             )}
@@ -311,6 +437,31 @@ export function Sidebar(props: SidebarProps): React.JSX.Element {
       </div>
     </aside>
   )
+}
+
+export function taskSearchKeyAction(input: {
+  key: string
+  isComposing: boolean
+  isRepeat: boolean
+  hasModifier: boolean
+  hasQuery: boolean
+  resultCount: number
+}): TaskSearchKeyAction | undefined {
+  if (input.isComposing || input.hasModifier) return undefined
+  if (
+    input.isRepeat &&
+    (input.key === 'Enter' || input.key === 'Escape')
+  ) {
+    return undefined
+  }
+  if (input.key === 'Escape') {
+    return input.hasQuery ? 'clear' : 'leave-search'
+  }
+  if (input.resultCount <= 0) return undefined
+  if (input.key === 'Enter') return 'select-first'
+  if (input.key === 'ArrowDown') return 'focus-first'
+  if (input.key === 'ArrowUp') return 'focus-last'
+  return undefined
 }
 
 function TaskStatus({ task }: { task: DesktopTask }): React.JSX.Element {
@@ -423,4 +574,21 @@ export function taskMatchesQuery(
     }
   }
   return false
+}
+
+function snapshotTaskMatchesQuery(
+  snapshot: AppSnapshot,
+  task: DesktopTask,
+  normalizedQuery: string
+): boolean {
+  if (!normalizedQuery) return true
+  const provider = snapshot.providers.find(
+    (candidate) => candidate.id === task.providerId
+  )
+  return taskMatchesQuery(
+    task,
+    provider?.name,
+    provider?.model,
+    normalizedQuery
+  )
 }

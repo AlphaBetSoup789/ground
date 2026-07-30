@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   shouldInertMainSurface,
   releaseFocusBeforeSidebarClose,
-  restoreFocusAfterSidebarClose
+  restoreFocusAfterSidebarClose,
+  shouldRestoreTaskSelectionFocus
 } from './sidebar-focus'
 
 describe('responsive sidebar focus', () => {
@@ -10,6 +11,33 @@ describe('responsive sidebar focus', () => {
     expect(shouldInertMainSurface(true, true)).toBe(true)
     expect(shouldInertMainSurface(false, true)).toBe(false)
     expect(shouldInertMainSurface(true, false)).toBe(false)
+  })
+
+  it('restores selection focus only while the original focus context remains', () => {
+    const origin = {} as Element
+    const body = {} as HTMLElement
+
+    expect(
+      shouldRestoreTaskSelectionFocus(
+        { activeElement: origin, body } as unknown as Document,
+        origin
+      )
+    ).toBe(true)
+    expect(
+      shouldRestoreTaskSelectionFocus(
+        { activeElement: body, body } as unknown as Document,
+        origin
+      )
+    ).toBe(true)
+    expect(
+      shouldRestoreTaskSelectionFocus(
+        {
+          activeElement: {} as Element,
+          body
+        } as unknown as Document,
+        origin
+      )
+    ).toBe(false)
   })
 
   it('releases focus before a sidebar control becomes hidden and inert', () => {
@@ -59,6 +87,25 @@ describe('responsive sidebar focus', () => {
 
     expect(composerFocus).toHaveBeenCalledWith({ preventScroll: true })
     expect(titleFocus).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the archived task restore action', () => {
+    const restoreFocus = vi.fn()
+    const reopenFocus = vi.fn()
+    const root = {
+      activeElement: null,
+      querySelector: (selector: string) =>
+        selector === '.archived-task-restore'
+          ? { focus: restoreFocus }
+          : selector === '.sidebar-reopen'
+            ? { focus: reopenFocus }
+            : null
+    } as unknown as Document
+
+    restoreFocusAfterSidebarClose(root, 'task')
+
+    expect(restoreFocus).toHaveBeenCalledWith({ preventScroll: true })
+    expect(reopenFocus).not.toHaveBeenCalled()
   })
 
   it('restores ordinary close focus to the sidebar reopen control', () => {

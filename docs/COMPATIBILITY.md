@@ -149,7 +149,7 @@ built-in adapter currently emits one.
 | Local MCP | Resolved stdio executable and argv | Integrated | Native exact-invocation confirmation; current-user OS permissions; not sandboxed |
 | MCP tools | Namespaced canonical definitions | Integrated | Tools only; no resources, prompts, Apps/UI, or elicitation |
 | Task portability | Strict JSON bundle + Markdown transcript | Integrated | User must review exports; imported content is untrusted |
-| Task lifecycle | Safe fork, archive/restore, bounded active/archive search | Integrated | Imported history is excluded by default and requires an explicit per-task opt-in |
+| Task lifecycle | Safe fork, archive/restore, bounded active/archive search, and current-result keyboard switching | Integrated | Search uses the exact displayed order and opaque task IDs; imported history is excluded by default and requires an explicit per-task opt-in |
 | State recovery | Bounded atomic primary + three rotating validated snapshots | Integrated | Opaque in-app browser, credential-free export, and native-confirmed retained restore with a process-wide drain/seal; no arbitrary snapshot import or transactional event log |
 | Managed-action crash recovery | Durable started/completed claims for writes, commands, and MCP calls | Integrated | Reports an interrupted outcome as unknown; no automatic action/run resume |
 
@@ -343,16 +343,18 @@ the current aggregate. They are not evidence for later source and do not certify
 signing, notarization, DMG/DEB installation, renderer accessibility, live
 providers/CLIs, or supported distribution.
 
-The seven-scenario renderer interaction suite runs the built browser-preview React
-renderer in Electron through Playwright Core. Its current local result is 7/7:
-command-palette filtering/keyboard/focus restore, provider labels and Chromium
-constraint validation, local-template/refused-connection recovery into a detected
-CLI, task-local drafts, deterministic send/cancel, archive and archived search, and
-680px responsive settings with reduced motion plus forced-color connection-path
-selection. CI is configured to run it directly on macOS/Windows and under Xvfb on
-Linux. Because it uses the explicit preview desktop mock, it is renderer
-evidence—not production-main/preload, native permission, provider, screen-reader,
-or packaged-app certification.
+The 12-scenario renderer interaction suite runs the built browser-preview React
+renderer in Electron through Playwright Core. Its current local result is 12/12:
+command-palette filtering/keyboard/focus restore, task-search shortcut focus and
+current-result keyboard activation, request-bound narrow-sidebar focus, provider
+labels and Chromium constraint validation, local-template/refused-connection
+recovery into a detected CLI, task-local drafts, Ask-to-Agent and reviewed-hunk
+handoffs, structured Git diff navigation, deterministic send/cancel, archive and
+archived search, and 680px responsive settings with reduced motion plus
+forced-color connection-path selection. CI is configured to run it directly on
+macOS/Windows and under Xvfb on Linux. Because it uses the explicit preview desktop
+mock, it is renderer evidence—not production-main/preload, native permission,
+provider, screen-reader, or packaged-app certification.
 
 The pinned compatibility suite performs no authenticated request and launches no
 coding CLI. Its separate loopback SSE integration drives only Ground’s production

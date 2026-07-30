@@ -418,7 +418,21 @@ readable but cannot start runs, change provider/mode/workspace settings, or invo
 new workspace-service actions until restored. Existing PTYs are detached rather
 than terminated, so a process already running in that shell can continue at the OS
 level. Sidebar search examines bounded recent timeline content and can be scoped to
-active or archived tasks.
+active or archived tasks. Its keyboard policy operates on the exact filtered task
+order used by the current committed render: Enter selects the first result by its
+opaque task ID, while Arrow Down and Arrow Up focus the live first and last result
+rows. Result identities are not reconstructed from display labels or cached across
+renders. Input-method composition, modified combinations, and an empty result set
+are inert, and activation clears the query.
+
+Task selection rechecks that opaque ID against the latest renderer snapshot and
+applies a functional settings-only update, preserving concurrent task and run-event
+changes before delegating to the existing typed main-process selection boundary.
+A rejection of the current IPC request causes an authoritative snapshot refresh;
+every refresh preserves a task selection that began after that refresh's captured
+selection boundary. Post-selection close/return-focus work is bound to the
+originating request, task, and user-interaction context so a delayed completion
+cannot redirect focus after the user has moved elsewhere.
 
 An explicit fork creates new task/item/run/tool-call identities. It keeps readable
 timeline content, the selected provider/mode/workspace, and complete normalized
@@ -559,7 +573,9 @@ The renderer keeps unsent composer drafts in process memory keyed by task, so
 switching tasks does not mix text and no draft gains durable authority. A global
 command palette provides filterable keyboard actions, traps/restores focus, and
 does not interpret command keys while an input method is composing. Modal state
-makes the underlying app surface inert.
+makes the underlying app surface inert. Task search exposes its current bounded
+result count and navigation instructions to assistive technology, but this
+keyboard baseline is not a complete screen-reader certification.
 
 Assistant streaming remains visually live but uses a separate polite announcer
 that batches and normalizes bounded chunks. Timeline following is conditional on
@@ -569,12 +585,14 @@ reduced-motion rules are part of the public-preview baseline; they are not a cla
 complete cross-platform accessibility certification.
 
 A Playwright-over-Electron suite drives that real built renderer with the
-explicit browser-preview desktop mock. Its seven scenarios cover palette
-keyboard/focus, provider-form labels and Chromium constraint validation,
-local-template/refused-connection recovery into a detected CLI, task-local drafts,
-deterministic send/cancel, archive/search, responsive settings, reduced-motion CSS,
-and the forced-color connection-path selection. It does not load production
-main/preload authority or replace manual screen-reader/native review.
+explicit browser-preview desktop mock. Its 12 scenarios cover palette and
+task-search keyboard/focus, including narrow-sidebar focus, provider-form labels
+and Chromium constraint validation, local-template/refused-connection recovery
+into a detected CLI, task-local drafts, Ask-to-Agent and reviewed-hunk handoffs,
+structured Git diff navigation, deterministic send/cancel, archive/search,
+responsive settings, reduced-motion CSS, and forced-color connection-path
+selection. It does not load production main/preload authority or replace manual
+screen-reader/native review.
 
 ## Current composition and migration
 
