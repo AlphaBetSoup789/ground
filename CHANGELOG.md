@@ -40,6 +40,11 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
   saved API/CLI tests record pass or failure, and run startup requires a passing
   check. OpenAI-compatible tests fall back from an unavailable `/models` listing
   to one bounded minimal generation probe.
+- Structured provider diagnostics for refused connections, DNS, TLS,
+  authentication, rate limits, timeouts, protocol shape, missing executables, and
+  CLI startup failures. Readiness and failed-run history add only the bounded
+  category alongside existing bounded, redacted diagnostics, show shared
+  corrective guidance, and never infer a category from display text.
 - First-run provider onboarding with explicit Hosted API, Local server, and
   Installed CLI paths. The local path is labeled as a connection template rather
   than a bundled runtime; confirmed refused loopback connections receive targeted
@@ -85,11 +90,12 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
   main/preload/document readiness handshake plus packaged identity, encrypted-vault
   round trip, fail-closed native approval dialog, PTY, Git, deterministic
   OpenAI-compatible and first-class OpenAI Responses readiness/first-turn paths,
-  expected refused-loopback and malformed-response failures, a recognized
-  Codex-dialect child with successful non-fatal warning persistence, local stdio
-  MCP, and descendant-cleanup probes. Distributable smoke extracts the macOS ZIP,
-  temporarily installs/uninstalls Windows NSIS, or extracts the Linux AppImage,
-  then binds runtime-evidence records to the exact artifact and architecture.
+  expected typed `connection-refused` and `protocol-shape` readiness failures, a
+  recognized Codex-dialect child with successful non-fatal warning persistence,
+  local stdio MCP, and descendant-cleanup probes. Distributable smoke extracts
+  the macOS ZIP, temporarily installs/uninstalls Windows NSIS, or extracts the
+  Linux AppImage, then binds runtime-evidence records to the exact artifact and
+  architecture.
 - A four-target packaging-evidence contract for macOS arm64, macOS x64, Windows
   x64, and Linux x64, with release-time evidence inventory, SHA-256 verification,
   independently mandatory provider success/failure and recognized-CLI evidence,

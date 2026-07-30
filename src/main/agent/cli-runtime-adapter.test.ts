@@ -3,7 +3,11 @@ import { describe, expect, it, vi } from 'vitest'
 import type { CliAdapter, CliProvider } from '../../shared/types'
 import { cliEnvironmentSecretReference } from '../cli-environment'
 import { createProcessLaunchEnvelope } from '../process-launch'
-import type { CliInvocationAuthorizer } from '../providers/cli'
+import {
+  CliProcessExitError,
+  CliProtocolError,
+  type CliInvocationAuthorizer
+} from '../providers/cli'
 import {
   BUILT_IN_CLI_RUNTIME_BINDINGS,
   CLI_RUNTIME_ADAPTER_IDS,
@@ -135,6 +139,58 @@ describe('built-in CLI runtime bindings', () => {
 })
 
 describe('CLI agent runtime adapter', () => {
+  it.each([
+    {
+      label: 'missing executable',
+      error: Object.assign(new Error('spawn failed'), { code: 'ENOENT' }),
+      category: 'executable-not-found',
+      providerCode: 'ENOENT'
+    },
+    {
+      label: 'launch permission',
+      error: Object.assign(new Error('spawn denied'), { code: 'EACCES' }),
+      category: 'process-exit',
+      providerCode: 'EACCES'
+    },
+    {
+      label: 'nonzero process exit',
+      error: new CliProcessExitError(
+        'CLI exited with code 2',
+        2,
+        null
+      ),
+      category: 'process-exit',
+      providerCode: undefined
+    },
+    {
+      label: 'malformed runtime protocol',
+      error: new CliProtocolError('CLI emitted an oversized JSON line'),
+      category: 'protocol',
+      providerCode: undefined
+    }
+  ] as const)(
+    'normalizes $label failures without matching display text',
+    async ({ error, category, providerCode }) => {
+      const runner = vi.fn<CliRuntimeRunner>(async () => {
+        throw error
+      })
+      const adapter = new CliRuntimeAdapter(
+        'codex',
+        authorizeFixture,
+        runner
+      )
+
+      await expect(
+        collect(adapter.run(request(), adapterContext(provider('codex'))))
+      ).rejects.toMatchObject({
+        name: 'ProviderError',
+        category,
+        retryable: false,
+        ...(providerCode ? { providerCode } : {})
+      })
+    }
+  )
+
   it('normalizes text, activity lifecycles, diagnostics, cumulative usage, and one terminal event', async () => {
     const authorize = vi.fn(authorizeFixture)
     const runner = vi.fn<CliRuntimeRunner>(

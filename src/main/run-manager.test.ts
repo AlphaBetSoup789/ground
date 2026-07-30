@@ -6,24 +6,30 @@ import {
   realpath,
   writeFile
 } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type {
   ModelApiProvider,
+  ProviderFailureKind,
   ProviderProfile,
   RunEvent
 } from '../shared/types'
-import type {
-  AiSdkAdapterConfig,
-  JsonObject,
-  ModelAdapter,
-  ModelEvent,
-  ModelRequest
+import {
+  AiSdkModelAdapter,
+  ProviderError,
+  type AiSdkAdapterConfig,
+  type JsonObject,
+  type ModelAdapter,
+  type ModelEvent,
+  type ModelRequest
 } from './agent'
 import {
   createModelRuntime,
   modelRequestByteBudget,
+  providerFailureKindForRunError,
   RunManager,
   selectModelContext,
   type McpRuntime,
@@ -479,7 +485,181 @@ async function harness(
   }
 }
 
+const RUNTIME_FAILURE_CASES: ReadonlyArray<{
+  readonly failureKind: ProviderFailureKind
+  readonly createError: () => ProviderError
+}> = [
+  {
+    failureKind: 'connection-refused',
+    createError: () =>
+      new ProviderError('Network request failed', {
+        category: 'network',
+        providerCode: 'ECONNREFUSED'
+      })
+  },
+  {
+    failureKind: 'dns',
+    createError: () =>
+      new ProviderError('Network request failed', {
+        category: 'network',
+        cause: Object.assign(new Error('lookup failed'), {
+          code: 'ENOTFOUND'
+        })
+      })
+  },
+  {
+    failureKind: 'tls',
+    createError: () =>
+      new ProviderError('Network request failed', {
+        category: 'unknown',
+        cause: new AggregateError([
+          Object.assign(new Error('certificate failed'), {
+            code: 'CERT_HAS_EXPIRED'
+          })
+        ])
+      })
+  },
+  {
+    failureKind: 'authentication',
+    createError: () =>
+      new ProviderError('Provider rejected the request', {
+        category: 'authentication'
+      })
+  },
+  {
+    failureKind: 'authentication',
+    createError: () =>
+      new ProviderError('Provider denied model access', {
+        category: 'permission'
+      })
+  },
+  {
+    failureKind: 'rate-limit',
+    createError: () =>
+      new ProviderError('Provider throttled the request', {
+        category: 'rate-limit'
+      })
+  },
+  {
+    failureKind: 'timeout',
+    createError: () =>
+      new ProviderError('Provider request timed out', {
+        category: 'timeout'
+      })
+  },
+  {
+    failureKind: 'protocol-shape',
+    createError: () =>
+      new ProviderError('Provider response was malformed', {
+        category: 'protocol'
+      })
+  },
+  {
+    failureKind: 'executable-not-found',
+    createError: () =>
+      new ProviderError('CLI executable was not found', {
+        category: 'executable-not-found'
+      })
+  },
+  {
+    failureKind: 'external-runtime-startup',
+    createError: () =>
+      new ProviderError('CLI process could not start', {
+        category: 'process-exit',
+        providerCode: 'EACCES'
+      })
+  }
+]
+
 describe('RunManager model runtime', () => {
+  it.each(RUNTIME_FAILURE_CASES)(
+    'maps structured runtime evidence to $failureKind without inspecting prose',
+    ({ failureKind, createError }) => {
+      expect(providerFailureKindForRunError(createError())).toBe(failureKind)
+    }
+  )
+
+  it('keeps prose-only failures and ordinary nonzero CLI exits generic', () => {
+    expect(
+      providerFailureKindForRunError(
+        new ProviderError(
+          'Authentication failed after ECONNREFUSED and a TLS timeout',
+          { category: 'unknown' }
+        )
+      )
+    ).toBeUndefined()
+    expect(
+      providerFailureKindForRunError(
+        new ProviderError('CLI exited with status 1', {
+          category: 'process-exit'
+        })
+      )
+    ).toBeUndefined()
+  })
+
+  it('normalizes a production AI adapter HTTP failure before projecting guidance', async () => {
+    const server = createServer((_request, response) => {
+      response.writeHead(401, { 'content-type': 'application/json' })
+      response.end(
+        JSON.stringify({
+          error: {
+            message: 'The synthetic credential was rejected',
+            type: 'authentication_error'
+          }
+        })
+      )
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => {
+        server.off('error', reject)
+        resolve()
+      })
+    })
+
+    try {
+      const address = server.address() as AddressInfo
+      const adapter = new AiSdkModelAdapter('openai-compatible')
+      const runtimeFactory: ModelRuntimeFactory = () => ({
+        adapter,
+        adapterId: adapter.id,
+        config: {
+          protocol: 'openai-compatible',
+          baseUrl: `http://127.0.0.1:${address.port}/v1`,
+          providerName: 'ground-runtime-failure-test'
+        }
+      })
+      const run = await harness([], undefined, { runtimeFactory })
+
+      await run.manager.start(run.taskId, 'Exercise the real adapter boundary')
+      const terminal = await run.terminal
+
+      expect(terminal).toMatchObject({
+        type: 'run-error',
+        failureKind: 'authentication'
+      })
+      expect(
+        run.store
+          .getTask(run.taskId)
+          .items.find(
+            (item) =>
+              item.kind === 'activity' &&
+              item.activityType === 'error' &&
+              item.title === 'Run failed'
+          )
+      ).toMatchObject({
+        failureKind: 'authentication'
+      })
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error) reject(error)
+          else resolve()
+        })
+      })
+    }
+  })
+
   it('fails before recording a run when the main process revokes the stored workspace', async () => {
     const authorizeWorkspace = vi.fn(async () => {
       throw new Error('Workspace access expired')
@@ -1628,10 +1808,11 @@ describe('RunManager model runtime', () => {
       vault: vault.instance,
       runtimeFactory: credentialFailingRuntime(
         (resolvedSecret) =>
-          new Error(
+          new ProviderError(
             `Provider rejected Authorization: Bearer ${resolvedSecret}.\n${'x'.repeat(
               160_000
-            )}`
+            )}`,
+            { category: 'authentication' }
           )
       )
     })
@@ -1652,6 +1833,7 @@ describe('RunManager model runtime', () => {
     expect(terminal.message).toContain('Error truncated by Ground')
     expect(terminal.message.length).toBeLessThanOrEqual(30_000)
     expect(terminal.message).not.toContain(secret)
+    expect(terminal.failureKind).toBe('authentication')
 
     const failedTask = run.store.getTask(run.taskId)
     expect(failedTask.runStatus).toBe('failed')
@@ -1664,7 +1846,8 @@ describe('RunManager model runtime', () => {
     expect(failureActivity).toMatchObject({
       kind: 'activity',
       status: 'error',
-      detail: terminal.message
+      detail: terminal.message,
+      failureKind: 'authentication'
     })
     expect(JSON.stringify(failedTask)).not.toContain(secret)
     expect(JSON.stringify(run.events)).not.toContain(secret)
@@ -1673,7 +1856,16 @@ describe('RunManager model runtime', () => {
     expect(await readFile(statePath, 'utf8')).not.toContain(secret)
     const reloaded = new StateStore(statePath)
     await reloaded.load()
-    expect(reloaded.getTask(run.taskId).runStatus).toBe('failed')
+    const reloadedTask = reloaded.getTask(run.taskId)
+    expect(reloadedTask.runStatus).toBe('failed')
+    expect(
+      reloadedTask.items.find(
+        (item) =>
+          item.kind === 'activity' &&
+          item.activityType === 'error' &&
+          item.title === 'Run failed'
+      )
+    ).toMatchObject({ failureKind: 'authentication' })
   })
 
   it('reports a bounded redacted live error when the failed-state write itself is unavailable', async () => {

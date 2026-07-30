@@ -97,6 +97,13 @@ install or start a server or download a model. Only a main-process-confirmed
 refused literal-loopback connection unlocks the local startup/model/port recovery
 checklist. Passive CLI candidates are described as detected locally because a path
 match does not establish authentication, model access, or successful execution.
+Readiness and run failures can carry a bounded main-derived category for refused
+connections, DNS, TLS, authentication, rate limits, timeouts, protocol shape,
+missing executables, or an explicit CLI startup failure. Ground presents shared
+corrective guidance from that category and leaves unknown failures generic; it
+does not classify display prose. Readiness retains no diagnostic text. Error
+activities keep their existing bounded, credential-redacted detail but add no
+cause graph, response-body field, or raw structured provider-code field.
 
 Reviewed downstream builds can statically register another `ModelAdapter` or
 `AgentRuntimeAdapter` and map an existing profile envelope to it without replacing
@@ -295,7 +302,7 @@ The matrix separately requires:
 | OpenAI-compatible success | Credential-free token-bound loopback discovery, two streamed chunks, durable output/attribution/session/idle state | Not Ollama, LM Studio, or external-server certification |
 | OpenAI Responses success | Synthetic versioned credential reused for exact Bearer discovery and `store: false` Responses streaming through `openai.responses` | Not live OpenAI auth, internet, DNS/TLS, rate-limit, reasoning, or tool evidence |
 | Unavailable loopback | Typed `connection-refused`, corrective local guidance, persisted failed readiness, and pre-dispatch block | Not DNS, TLS, auth, rate-limit, timeout, renderer-presentation, or exclusive released-port ownership coverage |
-| Malformed compatible response | Invalid discovery and assistant-message shapes rejected and persisted without refusal misclassification | Not every malformed or hostile-server shape |
+| Malformed compatible response | Invalid discovery and assistant-message shapes classified as `protocol-shape`, with the bounded kind persisted before dispatch is blocked | Not every malformed or hostile-server shape |
 | Recognized Codex CLI | Smoke-owned seven-record child through `openai.codex-cli`, exact two-phase trust, native session, command, usage, durable assistant output, and one successful non-fatal warning | Not installed/authenticated Codex, vendor service/sandbox/tools, passive detection, other CLIs, human dialog acceptance, race-free script-argument binding against concurrent same-user replacement, or abnormal-exit cleanup of a hung/hostile external CLI |
 
 The outer harness prepends its own Node directory to a credential-scrubbed `PATH`.

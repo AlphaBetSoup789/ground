@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { ProviderFailureKind } from '../shared/types'
 import { parsePersistedState } from './state-schema'
 
 function stateWithTask(overrides: Record<string, unknown> = {}): unknown {
@@ -99,6 +100,24 @@ function managedActivity(
   }
 }
 
+function failedProviderActivity(
+  failureKind: unknown,
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return {
+    id: 'provider-failure',
+    kind: 'activity',
+    runId: 'run-1',
+    activityType: 'error',
+    title: 'Run failed',
+    detail: 'Credential-safe failure detail.',
+    failureKind,
+    status: 'error',
+    createdAt: '2026-07-28T12:00:00.000Z',
+    ...overrides
+  }
+}
+
 describe('persisted task lifecycle validation', () => {
   it('migrates version 1 documents through the current schema', () => {
     expect(parsePersistedState(stateWithTask()).version).toBe(2)
@@ -141,6 +160,123 @@ describe('persisted task lifecycle validation', () => {
       detail: 'Unbounded provider response text must not be persisted'
     }
     expect(() => parsePersistedState(state)).toThrow()
+  })
+
+  it.each<ProviderFailureKind>([
+    'connection-refused',
+    'dns',
+    'tls',
+    'authentication',
+    'rate-limit',
+    'timeout',
+    'protocol-shape',
+    'executable-not-found',
+    'external-runtime-startup'
+  ])('persists only the bounded %s provider failure kind', (failureKind) => {
+    const state = stateWithTask() as {
+      providers: Array<Record<string, unknown>>
+    }
+    state.providers[0]!.verification = {
+      status: 'failed',
+      scope: 'connection',
+      checkedAt: '2026-07-29T12:30:00.000Z',
+      failureKind
+    }
+
+    expect(
+      parsePersistedState(state).providers[0]?.verification
+    ).toEqual({
+      status: 'failed',
+      scope: 'connection',
+      checkedAt: '2026-07-29T12:30:00.000Z',
+      failureKind
+    })
+  })
+
+  it('rejects failure kinds on passed checks and all raw failure diagnostics', () => {
+    const state = stateWithTask() as {
+      providers: Array<Record<string, unknown>>
+    }
+    state.providers[0]!.verification = {
+      status: 'passed',
+      scope: 'connection',
+      checkedAt: '2026-07-29T12:30:00.000Z',
+      failureKind: 'authentication'
+    }
+    expect(() => parsePersistedState(state)).toThrow()
+
+    state.providers[0]!.verification = {
+      status: 'failed',
+      scope: 'connection',
+      checkedAt: '2026-07-29T12:30:00.000Z',
+      failureKind: 'authentication',
+      detail: 'Rejected secret: credential-never-persist'
+    }
+    expect(() => parsePersistedState(state)).toThrow()
+
+    state.providers[0]!.verification = {
+      status: 'failed',
+      scope: 'connection',
+      checkedAt: '2026-07-29T12:30:00.000Z',
+      failureKind: 'credential-never-persist'
+    }
+    expect(() => parsePersistedState(state)).toThrow()
+  })
+
+  it.each<ProviderFailureKind>([
+    'connection-refused',
+    'dns',
+    'tls',
+    'authentication',
+    'rate-limit',
+    'timeout',
+    'protocol-shape',
+    'executable-not-found',
+    'external-runtime-startup'
+  ])('persists only the bounded %s run failure kind', (failureKind) => {
+    const state = stateWithTask({
+      items: [
+        failedProviderActivity(failureKind, {
+          providerCategory: 'must-not-persist',
+          providerCode: 'must-not-persist',
+          cause: { code: 'must-not-persist' }
+        })
+      ]
+    })
+    const item = parsePersistedState(state).tasks[0]?.items[0]
+
+    expect(item).toMatchObject({
+      kind: 'activity',
+      activityType: 'error',
+      status: 'error',
+      failureKind
+    })
+    expect(item).not.toHaveProperty('providerCategory')
+    expect(item).not.toHaveProperty('providerCode')
+    expect(item).not.toHaveProperty('cause')
+  })
+
+  it('rejects unknown run failure kinds and classifications on non-error activity', () => {
+    expect(() =>
+      parsePersistedState(
+        stateWithTask({
+          items: [failedProviderActivity('future-provider-failure')]
+        })
+      )
+    ).toThrow()
+
+    expect(() =>
+      parsePersistedState(
+        stateWithTask({
+          items: [
+            failedProviderActivity('timeout', {
+              activityType: 'status',
+              status: 'success'
+            })
+          ]
+        })
+      )
+    ).toThrow(/failed error activity/i)
   })
 
   it('retains a bounded opaque API credential revision while accepting legacy profiles', () => {

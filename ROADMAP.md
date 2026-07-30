@@ -82,6 +82,8 @@ are not necessarily release-certified.
 - [x] Complete the remaining M1.1 production-app smoke matrix for a direct
   first-class API, a recognized CLI deterministic child, and malformed
   provider/runtime responses
+- [x] Add credential-safe typed readiness and run guidance for transport,
+  authentication, protocol, executable, and external-runtime startup failures
 
 ### Safe coding loop
 

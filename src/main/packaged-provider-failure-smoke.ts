@@ -7,7 +7,7 @@ import {
 import type { AddressInfo } from 'node:net'
 import { mkdir } from 'node:fs/promises'
 import path from 'node:path'
-import type { RunEvent } from '../shared/types'
+import type { ProviderFailureKind, RunEvent } from '../shared/types'
 import { isPackagedSmokeToken } from '../shared/packaged-smoke'
 import type { ProviderService } from './provider-service'
 import type { RunManager } from './run-manager'
@@ -27,7 +27,7 @@ const CREDENTIAL_HEADER_NAMES = [
 
 export const PACKAGED_PROVIDER_FAILURE_SMOKE_PROVES = [
   'The packaged main process classifies a closed literal-loopback compatible endpoint as connection-refused, persists failed connection readiness, and blocks task dispatch through that provider.',
-  'The packaged main process rejects deterministic malformed OpenAI-compatible readiness responses, persists failed connection readiness, and does not misclassify them as a refused connection.'
+  'The packaged main process classifies deterministic malformed OpenAI-compatible readiness responses as protocol-shape, persists that bounded failure kind with failed connection readiness, and blocks task dispatch through that provider.'
 ] as const
 
 export const PACKAGED_PROVIDER_FAILURE_SMOKE_DOES_NOT_PROVE = [
@@ -36,7 +36,7 @@ export const PACKAGED_PROVIDER_FAILURE_SMOKE_DOES_NOT_PROVE = [
 ] as const
 
 export interface PackagedProviderFailureSmokeEvidence {
-  version: 1
+  version: 2
   fixture: {
     protocol: 'openai-compatible'
     binding: 'token-bound-literal-loopback'
@@ -55,6 +55,8 @@ export interface PackagedProviderFailureSmokeEvidence {
   malformedResponse: {
     expectedFailureObserved: true
     phase: 'readiness'
+    failureKind: 'protocol-shape'
+    failureKindPersisted: true
     failedConnectionReadinessPersisted: true
     invalidAssistantShapeObserved: true
     notMisclassifiedAsConnectionRefused: true
@@ -308,7 +310,8 @@ async function stopTaskWithinBound(
 
 async function requirePersistedFailedReadiness(
   input: PackagedProviderFailureSmokeInput,
-  providerId: string
+  providerId: string,
+  expectedFailureKind: ProviderFailureKind
 ): Promise<void> {
   const reloaded = new StateStore(
     path.join(input.userDataPath, 'ground-state.json')
@@ -317,7 +320,8 @@ async function requirePersistedFailedReadiness(
   const provider = reloaded.getProvider(providerId)
   requireCondition(
     provider.verification?.status === 'failed' &&
-      provider.verification.scope === 'connection',
+      provider.verification.scope === 'connection' &&
+      provider.verification.failureKind === expectedFailureKind,
     'Packaged provider failure smoke did not retain failed connection readiness'
   )
 }
@@ -446,7 +450,11 @@ async function smokeUnavailableLoopback(
     !/fetch failed/iu.test(tested.detail),
     'Packaged unavailable-loopback smoke exposed a generic fetch failure'
   )
-  await requirePersistedFailedReadiness(input, observed.providerId)
+  await requirePersistedFailedReadiness(
+    input,
+    observed.providerId,
+    'connection-refused'
+  )
   await requireRunBlockedBeforeDispatch(
     input,
     observed.providerId,
@@ -498,12 +506,12 @@ async function smokeMalformedResponse(
       'Packaged malformed-provider smoke did not observe the expected persisted failure'
     )
     requireCondition(
-      tested.failureKind === undefined,
-      'Packaged malformed-provider smoke was misclassified as a refused connection'
+      tested.failureKind === 'protocol-shape',
+      'Packaged malformed-provider smoke was not classified as a protocol-shape failure'
     )
     requireCondition(
       /Model listing failed:/iu.test(tested.detail) &&
-        /OpenAI-compatible data array/iu.test(tested.detail) &&
+        /data array with model identifiers/iu.test(tested.detail) &&
         /Generation probe failed:/iu.test(tested.detail) &&
         /invalid assistant message/iu.test(tested.detail),
       'Packaged malformed-provider smoke did not observe both protocol-shape failures'
@@ -512,7 +520,11 @@ async function smokeMalformedResponse(
       !/fetch failed/iu.test(tested.detail),
       'Packaged malformed-provider smoke exposed a generic fetch failure'
     )
-    await requirePersistedFailedReadiness(input, saved.id)
+    await requirePersistedFailedReadiness(
+      input,
+      saved.id,
+      'protocol-shape'
+    )
     await requireRunBlockedBeforeDispatch(
       input,
       saved.id,
@@ -547,7 +559,7 @@ export async function runPackagedProviderFailureSmoke(
   await smokeMalformedResponse(input, canonicalWorkspace)
 
   return {
-    version: 1,
+    version: 2,
     fixture: {
       protocol: 'openai-compatible',
       binding: 'token-bound-literal-loopback',
@@ -566,6 +578,8 @@ export async function runPackagedProviderFailureSmoke(
     malformedResponse: {
       expectedFailureObserved: true,
       phase: 'readiness',
+      failureKind: 'protocol-shape',
+      failureKindPersisted: true,
       failedConnectionReadinessPersisted: true,
       invalidAssistantShapeObserved: true,
       notMisclassifiedAsConnectionRefused: true,

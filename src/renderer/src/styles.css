@@ -1444,6 +1444,27 @@ kbd {
   border-top: 1px solid var(--border);
 }
 
+.provider-failure-guidance {
+  padding: 11px 13px;
+  border-bottom: 1px solid rgba(239, 141, 132, 0.12);
+  color: #bbbdae;
+  background: rgba(239, 141, 132, 0.035);
+}
+
+.provider-failure-guidance strong {
+  display: block;
+  color: #d8d9cf;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.provider-failure-guidance p {
+  margin: 4px 0 0;
+  color: #96998e;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
 .activity-detail > pre,
 .activity-result pre {
   max-height: 320px;
@@ -4389,6 +4410,12 @@ kbd {
 
 .test-result .test-result-retention {
   color: #a8ab9f;
+}
+
+.test-result .provider-failure-correction {
+  margin-top: 7px;
+  color: #a8ab9f;
+  font-family: inherit;
 }
 
 .local-server-recovery {

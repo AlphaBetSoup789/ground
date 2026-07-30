@@ -300,7 +300,7 @@ describe('release artifact and runtime-evidence verification', () => {
             }
           },
           providerFailureRuntime: {
-            version: 1,
+            version: 2,
             fixture: {
               protocol: 'openai-compatible',
               binding: 'token-bound-literal-loopback',
@@ -319,6 +319,8 @@ describe('release artifact and runtime-evidence verification', () => {
             malformedResponse: {
               expectedFailureObserved: true,
               phase: 'readiness',
+              failureKind: 'protocol-shape',
+              failureKindPersisted: true,
               failedConnectionReadinessPersisted: true,
               invalidAssistantShapeObserved: true,
               notMisclassifiedAsConnectionRefused: true,
@@ -420,6 +422,20 @@ describe('release artifact and runtime-evidence verification', () => {
     ).rejects.toThrow(/expected-failure runtime evidence is incomplete/iu)
     linuxEvidence.evidence.providerFailureRuntime.unavailableLoopback.runBlockedBeforeDispatch =
       true
+
+    linuxEvidence.evidence.providerFailureRuntime.malformedResponse.failureKind =
+      'connection-refused'
+    await writeFile(
+      linuxEvidencePath,
+      `${JSON.stringify(linuxEvidence)}\n`
+    )
+    await expect(
+      runScript('scripts/verify-package-runtime-evidence.mjs', [directory], {
+        GITHUB_SHA: releaseCommit
+      })
+    ).rejects.toThrow(/expected-failure runtime evidence is incomplete/iu)
+    linuxEvidence.evidence.providerFailureRuntime.malformedResponse.failureKind =
+      'protocol-shape'
 
     linuxEvidence.evidence.cliRuntime.firstTurn.warningNoticeCount = 0
     await writeFile(

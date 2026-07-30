@@ -32,7 +32,7 @@ export const PROVIDER_RUNTIME_DOES_NOT_PROVE = Object.freeze([
 
 export const PROVIDER_FAILURE_RUNTIME_PROVES = Object.freeze([
   'The packaged main process classifies a closed literal-loopback compatible endpoint as connection-refused, persists failed connection readiness, and blocks task dispatch through that provider.',
-  'The packaged main process rejects deterministic malformed OpenAI-compatible readiness responses, persists failed connection readiness, and does not misclassify them as a refused connection.'
+  'The packaged main process classifies deterministic malformed OpenAI-compatible readiness responses as protocol-shape, persists that bounded failure kind with failed connection readiness, and blocks task dispatch through that provider.'
 ])
 
 export const PROVIDER_FAILURE_RUNTIME_DOES_NOT_PROVE = Object.freeze([
@@ -117,7 +117,7 @@ export function hasCompleteProviderRuntimeEvidence(evidence) {
 
 export function hasCompleteProviderFailureRuntimeEvidence(evidence) {
   return (
-    evidence?.version === 1 &&
+    evidence?.version === 2 &&
     evidence.fixture?.protocol === 'openai-compatible' &&
     evidence.fixture?.binding === 'token-bound-literal-loopback' &&
     evidence.fixture?.externalCredentialsUsed === false &&
@@ -132,6 +132,8 @@ export function hasCompleteProviderFailureRuntimeEvidence(evidence) {
     evidence.unavailableLoopback?.runBlockedBeforeDispatch === true &&
     evidence.malformedResponse?.expectedFailureObserved === true &&
     evidence.malformedResponse?.phase === 'readiness' &&
+    evidence.malformedResponse?.failureKind === 'protocol-shape' &&
+    evidence.malformedResponse?.failureKindPersisted === true &&
     evidence.malformedResponse?.failedConnectionReadinessPersisted === true &&
     evidence.malformedResponse?.invalidAssistantShapeObserved === true &&
     evidence.malformedResponse?.notMisclassifiedAsConnectionRefused ===

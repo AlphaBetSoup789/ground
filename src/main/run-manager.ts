@@ -5,6 +5,7 @@ import type {
   MessageItem,
   PortableJsonValue,
   ProviderAttribution,
+  ProviderFailureKind,
   ProviderProfile,
   RunEvent,
   StoredModelConversationItem,
@@ -18,6 +19,8 @@ import {
   createBuiltInCliRuntimeAdapters,
   ModelEventReducer,
   nextAdapterEvent,
+  ProviderError,
+  toProviderError,
   type AgentActivityKind,
   type AgentRuntimeAdapter,
   type AgentRuntimeEvent,
@@ -180,6 +183,145 @@ const CREDENTIAL_REDACTION_MARKERS = [
   '[removed]',
   ''
 ] as const
+const RUN_FAILURE_DNS_CODES = new Set([
+  'EAI_AGAIN',
+  'EAI_FAIL',
+  'EAI_NONAME',
+  'ENODATA',
+  'ENONAME',
+  'ENOTFOUND'
+])
+const RUN_FAILURE_TLS_CODES = new Set([
+  'CERT_HAS_EXPIRED',
+  'CERT_NOT_YET_VALID',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'ERR_SSL_CERTIFICATE_VERIFY_FAILED',
+  'ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION',
+  'ERR_SSL_WRONG_VERSION_NUMBER',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_GET_ISSUER_CERT',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE'
+])
+const RUN_FAILURE_TIMEOUT_CODES = new Set([
+  'ERR_HTTP_HEADERS_TIMEOUT',
+  'ESOCKETTIMEDOUT',
+  'ETIMEDOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT'
+])
+const RUN_FAILURE_STARTUP_CODES = new Set(['EACCES', 'EPERM'])
+const STRUCTURED_ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/u
+const MAX_STRUCTURED_ERROR_NODES = 32
+
+function normalizedStructuredErrorCode(
+  value: unknown
+): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const normalized = value.toUpperCase()
+  return STRUCTURED_ERROR_CODE_PATTERN.test(normalized)
+    ? normalized
+    : undefined
+}
+
+function structuredProviderErrorCodes(error: ProviderError): Set<string> {
+  const codes = new Set<string>()
+  const providerCode = normalizedStructuredErrorCode(error.providerCode)
+  if (providerCode) codes.add(providerCode)
+
+  const pending: unknown[] = [error.cause]
+  const visited = new Set<object>()
+  while (
+    pending.length > 0 &&
+    visited.size < MAX_STRUCTURED_ERROR_NODES
+  ) {
+    const candidate = pending.shift()
+    if (
+      ((typeof candidate !== 'object' || candidate === null) &&
+        typeof candidate !== 'function') ||
+      visited.has(candidate)
+    ) {
+      continue
+    }
+    visited.add(candidate)
+    try {
+      const code = normalizedStructuredErrorCode(
+        (candidate as { code?: unknown }).code
+      )
+      if (code) codes.add(code)
+      const cause = (candidate as { cause?: unknown }).cause
+      if (cause !== undefined) pending.push(cause)
+      if (candidate instanceof AggregateError) {
+        const errors = candidate.errors
+        if (Array.isArray(errors)) {
+          const remaining = Math.max(
+            0,
+            MAX_STRUCTURED_ERROR_NODES - visited.size - pending.length
+          )
+          for (
+            let index = 0;
+            index < errors.length && index < remaining;
+            index += 1
+          ) {
+            pending.push(errors[index])
+          }
+        }
+      }
+    } catch {
+      // Opaque causes cannot authorize specialized renderer guidance.
+    }
+  }
+  return codes
+}
+
+/**
+ * Collapses structured runtime errors into the same bounded renderer taxonomy
+ * used by provider readiness. Display prose is deliberately never inspected.
+ */
+export function providerFailureKindForRunError(
+  error: unknown
+): ProviderFailureKind | undefined {
+  if (!(error instanceof ProviderError)) return undefined
+  switch (error.category) {
+    case 'authentication':
+    case 'permission':
+      return 'authentication'
+    case 'rate-limit':
+      return 'rate-limit'
+    case 'timeout':
+      return 'timeout'
+    case 'protocol':
+      return 'protocol-shape'
+    case 'executable-not-found':
+      return 'executable-not-found'
+    default:
+      break
+  }
+
+  const codes = structuredProviderErrorCodes(error)
+  if (
+    error.category === 'process-exit' &&
+    [...codes].some((code) => RUN_FAILURE_STARTUP_CODES.has(code))
+  ) {
+    return 'external-runtime-startup'
+  }
+  if (error.category !== 'network' && error.category !== 'unknown') {
+    return undefined
+  }
+  if (codes.has('ECONNREFUSED')) return 'connection-refused'
+  if ([...codes].some((code) => RUN_FAILURE_DNS_CODES.has(code))) {
+    return 'dns'
+  }
+  if ([...codes].some((code) => RUN_FAILURE_TLS_CODES.has(code))) {
+    return 'tls'
+  }
+  if ([...codes].some((code) => RUN_FAILURE_TIMEOUT_CODES.has(code))) {
+    return 'timeout'
+  }
+  return undefined
+}
 
 function assertCredentialFreeModelValue(
   value: unknown,
@@ -323,6 +465,10 @@ interface PlannedModelInput {
 }
 
 type EventSink = (event: RunEvent) => void
+type NewActivityInput<Item extends ActivityItem = ActivityItem> =
+  Item extends ActivityItem
+    ? Omit<Item, 'id' | 'kind' | 'runId' | 'createdAt'>
+    : never
 
 function providerStartFingerprint(provider: ProviderProfile): string {
   const material =
@@ -596,12 +742,19 @@ export class RunManager {
     run.completion = Promise.resolve()
       .then(() => this.execute(run, provider))
       .catch((error) => {
+        const failureKind = providerFailureKindForRunError(error)
         const detail = readableError(error, run.credentialValues)
         const message = boundedRuntimeText(
           `Ground could not finalize this run locally. ${detail}`,
           run.credentialValues
         )
-        this.emit({ type: 'run-error', taskId: run.taskId, runId: run.id, message })
+        this.emit({
+          type: 'run-error',
+          taskId: run.taskId,
+          runId: run.id,
+          message,
+          ...(failureKind ? { failureKind } : {})
+        })
       })
       .finally(() => {
         run.credentialValues.clear()
@@ -847,6 +1000,7 @@ export class RunManager {
       if (run.controller.signal.aborted || isAbortError(error)) {
         await finalizeStopped()
       } else {
+        const failureKind = providerFailureKindForRunError(error)
         const message = readableError(error, run.credentialValues)
         const item: ActivityItem = {
           id: createId('activity'),
@@ -855,6 +1009,7 @@ export class RunManager {
           activityType: 'error',
           title: 'Run failed',
           detail: message,
+          ...(failureKind ? { failureKind } : {}),
           status: 'error',
           createdAt: nowIso(),
           provider: run.provider
@@ -868,7 +1023,13 @@ export class RunManager {
           await finalizeStopped()
         } else {
           this.emit({ type: 'item-added', taskId: run.taskId, runId: run.id, item })
-          this.emit({ type: 'run-error', taskId: run.taskId, runId: run.id, message })
+          this.emit({
+            type: 'run-error',
+            taskId: run.taskId,
+            runId: run.id,
+            message,
+            ...(failureKind ? { failureKind } : {})
+          })
         }
       }
     } finally {
@@ -1133,14 +1294,19 @@ export class RunManager {
       } catch (error) {
         await closeModelIterator()
         appendAssistantDelta(assistantRedactor?.finish() ?? '')
+        if (error instanceof StatePersistenceError) throw error
+        const normalizedError = toProviderError(error, {
+          signal: run.controller.signal,
+          partialOutput: reducer.hasSemanticOutput
+        })
         if (
           assistantItem &&
           !run.controller.signal.aborted &&
-          !isAbortError(error)
+          !isAbortError(normalizedError)
         ) {
           await this.store.addItem(run.taskId, assistantItem)
         }
-        throw error
+        throw normalizedError
       } finally {
         await closeModelIterator()
       }
@@ -2036,12 +2202,17 @@ export class RunManager {
           ? 'The run stopped before the runtime reported completion.'
           : 'The runtime ended before reporting completion.'
       ).catch(() => undefined)
-      if (!run.controller.signal.aborted && !isAbortError(error)) {
+      if (error instanceof StatePersistenceError) throw error
+      const normalizedError = toProviderError(error, {
+        signal: run.controller.signal,
+        partialOutput: reducer.hasSemanticOutput
+      })
+      if (!run.controller.signal.aborted && !isAbortError(normalizedError)) {
         appendAssistantDelta(assistantRedactor.finish())
         if (assistantItem) await this.store.addItem(run.taskId, assistantItem)
         await this.addRuntimeNotices(run, runtimeNotices).catch(() => undefined)
       }
-      throw error
+      throw normalizedError
     } finally {
       await closeRuntimeIterator()
     }
@@ -2248,16 +2419,16 @@ export class RunManager {
 
   private async addActivity(
     run: ActiveRun,
-    input: Omit<ActivityItem, 'id' | 'kind' | 'runId' | 'createdAt'>
+    input: NewActivityInput
   ): Promise<ActivityItem> {
-    const item: ActivityItem = {
+    const item = {
       ...input,
       id: createId('activity'),
       kind: 'activity',
       runId: run.id,
       createdAt: nowIso(),
       provider: run.provider
-    }
+    } as ActivityItem
     await this.store.addItem(run.taskId, item)
     this.emit({ type: 'item-added', taskId: run.taskId, runId: run.id, item })
     return item
@@ -3371,5 +3542,9 @@ function isToolFailure(result: string): boolean {
 }
 
 function isAbortError(error: unknown): boolean {
-  return error instanceof Error && (error.name === 'AbortError' || error.message === 'Run stopped')
+  return (
+    (error instanceof ProviderError && error.category === 'cancelled') ||
+    (error instanceof Error &&
+      (error.name === 'AbortError' || error.message === 'Run stopped'))
+  )
 }

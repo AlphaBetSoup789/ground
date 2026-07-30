@@ -146,6 +146,12 @@ repository backup or rollback mechanism.
   OpenAI-compatible testing prefers bounded `/models` discovery and falls back to
   a separate non-streaming four-token generation probe only when listing cannot
   prove success.
+- Specialized provider recovery is authorized only by a bounded main-process
+  category derived from structured evidence. Persisted readiness and error
+  activities can retain that category. Readiness retains no diagnostic text; error
+  history keeps its existing bounded, credential-redacted detail but adds no cause
+  graph, response-body field, or raw structured provider-code field.
+  Renderer-visible prose is not classification input.
 - Run startup reserves the exact task revision, provider revision/fingerprint, and
   credential boundary before CLI authorization or workspace resolution. Provider
   saves, deletes, and verification writes cannot cross a starting or active run,

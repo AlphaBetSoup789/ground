@@ -177,8 +177,13 @@ try {
     await baseUrl.fill('http://127.0.0.1:1/v1')
     await page.getByRole('button', { name: 'Test', exact: true }).click()
 
-    const failure = page.getByRole('alert').filter({ hasText: 'Could not connect' })
+    const failure = page
+      .getByRole('alert')
+      .filter({ hasText: 'Connection refused' })
     await failure.waitFor()
+    await failure.getByText(
+      /Confirm the provider or local API server is running/
+    ).waitFor()
     await failure.getByText('Before testing this local server again').waitFor()
     await failure.getByText(
       /Ground does not install or start the server and does not pull models/

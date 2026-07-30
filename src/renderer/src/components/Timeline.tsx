@@ -29,6 +29,7 @@ import type {
   ProviderProfile,
   RunStatus
 } from '../../../shared/types'
+import { providerFailureGuidance } from '../../../shared/provider-failure-guidance'
 import {
   ASSISTANT_ANNOUNCEMENT_INTERVAL_MS,
   assistantRunFinishedAnnouncement,
@@ -449,6 +450,7 @@ function ActivityCard(props: {
   onResolve: (approved: boolean) => Promise<void>
 }): React.JSX.Element {
   const { item } = props
+  const failureGuidance = providerFailureGuidance(item.failureKind)
   const [resolving, setResolving] = useState(false)
   const approvalDescriptionId = useId()
   const summaryRef = useRef<HTMLElement>(null)
@@ -509,6 +511,15 @@ function ActivityCard(props: {
         </summary>
 
         <div className="activity-detail">
+          {failureGuidance && (
+            <section
+              className="provider-failure-guidance"
+              aria-label="Provider failure guidance"
+            >
+              <strong>{failureGuidance.title}</strong>
+              <p>{failureGuidance.correctiveGuidance}</p>
+            </section>
+          )}
           {item.detail && (
             <pre tabIndex={0} aria-label={`${item.title} exact action`}>
               {item.detail}

@@ -65,8 +65,9 @@ Native scope repeats startup and verifies:
 - credential-free OpenAI-compatible and synthetic-credential OpenAI Responses
   readiness plus first turns through the packaged production registry and
   `RunManager`;
-- expected closed-loopback and malformed-compatible readiness failures, including
-  durable failure state and pre-dispatch blocking;
+- expected closed-loopback and malformed-compatible readiness failures classified
+  as `connection-refused` and `protocol-shape`, including durable typed failure
+  state and pre-dispatch blocking;
 - one smoke-owned recognized Codex-dialect child with exact configuration and
   invocation authorization, durable session/activity/usage, and a non-fatal
   warning that must remain successful;
@@ -230,8 +231,9 @@ focus, assistive technology, or every OS dialog behavior. The credential round t
 proves only the configured runner’s secure-storage session. Local MCP auto-approval
 applies only to a fixed in-memory fixture executed by Ground's own packaged
 runtime. Provider/runtime evidence applies only to Ground's token-bound
-OpenAI-compatible and OpenAI Responses fixtures, expected refused-loopback and
-malformed-compatible failures, and smoke-owned recognized Codex-dialect child.
+OpenAI-compatible and OpenAI Responses fixtures, expected typed
+`connection-refused` and `protocol-shape` failures, and smoke-owned recognized
+Codex-dialect child.
 Positive CLI decisions use the exact smoke-only authority described above; they do
 not certify human acceptance or an installed/authenticated vendor CLI.
 

@@ -184,6 +184,12 @@ Ground will not start a task with that provider until **Test** passes for the ex
 saved revision; changing and saving it requires another test. First-class API tests
 use each provider’s model-discovery authentication and response shape. A CLI test
 validates the saved executable configuration without claiming a live model run.
+Failed checks retain only a bounded failure category while keeping the immediate,
+redacted diagnostic available in the settings view. Ground gives corrective
+guidance for refused connections, DNS, TLS, authentication, rate limits, timeouts,
+incompatible response shapes, missing executables, and CLI startup failures. The
+same safe categories can appear on failed run activities; unknown failures stay
+generic instead of being guessed from error prose.
 API-key and CLI-environment replacements are staged under new opaque versioned
 vault references before the profile points to them, so a failed state write cannot
 overwrite the secret used by the previously verified profile. Run startup reserves
@@ -699,8 +705,9 @@ requires:
   synthetic versioned credential, exact Bearer authorization, and `store: false`;
 - a closed literal-loopback endpoint classified as `connection-refused`, with
   persisted failed readiness and dispatch blocked before a run event;
-- malformed compatible discovery and generation responses rejected without being
-  misclassified as a refused connection; and
+- malformed compatible discovery and generation responses classified as
+  `protocol-shape`, with that bounded kind persisted in failed readiness and
+  dispatch blocked before a run event; and
 - a recognized Codex-dialect CLI turn through a token-bound Node child, including
   exact configuration/invocation trust envelopes, native session, command
   lifecycle, usage, and one non-fatal warning that must remain successful.

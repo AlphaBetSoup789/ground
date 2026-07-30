@@ -140,7 +140,7 @@ describe('packaged provider expected-failure smoke', () => {
     })
 
     expect(evidence).toEqual({
-      version: 1,
+      version: 2,
       fixture: {
         protocol: 'openai-compatible',
         binding: 'token-bound-literal-loopback',
@@ -159,6 +159,8 @@ describe('packaged provider expected-failure smoke', () => {
       malformedResponse: {
         expectedFailureObserved: true,
         phase: 'readiness',
+        failureKind: 'protocol-shape',
+        failureKindPersisted: true,
         failedConnectionReadinessPersisted: true,
         invalidAssistantShapeObserved: true,
         notMisclassifiedAsConnectionRefused: true,
@@ -184,12 +186,19 @@ describe('packaged provider expected-failure smoke', () => {
       )
     expect(failureProviders).toHaveLength(2)
     expect(
-      failureProviders.every(
-        (provider) =>
+      Object.fromEntries(
+        failureProviders.map((provider) => [
+          provider.name,
           provider.verification?.status === 'failed' &&
           provider.verification.scope === 'connection'
+            ? provider.verification.failureKind
+            : undefined
+        ])
       )
-    ).toBe(true)
+    ).toEqual({
+      'Packaged unavailable loopback': 'connection-refused',
+      'Packaged malformed compatible': 'protocol-shape'
+    })
     expect(reloaded.snapshot().tasks).toHaveLength(2)
     expect(
       reloaded

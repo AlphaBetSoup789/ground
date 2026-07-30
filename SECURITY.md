@@ -138,6 +138,13 @@ security recipient, before the first supported release.
   non-streaming four-token generation probe to the canonical
   `/chat/completions` route. Both paths reject redirects and validate bounded JSON
   shapes.
+- Provider guidance is selected only from a strict bounded category derived in
+  main from structured status/header, cause-code, Ground-owned timer, parser, or
+  executable/process-launch evidence. Failed readiness and run activities may
+  persist that category. Readiness persists no diagnostic text; run history keeps
+  only its existing bounded, credential-redacted detail and adds no cause graph,
+  response-body field, or raw structured provider-code field. Display prose
+  cannot unlock specialized recovery UI.
 - Run startup reserves the exact task revision, provider revision and configuration
   fingerprint, and credential boundary before native CLI authorization or
   workspace access. Provider saves, deletes, and verification writes are excluded

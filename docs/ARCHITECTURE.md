@@ -114,10 +114,17 @@ authorization or workspace lookup. Provider mutation and verification publicatio
 cannot interleave with that reservation or an active run.
 
 Corrective UI is unlocked by typed main-process evidence rather than renderer
-message matching. In the current narrow case, only an actual refused connection to
-a literal-loopback provider carries `connection-refused`; that result can show the
-local startup/model/port checklist and detected-CLI alternatives. Authentication,
-protocol-shape, and other uncategorized failures retain their original diagnostics.
+message matching. The bounded taxonomy covers refused connections, DNS, TLS,
+authentication, rate limits, Ground-owned probe timeouts, incompatible protocol
+shapes, missing executables, and explicit external-runtime startup failures.
+Classification uses HTTP status and rate-limit headers, bounded cause-chain codes,
+Ground-owned timers, parser sentinels, and executable/process launch errors. Only
+the category is added to failed readiness or an error activity. Readiness retains
+no diagnostic text; run history keeps its existing bounded, credential-redacted
+detail but adds no cause graph, response-body field, or raw structured
+provider-code field. Unknown failures retain their bounded diagnostic without
+specialized guidance. Enhanced local startup/model/port recovery remains narrower:
+it requires an actual refused connection to a literal-loopback endpoint.
 
 ### Agent runtime adapters
 
@@ -574,7 +581,8 @@ provider block saves, persistently verifies, runs, and reloads both a
 credential-free token-bound OpenAI-compatible profile and a first-class OpenAI
 Responses profile with a synthetic versioned credential, exact Bearer
 authorization, and `store: false`. The expected-failure block persists failed
-connection readiness for a closed literal-loopback port and malformed compatible
+connection readiness with bounded `connection-refused` and `protocol-shape`
+kinds for a closed literal-loopback port and malformed compatible
 discovery/generation shapes, then proves `RunManager` blocks both before dispatch.
 The CLI block resolves the Node interpreter supplied by the outer smoke harness,
 creates a token-bound Codex-dialect child, and crosses the production executable,

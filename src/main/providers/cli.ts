@@ -32,6 +32,29 @@ const MAX_CLI_UNPARSED_DIAGNOSTIC_CHARACTERS = 500
 const TERMINATION_GRACE_MS = 3_000
 const CLI_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/
 
+export class CliProtocolError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause })
+    this.name = 'CliProtocolError'
+  }
+}
+
+export class CliProcessExitError extends Error {
+  readonly exitCode: number | null
+  readonly terminationSignal: NodeJS.Signals | null
+
+  constructor(
+    message: string,
+    exitCode: number | null,
+    terminationSignal: NodeJS.Signals | null
+  ) {
+    super(message)
+    this.name = 'CliProcessExitError'
+    this.exitCode = exitCode
+    this.terminationSignal = terminationSignal
+  }
+}
+
 export interface CliUsage {
   inputTokens?: number
   outputTokens?: number
@@ -1312,14 +1335,17 @@ export async function runCli(
   let emittedText = false
   let sessionId = options.sessionId
   let usage: CliUsage | undefined
-  let protocolError: Error | undefined
+  let protocolError: CliProtocolError | undefined
   let killTimer: NodeJS.Timeout | undefined
   let rawTextBytes = 0
   let emittedTextBytes = 0
   let stopping = false
   let stdoutBytes = 0
   let stderrBytes = 0
-  let eventCount = 0
+  let nonemptyRecordCount = 0
+  let parsedStructuredRecordCount = 0
+  let runtimeEventCount = 0
+  let malformedJsonLineCount = 0
   const stdoutDecoder = new StringDecoder('utf8')
   const stderrDecoder = new StringDecoder('utf8')
   const textRedactor = new CliSecretStreamRedactor(environmentSecrets)
@@ -1350,7 +1376,7 @@ export async function runCli(
     if (!delta) return
     const nextBytes = emittedTextBytes + Buffer.byteLength(delta, 'utf8')
     if (nextBytes > MAX_CLI_TEXT_BYTES) {
-      protocolError = new Error(
+      protocolError = new CliProtocolError(
         'CLI text output exceeded the 2 MB limit after credential redaction'
       )
       stop()
@@ -1364,7 +1390,9 @@ export async function runCli(
     if (final && emittedText) return
     const nextBytes = rawTextBytes + Buffer.byteLength(delta, 'utf8')
     if (nextBytes > MAX_CLI_TEXT_BYTES) {
-      protocolError = new Error('CLI text output exceeded the 2 MB limit')
+      protocolError = new CliProtocolError(
+        'CLI text output exceeded the 2 MB limit'
+      )
       stop()
       return
     }
@@ -1374,10 +1402,13 @@ export async function runCli(
   }
 
   const consume = (value: unknown): void => {
+    parsedStructuredRecordCount += 1
     for (const event of parseCliRuntimeEvent(provider.cliAdapter ?? 'generic', value)) {
-      eventCount += 1
-      if (eventCount > MAX_CLI_EVENTS) {
-        protocolError = new Error('CLI emitted too many runtime events')
+      runtimeEventCount += 1
+      if (runtimeEventCount > MAX_CLI_EVENTS) {
+        protocolError = new CliProtocolError(
+          'CLI emitted too many runtime events'
+        )
         stop()
         return
       }
@@ -1392,10 +1423,12 @@ export async function runCli(
             )
           }
         } catch (error) {
-          protocolError =
+          protocolError = new CliProtocolError(
             error instanceof Error
-              ? error
-              : new Error('CLI emitted an invalid session identifier')
+              ? error.message
+              : 'CLI emitted an invalid session identifier',
+            error
+          )
           stop()
           return
         }
@@ -1444,11 +1477,20 @@ export async function runCli(
   }
 
   const consumeLine = (line: string): void => {
-    if (!line.trim()) return
+    if (protocolError || !line.trim()) return
+    nonemptyRecordCount += 1
+    if (nonemptyRecordCount > MAX_CLI_EVENTS) {
+      protocolError = new CliProtocolError(
+        'CLI emitted too many nonempty NDJSON records'
+      )
+      stop()
+      return
+    }
     try {
       consume(JSON.parse(line))
     } catch (error) {
       if (error instanceof SyntaxError) {
+        malformedJsonLineCount += 1
         callbacks.onDiagnostic(
           redactAndBoundCliEnvironmentValue(
             `Unparsed CLI output: ${line}`,
@@ -1458,7 +1500,10 @@ export async function runCli(
         )
         return
       }
-      protocolError = error instanceof Error ? error : new Error(String(error))
+      protocolError = new CliProtocolError(
+        error instanceof Error ? error.message : String(error),
+        error
+      )
       stop()
     }
   }
@@ -1471,19 +1516,26 @@ export async function runCli(
     }
     lineBuffer += chunk
     if (Buffer.byteLength(lineBuffer, 'utf8') > MAX_NDJSON_LINE_BYTES) {
-      protocolError = new Error('CLI emitted an oversized JSON line')
+      protocolError = new CliProtocolError(
+        'CLI emitted an oversized JSON line'
+      )
       stop()
       return
     }
     const lines = lineBuffer.split(/\r?\n/)
     lineBuffer = lines.pop() ?? ''
-    for (const line of lines) consumeLine(line)
+    for (const line of lines) {
+      consumeLine(line)
+      if (protocolError) break
+    }
   }
 
   child.stdout.on('data', (raw: Buffer) => {
     stdoutBytes += raw.byteLength
     if (stdoutBytes > MAX_CLI_STDOUT_BYTES) {
-      protocolError = new Error('CLI stdout exceeded the 16 MB limit')
+      protocolError = new CliProtocolError(
+        'CLI stdout exceeded the 16 MB limit'
+      )
       stop()
       return
     }
@@ -1493,7 +1545,9 @@ export async function runCli(
   child.stderr.on('data', (raw: Buffer) => {
     stderrBytes += raw.byteLength
     if (stderrBytes > MAX_CLI_STDERR_BYTES) {
-      protocolError = new Error('CLI stderr exceeded the 16 MB limit')
+      protocolError = new CliProtocolError(
+        'CLI stderr exceeded the 16 MB limit'
+      )
       stop()
       return
     }
@@ -1537,6 +1591,25 @@ export async function runCli(
         if (provider.outputMode === 'ndjson' && lineBuffer.trim()) consumeLine(lineBuffer)
         const finalText = textRedactor.finish()
         emitRedactedText(finalText)
+        if (
+          !protocolError &&
+          provider.outputMode === 'ndjson' &&
+          malformedJsonLineCount > 0 &&
+          parsedStructuredRecordCount === 0
+        ) {
+          protocolError = new CliProtocolError(
+            'CLI emitted malformed JSON without any valid runtime events'
+          )
+        } else if (
+          !protocolError &&
+          provider.outputMode === 'ndjson' &&
+          parsedStructuredRecordCount > 0 &&
+          runtimeEventCount === 0
+        ) {
+          protocolError = new CliProtocolError(
+            'CLI emitted structured JSON without any recognized runtime events'
+          )
+        }
         if (protocolError) {
           reject(protocolError)
           return
@@ -1546,10 +1619,12 @@ export async function runCli(
           resolve()
         } else {
           reject(
-            new Error(
+            new CliProcessExitError(
               `CLI exited ${terminationSignal ? `after ${terminationSignal}` : `with code ${code ?? 'unknown'}`}${
                 stderr.trim() ? ` — ${stderr.trim().slice(-2_000)}` : ''
-              }`
+              }`,
+              code,
+              terminationSignal
             )
           )
         }

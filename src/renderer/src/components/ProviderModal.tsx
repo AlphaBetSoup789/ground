@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Check,
   ChevronRight,
@@ -23,6 +23,7 @@ import type {
   ProviderProfile,
   ProviderTestResult
 } from '../../../shared/types'
+import { providerFailureGuidance } from '../../../shared/provider-failure-guidance'
 import { desktop } from '../lib/desktop'
 import { providerReadiness } from '../lib/provider-readiness'
 import { McpSettingsPane } from './McpSettingsPane'
@@ -31,6 +32,7 @@ import { RecoverySettingsPane } from './RecoverySettingsPane'
 type ApiProviderKind = Exclude<ProviderDraft['kind'], 'cli'>
 export type ProviderConnectionPath = 'hosted' | 'local' | 'cli'
 type CliDetectionStatus = 'pending' | 'succeeded' | 'failed'
+type ProviderSettingsSection = 'providers' | 'mcp' | 'recovery'
 
 interface ApiProviderOption {
   kind: ApiProviderKind
@@ -133,6 +135,27 @@ export function shouldShowLocalServerRecovery(
   )
 }
 
+export interface ProviderTestResultPresentation {
+  readonly title: string
+  readonly detail: string
+  readonly correctiveGuidance?: string
+}
+
+export function providerTestResultPresentation(
+  result: ProviderTestResult
+): ProviderTestResultPresentation {
+  const guidance = result.ok
+    ? undefined
+    : providerFailureGuidance(result.failureKind)
+  return {
+    title: guidance?.title ?? result.title,
+    detail: result.detail,
+    ...(guidance
+      ? { correctiveGuidance: guidance.correctiveGuidance }
+      : {})
+  }
+}
+
 export function providerConnectionPathExplanation(
   selectedPath: ProviderConnectionPath,
   detected: readonly DetectedCli[],
@@ -156,6 +179,81 @@ export function providerConnectionPathExplanation(
     : 'No recognized agent CLI was detected locally. You can still choose an executable that is already installed.'
 }
 
+export interface ProviderTestRequestBinding {
+  readonly token: number
+}
+
+export interface ProviderTestRequestGuard {
+  activate: () => void
+  dispose: () => void
+  invalidate: () => void
+  begin: (
+    draft: ProviderDraft,
+    selectedProviderId: string | undefined,
+    settingsSection: ProviderSettingsSection
+  ) => ProviderTestRequestBinding
+  isCurrent: (
+    request: ProviderTestRequestBinding,
+    draft: ProviderDraft,
+    selectedProviderId: string | undefined,
+    settingsSection: ProviderSettingsSection
+  ) => boolean
+  isLatest: (request: ProviderTestRequestBinding) => boolean
+}
+
+/**
+ * Owns the renderer-only lifetime of provider test requests. The binding is
+ * the exact immutable draft object sent to the main process plus the
+ * selected provider and settings pane. It deliberately does not serialize
+ * API keys or CLI environment values into an additional string.
+ */
+export function createProviderTestRequestGuard(): ProviderTestRequestGuard {
+  let active = false
+  let currentToken = 0
+  let currentContext:
+    | {
+        readonly draft: ProviderDraft
+        readonly selectedProviderId: string | undefined
+        readonly settingsSection: ProviderSettingsSection
+      }
+    | undefined
+
+  return {
+    activate: () => {
+      active = true
+    },
+    dispose: () => {
+      active = false
+      currentToken += 1
+      currentContext = undefined
+    },
+    invalidate: () => {
+      currentToken += 1
+      currentContext = undefined
+    },
+    begin: (draft, selectedProviderId, settingsSection) => {
+      currentContext = {
+        draft,
+        selectedProviderId,
+        settingsSection
+      }
+      return { token: ++currentToken }
+    },
+    isCurrent: (
+      request,
+      draft,
+      selectedProviderId,
+      settingsSection
+    ) =>
+      active &&
+      request.token === currentToken &&
+      currentContext?.draft === draft &&
+      currentContext.selectedProviderId === selectedProviderId &&
+      currentContext.settingsSection === settingsSection,
+    isLatest: (request) => active && request.token === currentToken
+  }
+}
+
 interface ProviderModalProps {
   providers: ProviderProfile[]
   mcpServers: McpServerProfile[]
@@ -175,7 +273,6 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const deleteTriggerRef = useRef<HTMLButtonElement>(null)
   const deleteCancelRef = useRef<HTMLButtonElement>(null)
-  const onCloseRef = useRef(props.onClose)
   const [selectedId, setSelectedId] = useState(initialProvider?.id)
   const [draft, setDraft] = useState<ProviderDraft>(() =>
     providerToDraft(initialProvider)
@@ -187,9 +284,29 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
   const [saving, setSaving] = useState(false)
   const [testResult, setTestResult] = useState<ProviderTestResult>()
   const [confirmDelete, setConfirmDelete] = useState(false)
-  const [settingsSection, setSettingsSection] = useState<
-    'providers' | 'mcp' | 'recovery'
-  >('providers')
+  const [settingsSection, setSettingsSection] =
+    useState<ProviderSettingsSection>('providers')
+  const testRequestGuardRef = useRef<ProviderTestRequestGuard | null>(null)
+  if (!testRequestGuardRef.current) {
+    testRequestGuardRef.current = createProviderTestRequestGuard()
+  }
+  const testRequestGuard = testRequestGuardRef.current
+  const testRequestContextRef = useRef({
+    draft,
+    selectedId,
+    settingsSection
+  })
+  testRequestContextRef.current = { draft, selectedId, settingsSection }
+  const invalidateProviderTest = useCallback((): void => {
+    testRequestGuard.invalidate()
+    setTesting(false)
+    setTestResult(undefined)
+  }, [testRequestGuard])
+  const closeModal = useCallback((): void => {
+    invalidateProviderTest()
+    props.onClose()
+  }, [invalidateProviderTest, props.onClose])
+  const onCloseRef = useRef(closeModal)
 
   const selectedProvider = useMemo(
     () => props.providers.find((provider) => provider.id === selectedId),
@@ -203,6 +320,14 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
         : draft.kind === 'cli'
           ? 'new:cli'
           : 'new:api'
+  const testResultPresentation = testResult
+    ? providerTestResultPresentation(testResult)
+    : undefined
+
+  useEffect(() => {
+    testRequestGuard.activate()
+    return () => testRequestGuard.dispose()
+  }, [testRequestGuard])
 
   useEffect(() => {
     void desktop
@@ -218,8 +343,8 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
   }, [props.onError])
 
   useEffect(() => {
-    onCloseRef.current = props.onClose
-  }, [props.onClose])
+    onCloseRef.current = closeModal
+  }, [closeModal])
 
   useEffect(() => {
     const previouslyFocused = document.activeElement
@@ -268,18 +393,18 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
   }, [confirmDelete])
 
   const selectProvider = (provider: ProviderProfile): void => {
+    invalidateProviderTest()
     setSettingsSection('providers')
     setSelectedId(provider.id)
     setDraft(providerToDraft(provider))
-    setTestResult(undefined)
     setConfirmDelete(false)
   }
 
   const beginNew = (kind: ProviderDraft['kind'], preset?: Partial<ProviderDraft>): void => {
+    invalidateProviderTest()
     setSettingsSection('providers')
     setSelectedId(undefined)
     setDraft({ ...blankDraft(kind), ...preset, kind })
-    setTestResult(undefined)
     setConfirmDelete(false)
   }
 
@@ -292,15 +417,21 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
     beginNew('cli', candidate.draft)
   }
 
+  const selectSettingsSection = (
+    section: Exclude<ProviderSettingsSection, 'providers'>
+  ): void => {
+    invalidateProviderTest()
+    setSettingsSection(section)
+    setConfirmDelete(false)
+  }
+
   const selectMobileSection = (value: string): void => {
     if (value === 'mcp') {
-      setSettingsSection('mcp')
-      setConfirmDelete(false)
+      selectSettingsSection('mcp')
       return
     }
     if (value === 'recovery') {
-      setSettingsSection('recovery')
-      setConfirmDelete(false)
+      selectSettingsSection('recovery')
       return
     }
     if (value === 'new:api') {
@@ -319,20 +450,60 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
   }
 
   const test = async (): Promise<void> => {
+    const request = testRequestGuard.begin(
+      draft,
+      selectedId,
+      settingsSection
+    )
     setTesting(true)
     setTestResult(undefined)
     try {
       const result = await desktop.testProvider(draft)
+      const currentContext = testRequestContextRef.current
+      if (
+        !testRequestGuard.isCurrent(
+          request,
+          currentContext.draft,
+          currentContext.selectedId,
+          currentContext.settingsSection
+        )
+      ) {
+        return
+      }
+      if (result.persisted) {
+        await props.onSaved()
+        const refreshedContext = testRequestContextRef.current
+        if (
+          !testRequestGuard.isCurrent(
+            request,
+            refreshedContext.draft,
+            refreshedContext.selectedId,
+            refreshedContext.settingsSection
+          )
+        ) {
+          return
+        }
+      }
       setTestResult(result)
-      if (result.persisted) await props.onSaved()
     } catch (error) {
-      props.onError(error)
+      const currentContext = testRequestContextRef.current
+      if (
+        testRequestGuard.isCurrent(
+          request,
+          currentContext.draft,
+          currentContext.selectedId,
+          currentContext.settingsSection
+        )
+      ) {
+        props.onError(error)
+      }
     } finally {
-      setTesting(false)
+      if (testRequestGuard.isLatest(request)) setTesting(false)
     }
   }
 
   const save = async (): Promise<void> => {
+    invalidateProviderTest()
     setSaving(true)
     try {
       const provider = await desktop.saveProvider(draft)
@@ -358,6 +529,7 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
       setConfirmDelete(true)
       return
     }
+    invalidateProviderTest()
     try {
       await desktop.deleteProvider(selectedId)
       await props.onSaved()
@@ -371,7 +543,7 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
   }
 
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={props.onClose}>
+    <div className="modal-backdrop" role="presentation" onMouseDown={closeModal}>
       <div
         ref={dialogRef}
         className="settings-modal"
@@ -440,7 +612,7 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
                 settingsSection === 'mcp' ? 'selected' : ''
               }`}
               aria-current={settingsSection === 'mcp' ? 'page' : undefined}
-              onClick={() => setSettingsSection('mcp')}
+              onClick={() => selectSettingsSection('mcp')}
             >
               <span className="provider-nav-icon mcp">
                 <Server size={14} />
@@ -466,7 +638,7 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
               aria-current={
                 settingsSection === 'recovery' ? 'page' : undefined
               }
-              onClick={() => setSettingsSection('recovery')}
+              onClick={() => selectSettingsSection('recovery')}
             >
               <span className="provider-nav-icon recovery">
                 <DatabaseBackup size={14} />
@@ -525,7 +697,7 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
                   ref={closeButtonRef}
                   className="icon-button"
                   type="button"
-                  onClick={props.onClose}
+                  onClick={closeModal}
                   aria-label="Close settings"
                 >
                   <X size={17} />
@@ -553,7 +725,7 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
                   ref={closeButtonRef}
                   className="icon-button"
                   type="button"
-                  onClick={props.onClose}
+                  onClick={closeModal}
                   aria-label="Close settings"
                 >
                   <X size={17} />
@@ -581,7 +753,7 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
               ref={closeButtonRef}
               className="icon-button"
               type="button"
-              onClick={props.onClose}
+              onClick={closeModal}
               aria-label="Close provider settings"
             >
               <X size={17} />
@@ -610,19 +782,19 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
                 draft={draft}
                 setDraft={setDraft}
                 selected={selectedProvider}
-                onChanged={() => setTestResult(undefined)}
+                onChanged={invalidateProviderTest}
               />
             ) : (
               <CliProviderForm
                 draft={draft}
                 setDraft={setDraft}
                 selected={selectedProvider}
-                onChanged={() => setTestResult(undefined)}
+                onChanged={invalidateProviderTest}
                 onError={props.onError}
               />
             )}
 
-            {testResult && (
+            {testResult && testResultPresentation && (
               <div
                 className={`test-result ${testResult.ok ? 'success' : 'error'}`}
                 role={testResult.ok ? 'status' : 'alert'}
@@ -636,8 +808,13 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
                   )}
                 </span>
                 <div>
-                  <strong>{testResult.title}</strong>
-                  <p>{testResult.detail}</p>
+                  <strong>{testResultPresentation.title}</strong>
+                  <p>{testResultPresentation.detail}</p>
+                  {testResultPresentation.correctiveGuidance && (
+                    <p className="provider-failure-correction">
+                      {testResultPresentation.correctiveGuidance}
+                    </p>
+                  )}
                   {shouldShowLocalServerRecovery(draft, testResult) && (
                     <LocalServerRecovery
                       detected={detected}
@@ -658,7 +835,7 @@ export function ProviderModal(props: ProviderModalProps): React.JSX.Element {
                           type="button"
                           key={model}
                           onClick={() => {
-                            setTestResult(undefined)
+                            invalidateProviderTest()
                             setDraft((current) => ({ ...current, model }))
                           }}
                         >

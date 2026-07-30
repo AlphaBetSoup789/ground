@@ -4,6 +4,7 @@ import type {
   DesktopRunEvent,
   DesktopRunEventEnvelope,
   DesktopTask,
+  DesktopTaskItem,
   ProviderDraft,
   ProviderProfile,
   TaskPatch,
@@ -239,27 +240,28 @@ const mockApi: DesktopApi = {
       runStatus: 'idle',
       createdAt: forkedAt,
       updatedAt: forkedAt,
-      items: source.items.map((item) =>
-        item.kind === 'message'
-          ? {
-              ...clone(item),
-              id: crypto.randomUUID(),
-              runId: item.runId ? mappedId(runIds, item.runId) : undefined
-            }
-          : {
-              ...clone(item),
-              id: crypto.randomUUID(),
-              runId: mappedId(runIds, item.runId),
-              status:
-                item.status === 'pending' || item.status === 'running'
-                  ? 'error'
-                  : item.status,
-              approvalId: undefined,
-              callId: item.callId
-                ? mappedId(callIds, item.callId)
-                : undefined
-            }
-      )
+      items: source.items.map((item): DesktopTaskItem => {
+        if (item.kind === 'message') {
+          return {
+            ...clone(item),
+            id: crypto.randomUUID(),
+            runId: item.runId ? mappedId(runIds, item.runId) : undefined
+          }
+        }
+        return {
+          ...clone(item),
+          id: crypto.randomUUID(),
+          runId: mappedId(runIds, item.runId),
+          status:
+            item.status === 'pending' || item.status === 'running'
+              ? 'error'
+              : item.status,
+          approvalId: undefined,
+          callId: item.callId
+            ? mappedId(callIds, item.callId)
+            : undefined
+        } as DesktopTaskItem
+      })
     }
     mockSnapshot.tasks.unshift(task)
     mockSnapshot.settings.selectedTaskId = task.id
