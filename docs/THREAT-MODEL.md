@@ -147,14 +147,22 @@ crosses the ordinary provider-egress boundary only after the current run ends an
 the user explicitly sends it. A failed start restores submitted text only if no
 newer draft occupies that exact task.
 
+Failed-run retry preparation requires the current retained `Run failed` activity
+to belong to the latest retained non-imported run, then selects only that run's
+latest non-imported user message. It revalidates that exact source occurrence on
+activation and writes only to an empty draft keyed by the source task. It excludes
+outcome-unknown interrupted work, performs no IPC or automatic replay, and still
+requires explicit Send.
+
 ## Implemented controls
 
 - Packaged renderer content is local; development origins are loopback-only.
 - Context isolation, restricted navigation, a narrow preload bridge, and strict IPC
   caller validation reduce renderer authority.
-- A 16-scenario Playwright-over-Electron suite drives the real built renderer’s
+- A 17-scenario Playwright-over-Electron suite drives the real built renderer’s
   command and task-search keyboard/focus behavior, including narrow-sidebar focus,
-  form validation, task-local and active-run draft preparation, reviewed handoffs,
+  form validation, task-local, active-run, and failed-run draft preparation,
+  reviewed handoffs,
   structured Git review and request-bound finished-run refresh, cancellation,
   archive/search, responsive layout, forced colors, and reduced-motion behavior.
   It deliberately uses the browser-preview

@@ -324,6 +324,8 @@ Requirements: GR-3, GR-8.1
   complete Git hunk—into an editable draft without starting a run.
 - Let a user prepare the next task-local prompt while a run or approval is active
   without queueing, steering, or sending it implicitly.
+- Let a user recover an exact retained failed request into an empty editable
+  task-local draft without implying automatic or side-effect-safe replay.
 - Bind delayed selection, handoff, and focus work to the exact current task and
   source revision so stale renderer work cannot redirect a draft or selection.
 - Keep every prompt handoff visibly editable and require a separate explicit Send
@@ -339,6 +341,9 @@ Acceptance gate:
 - Context-to-draft actions preserve existing text, refuse incomplete or oversized
   input, and cannot create a user message, run, approval, tool call, or provider
   request by themselves.
+- Failed-run recovery excludes imported history and outcome-unknown interrupted
+  work, never replaces an occupied draft, and revalidates the exact run/message
+  source before preparing text.
 - Input-method composition, stale async completion, responsive layout changes,
   and modal focus changes have renderer interaction evidence.
 

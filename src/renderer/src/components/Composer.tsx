@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react'
 import {
   ArrowUp,
   FolderPlus,
+  RotateCcw,
   ShieldCheck,
   Square,
   TerminalSquare
@@ -11,6 +12,7 @@ import type {
   ProviderProfile,
   RunStatus
 } from '../../../shared/types'
+import type { FailedRunRetrySource } from '../lib/failed-run-retry'
 
 interface ComposerProps {
   draft: string
@@ -18,9 +20,11 @@ interface ComposerProps {
   onRestoreDraft: (value: string) => void
   task: DesktopTask
   provider?: ProviderProfile
+  failedRunRetry?: FailedRunRetrySource
   disabled?: boolean
   sendBlocked?: boolean
   onChooseWorkspace: () => void
+  onPrepareFailedRunRetry?: (source: FailedRunRetrySource) => void
   onSend: (prompt: string) => Promise<void>
   onStop: () => Promise<void>
 }
@@ -160,6 +164,7 @@ export function shouldRestoreFailedSendFocus(input: {
 
 export function Composer(props: ComposerProps): React.JSX.Element {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const failedRunRetry = props.failedRunRetry
   const pendingStartsRef = useRef(new Map<string, PendingComposerStart>())
   const latestStartRequestByTaskRef = useRef(new Map<string, number>())
   const nextStartRequestRef = useRef(0)
@@ -177,6 +182,27 @@ export function Composer(props: ComposerProps): React.JSX.Element {
     sendBlocked: Boolean(props.sendBlocked),
     startPending
   })
+  const retryDraftOccupied = props.draft.length > 0
+  const retryDraftMatchesSource =
+    failedRunRetry !== undefined &&
+    props.draft === failedRunRetry.userContent
+  const retryDisabled =
+    retryDraftOccupied ||
+    Boolean(props.disabled) ||
+    Boolean(props.sendBlocked) ||
+    startPending
+  const retryDetail = startPending
+    ? 'Ground is starting this request.'
+    : retryDraftMatchesSource
+      ? 'The failed request is ready in the draft. Review or edit it, then Send when ready.'
+      : retryDraftOccupied
+        ? 'Your current draft is preserved. Clear it before preparing this retry.'
+        : 'The failed run may have made changes. Copy its request into a draft to review; nothing is sent now.'
+  const retryTitle = retryDraftMatchesSource
+    ? 'The failed request is ready in this task draft'
+    : retryDraftOccupied
+      ? 'Clear the current draft before preparing this retry'
+      : 'Copy the failed request into this task draft'
 
   useEffect(() => {
     const textarea = textareaRef.current
@@ -310,6 +336,30 @@ export function Composer(props: ComposerProps): React.JSX.Element {
 
   return (
     <div className="composer-wrap">
+      {failedRunRetry && props.onPrepareFailedRunRetry && (
+        <section
+          className="composer-retry-notice"
+          aria-label="Failed request recovery"
+        >
+          <span className="composer-retry-icon" aria-hidden="true">
+            <RotateCcw size={14} />
+          </span>
+          <span className="composer-retry-copy">
+            <strong>Request failed</strong>
+            <span>{retryDetail}</span>
+          </span>
+          <button
+            type="button"
+            disabled={retryDisabled}
+            title={retryTitle}
+            onClick={() =>
+              props.onPrepareFailedRunRetry?.(failedRunRetry)
+            }
+          >
+            {retryDraftMatchesSource ? 'Prepared' : 'Prepare retry'}
+          </button>
+        </section>
+      )}
       {needsWorkspace && (
         <button
           className="composer-notice"

@@ -590,6 +590,181 @@ try {
     assert.equal(await composer.inputValue(), 'Auth-flow-specific working draft')
   })
 
+  await run('failed requests return to an editable draft before explicit retry', async () => {
+    const composer = page.getByRole('textbox', { name: 'Message' })
+    const userMessages = page.locator('.message-user')
+    const initialUserMessageCount = await userMessages.count()
+    const failedPrompt = 'Trigger deterministic preview failure'
+
+    await composer.fill(failedPrompt)
+    await page.getByRole('button', { name: 'Send message' }).click()
+    const retry = page.getByRole('button', { name: 'Prepare retry' })
+    await retry.waitFor()
+    assert.equal(
+      await userMessages.count(),
+      initialUserMessageCount + 1,
+      'the failed preview run should retain exactly one accepted user request'
+    )
+    assert.equal(
+      await composer.inputValue(),
+      '',
+      'a provider failure must not silently restore an accepted request'
+    )
+    await page.getByText(
+      'The failed run may have made changes. Copy its request into a draft to review; nothing is sent now.',
+      { exact: true }
+    ).waitFor()
+
+    const settingsButton = page.getByRole('button', {
+      name: 'Providers & settings'
+    })
+    await retry.evaluate(async (button) => {
+      const buttons = Array.from(document.querySelectorAll('button'))
+      const otherTask = buttons.find(
+        (candidate) =>
+          candidate.classList.contains('task-row') &&
+          candidate.textContent?.includes('Explain the auth flow')
+      )
+      const focusTarget = buttons.find((candidate) =>
+        candidate.textContent?.includes('Providers & settings')
+      )
+      if (
+        !(button instanceof HTMLButtonElement) ||
+        !(otherTask instanceof HTMLButtonElement) ||
+        !(focusTarget instanceof HTMLButtonElement)
+      ) {
+        throw new Error('Expected retry race controls')
+      }
+
+      const realRequestAnimationFrame =
+        window.requestAnimationFrame.bind(window)
+      let retryFocusCallback
+      window.requestAnimationFrame = (callback) => {
+        retryFocusCallback = callback
+        return 2_147_000_000
+      }
+      try {
+        button.click()
+      } finally {
+        window.requestAnimationFrame = realRequestAnimationFrame
+      }
+      if (!retryFocusCallback) {
+        throw new Error('Expected delayed retry focus callback')
+      }
+
+      otherTask.click()
+      await new Promise((resolve) =>
+        realRequestAnimationFrame(() =>
+          realRequestAnimationFrame(resolve)
+        )
+      )
+      focusTarget.focus()
+      retryFocusCallback(performance.now())
+    })
+    await waitForValue(
+      () => page.getByLabel('Task title').inputValue(),
+      'Explain the auth flow',
+      'an immediate task switch should select only the requested task'
+    )
+    assert.equal(
+      await composer.inputValue(),
+      '',
+      'retry preparation must not write into the newly selected task'
+    )
+    assert.equal(
+      await settingsButton.evaluate(
+        (element) => element === document.activeElement
+      ),
+      true,
+      'a stale retry focus callback must not take focus after a task switch'
+    )
+    await page
+      .getByRole('button', { name: /Refine the project dashboard/ })
+      .click()
+    assert.equal(
+      await composer.inputValue(),
+      failedPrompt,
+      'the retry race should retain the prepared draft only on its source task'
+    )
+    await page.getByText(
+      'The failed request is ready in the draft. Review or edit it, then Send when ready.',
+      { exact: true }
+    ).waitFor()
+    assert.equal(
+      await page.getByRole('button', { name: 'Prepared' }).isDisabled(),
+      true,
+      'an exact prepared retry should expose a truthful completed state'
+    )
+
+    const newerDraft = '  Preserve this newer local draft exactly.  '
+    await composer.fill(newerDraft)
+    assert.equal(
+      await retry.isDisabled(),
+      true,
+      'retry preparation must not replace a nonempty draft'
+    )
+    await page.getByText(
+      'Your current draft is preserved. Clear it before preparing this retry.',
+      { exact: true }
+    ).waitFor()
+    assert.equal(await composer.inputValue(), newerDraft)
+
+    await composer.fill('')
+    await retry.focus()
+    await retry.press('Enter')
+    await waitForValue(
+      () => composer.inputValue(),
+      failedPrompt,
+      'retry should copy the exact failed request into the editable draft'
+    )
+    await waitForValue(
+      () => composer.evaluate((element) => element === document.activeElement),
+      true,
+      'retry preparation should focus the exact source-task composer'
+    )
+    await page.getByText(
+      'The failed request is ready in the draft. Review or edit it, then Send when ready.',
+      { exact: true }
+    ).waitFor()
+    assert.equal(
+      await userMessages.count(),
+      initialUserMessageCount + 1,
+      'preparing the retry must not add another user message'
+    )
+    assert.equal(
+      await page.getByRole('button', { name: 'Stop run' }).count(),
+      0,
+      'preparing the retry must not start another run'
+    )
+
+    await page.getByRole('button', { name: /Explain the auth flow/ }).click()
+    assert.equal(
+      await composer.inputValue(),
+      '',
+      'the prepared retry must not leak into another task'
+    )
+    await page
+      .getByRole('button', { name: /Refine the project dashboard/ })
+      .click()
+    assert.equal(
+      await composer.inputValue(),
+      failedPrompt,
+      'returning to the failed task should restore its exact prepared draft'
+    )
+
+    const reviewedPrompt = `${failedPrompt}\n\nUse the reviewed retry path.`
+    await composer.fill(reviewedPrompt)
+    await page.getByRole('button', { name: 'Send message' }).click()
+    await page.getByText(reviewedPrompt, { exact: true }).waitFor()
+    await page.getByRole('button', { name: 'Stop run' }).waitFor()
+    assert.equal(
+      await userMessages.count(),
+      initialUserMessageCount + 2,
+      'only the later explicit Send should create the retried user message'
+    )
+    await page.getByRole('button', { name: 'Stop run' }).click()
+  })
+
   await run('active runs keep exact next drafts local until a later explicit send', async () => {
     const composer = page.locator('#task-message-composer')
     const userMessages = page.locator('.message-user')

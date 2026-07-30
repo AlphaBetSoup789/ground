@@ -25,6 +25,10 @@ import type {
   TaskExportFormat,
   TaskPatch
 } from '../../../shared/types'
+import {
+  failedRunRetrySource,
+  type FailedRunRetrySource
+} from '../lib/failed-run-retry'
 import { providerReadiness } from '../lib/provider-readiness'
 import type { AskToAgentHandoffSource } from '../lib/ask-agent-handoff'
 import { Composer } from './Composer'
@@ -62,6 +66,7 @@ interface TaskViewProps {
   onExportTask: (format: TaskExportFormat) => void
   onDeleteTask: () => void
   onAddHunkToPrompt: (taskId: string, block: string) => void
+  onPrepareFailedRunRetry: (source: FailedRunRetrySource) => void
   onTaskCreated: (task: DesktopTask) => void
   onWorkspaceTasksChanged: () => void
   onError: (error: unknown) => void
@@ -75,6 +80,7 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
   const taskMenuTriggerRef = useRef<HTMLButtonElement>(null)
   const provider = props.providers.find((candidate) => candidate.id === props.task.providerId)
   const readiness = provider ? providerReadiness(provider) : undefined
+  const retrySource = failedRunRetrySource(props.task)
 
   useEffect(() => {
     setTaskMenuOpen(false)
@@ -513,7 +519,9 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
         provider={provider}
         disabled={isArchived}
         sendBlocked={props.askToAgentPending}
+        failedRunRetry={retrySource}
         onChooseWorkspace={props.onChooseWorkspace}
+        onPrepareFailedRunRetry={props.onPrepareFailedRunRetry}
         onSend={props.onStartRun}
         onStop={props.onStopRun}
       />

@@ -113,6 +113,9 @@ conformance runner; npm publication remains a separate maintainer release step.
 - Per-task unsent composer drafts while Ground is open, including draft-only
   preparation during a run or approval wait, plus a keyboard command palette for
   common workspace and provider actions
+- Reviewable failed-run recovery that copies the exact retained request into an
+  empty editable task-local draft without automatically retrying or replacing
+  newer text
 - A bounded, atomic local state document plus three rotating last-known-good
   snapshots, corruption quarantine, an in-app recovery browser, credential-free
   export, and native-confirmed retained-snapshot restore that drains and seals
@@ -161,9 +164,13 @@ current app process; it is not written to durable task state. While a task is
 running or waiting for approval, its textarea remains editable so the next prompt
 can be prepared. That text is not queued, sent, or used to steer the active run;
 the Stop control remains the only run action and `Ctrl/⌘ + Enter` is inert until
-the run finishes. Responsive layouts, forced-color styles, reduced motion, and
-focus-visible states are implemented, but the project does not yet claim a
-complete cross-platform accessibility audit.
+the run finishes. When the latest retained run ends with **Run failed**, **Prepare
+retry** can copy only that run's exact non-imported user message into an empty
+task-local draft. Existing draft bytes are preserved, outcome-unknown **Run
+interrupted** recovery is excluded, and no provider or runtime is contacted until
+the user reviews and explicitly sends the draft. Responsive layouts, forced-color
+styles, reduced motion, and focus-visible states are implemented, but the project
+does not yet claim a complete cross-platform accessibility audit.
 
 `Ctrl/⌘ + K` opens the sidebar when necessary and focuses the search field for the
 current active or archived scope. In that field, Enter opens the first current
@@ -703,12 +710,13 @@ dependencies.
 `test:e2e:renderer` launches the real built React renderer in Electron with the
 explicit browser-preview desktop mock and drives it through Playwright. It covers
 command-palette focus/navigation, keyboard-complete task search and narrow-sidebar
-focus, native HTML provider-form validation, task-local and active-run draft
-preparation, Ask-to-Agent and reviewed-hunk draft handoffs, structured Git diff
-navigation and finished-run refresh, mock send/cancel, archive/search, responsive
+focus, native HTML provider-form validation, task-local, active-run, and
+failed-run draft preparation, Ask-to-Agent and reviewed-hunk draft handoffs,
+structured Git diff navigation and finished-run refresh, mock send/cancel,
+archive/search, responsive
 settings, reduced-motion and forced-color styles, plus the
 local-template/refused-connection recovery path into a detected CLI. The current
-suite contains 16 scenarios. CI runs it on macOS, Windows, and Linux/Xvfb. It does
+suite contains 17 scenarios. CI runs it on macOS, Windows, and Linux/Xvfb. It does
 not load the production preload/main process,
 invoke native permissions, use a real provider, or replace screen-reader/manual
 accessibility testing.

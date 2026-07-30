@@ -18,6 +18,8 @@ const previewBuild =
 const previewGitReadControlEvent =
   'ground:preview-git-read-control'
 const previewGitReadEvent = 'ground:preview-git-read'
+const previewFailedRunPrompt =
+  'Trigger deterministic preview failure'
 const listeners = new Set<(event: DesktopRunEventEnvelope) => void>()
 const terminalListeners = new Set<(event: TerminalEvent) => void>()
 const mockTerminals = new Map<string, TerminalSessionInfo>()
@@ -692,6 +694,41 @@ const mockApi: DesktopApi = {
     task.runStatus = 'running'
     emit({ type: 'run-started', taskId, runId })
     emit({ type: 'item-added', taskId, runId, item: userItem })
+    if (prompt === previewFailedRunPrompt) {
+      scheduleMockRun(
+        run,
+        () => {
+          const failure: DesktopTaskItem = {
+            id: crypto.randomUUID(),
+            kind: 'activity',
+            runId,
+            activityType: 'error',
+            title: 'Run failed',
+            detail:
+              'Deterministic browser-preview failure for recovery evidence.',
+            status: 'error',
+            createdAt: new Date().toISOString()
+          }
+          task.items.push(failure)
+          mockRuns.delete(taskId)
+          task.runStatus = 'failed'
+          emit({
+            type: 'item-added',
+            taskId,
+            runId,
+            item: failure
+          })
+          emit({
+            type: 'run-error',
+            taskId,
+            runId,
+            message: failure.detail ?? 'Preview run failed'
+          })
+        },
+        250
+      )
+      return { runId }
+    }
     const assistantId = crypto.randomUUID()
     const assistant = {
       id: assistantId,

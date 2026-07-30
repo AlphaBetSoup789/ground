@@ -598,7 +598,13 @@ is neither queued nor sent to steer the active run; a later turn still requires 
 explicit Send through the ordinary run-start boundary. The unresolved initial
 start request and archived tasks keep the textarea disabled. A failed start
 restores its submitted text only when that exact source task still has no newer
-draft.
+draft. A retained terminal `Run failed` item can separately expose a renderer-only
+retry source only when it belongs to the latest retained non-imported run and the
+latest non-imported user message shares its exact run identity. Activation
+rederives that occurrence from the latest snapshot, then uses the same empty-only
+draft restore rule. Outcome-unknown `Run interrupted` markers are excluded.
+Delayed focus also requires the same task, selection epoch, current source,
+composer identity, enabled state, and exact prepared value.
 
 A global command palette provides filterable keyboard actions, traps/restores
 focus, and does not interpret command keys while an input method is composing.
@@ -614,12 +620,12 @@ reduced-motion rules are part of the public-preview baseline; they are not a cla
 complete cross-platform accessibility certification.
 
 A Playwright-over-Electron suite drives that real built renderer with the
-explicit browser-preview desktop mock. Its 16 scenarios cover palette and
+explicit browser-preview desktop mock. Its 17 scenarios cover palette and
 task-search keyboard/focus, including narrow-sidebar focus, provider-form labels
 and Chromium constraint validation, local-template/refused-connection recovery
-into a detected CLI, task-local and active-run draft preparation, Ask-to-Agent and
-reviewed-hunk handoffs, structured Git diff navigation and request-bound
-finished-run refresh including failure/retry and late-task isolation,
+into a detected CLI, task-local, active-run, and failed-run draft preparation,
+Ask-to-Agent and reviewed-hunk handoffs, structured Git diff navigation and
+request-bound finished-run refresh including failure/retry and late-task isolation,
 deterministic send/cancel,
 archive/search, responsive settings, reduced-motion CSS, and forced-color
 connection-path selection. It does not load production main/preload authority or

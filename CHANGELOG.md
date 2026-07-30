@@ -77,6 +77,11 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
 - Draft-only prompt preparation while a task is running or awaiting approval.
   Stop remains the only active-run action, the Send shortcut is inert, task
   switching preserves exact drafts, and nothing queues or steers the current run.
+- Failed-run recovery that binds a `Run failed` activity only to the latest
+  retained non-imported run and its exact user request, prepares that text only
+  into an empty task-local draft, and still requires a separate explicit Send.
+  Outcome-unknown interrupted runs and occupied drafts are never replaced or
+  replayed.
 - Three rotating validated state snapshots, automatic fallback from a corrupt or
   missing primary, unreadable-file quarantine, an in-app recovery browser,
   credential-free native export, and native-confirmed retained-snapshot restore.
@@ -151,12 +156,12 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
 - Add a keyboard command palette, task-local process-memory composer drafts,
   near-bottom-only timeline following, and bounded batched screen-reader
   announcements for streamed assistant text.
-- Expand the Playwright-over-Electron renderer interaction suite to sixteen
+- Expand the Playwright-over-Electron renderer interaction suite to seventeen
   scenarios covering command-palette and task-search keyboard/focus behavior,
   accessible provider-form validation, truthful local-provider refusal recovery
-  into a detected CLI, task-local and active-run draft preparation, Ask-to-Agent
-  and reviewed-hunk prompt handoffs, finished-run Git refresh with review-position
-  retention, failure/retry, and late-task isolation, deterministic send
+  into a detected CLI, task-local, active-run, and failed-run draft preparation,
+  Ask-to-Agent and reviewed-hunk prompt handoffs, finished-run Git refresh with
+  review-position retention, failure/retry, and late-task isolation, deterministic send
   cancellation, archive/search, responsive settings and sidebar selection,
   reduced-motion CSS, and forced-color connection-path selection. It uses the
   explicit browser-preview desktop mock and is not

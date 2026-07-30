@@ -2,6 +2,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type { DesktopTask, ProviderProfile } from '../../../shared/types'
+import type { FailedRunRetrySource } from '../lib/failed-run-retry'
 import {
   Composer,
   acceptComposerStart,
@@ -42,16 +43,25 @@ const provider: ProviderProfile = {
   updatedAt: '2026-07-30T12:00:00.000Z'
 }
 
-function renderComposer(currentTask: DesktopTask, disabled = false): string {
+function renderComposer(
+  currentTask: DesktopTask,
+  disabled = false,
+  options?: {
+    draft?: string
+    failedRunRetry?: FailedRunRetrySource
+  }
+): string {
   return renderToStaticMarkup(
     createElement(Composer, {
-      draft: 'Prepare the next turn',
+      draft: options?.draft ?? 'Prepare the next turn',
       onDraftChange: () => undefined,
       onRestoreDraft: () => undefined,
       task: currentTask,
       provider,
+      failedRunRetry: options?.failedRunRetry,
       disabled,
       onChooseWorkspace: () => undefined,
+      onPrepareFailedRunRetry: () => undefined,
       onSend: async () => undefined,
       onStop: async () => undefined
     })
@@ -221,5 +231,92 @@ describe('composer active-run drafting', () => {
         focusRemainsInComposer: false
       })
     ).toBe(false)
+  })
+
+  it('offers failed-run recovery as an editable unsent draft action', () => {
+    const source: FailedRunRetrySource = {
+      taskId: 'failed',
+      runId: 'run',
+      failureItemId: 'failure',
+      failureItemIndex: 1,
+      userMessageId: 'user',
+      userMessageIndex: 0,
+      userContent: 'Retry exactly'
+    }
+    const markup = renderComposer(
+      task('failed', 'failed'),
+      false,
+      {
+        draft: '',
+        failedRunRetry: source
+      }
+    )
+
+    expect(markup).toContain('aria-label="Failed request recovery"')
+    expect(markup).toContain('Request failed')
+    expect(markup).toContain('Prepare retry')
+    expect(markup).toContain(
+      'The failed run may have made changes. Copy its request into a draft to review; nothing is sent now.'
+    )
+    expect(markup).toContain(
+      '<button type="button" title="Copy the failed request into this task draft">Prepare retry</button>'
+    )
+  })
+
+  it('describes an exact failed request already in the draft as ready to review', () => {
+    const source: FailedRunRetrySource = {
+      taskId: 'failed',
+      runId: 'run',
+      failureItemId: 'failure',
+      failureItemIndex: 1,
+      userMessageId: 'user',
+      userMessageIndex: 0,
+      userContent: 'Retry exactly'
+    }
+    const markup = renderComposer(
+      task('failed', 'failed'),
+      false,
+      {
+        draft: source.userContent,
+        failedRunRetry: source
+      }
+    )
+
+    expect(markup).toContain(
+      'The failed request is ready in the draft. Review or edit it, then Send when ready.'
+    )
+    expect(markup).toContain(
+      '<button type="button" disabled="" title="The failed request is ready in this task draft">Prepared</button>'
+    )
+    expect(markup).not.toContain(
+      'Clear it before preparing this retry.'
+    )
+  })
+
+  it('preserves an occupied failed-task draft instead of offering replacement', () => {
+    const markup = renderComposer(
+      task('failed', 'failed'),
+      false,
+      {
+        draft: '   ',
+        failedRunRetry: {
+          taskId: 'failed',
+          runId: 'run',
+          failureItemId: 'failure',
+          failureItemIndex: 1,
+          userMessageId: 'user',
+          userMessageIndex: 0,
+          userContent: 'Retry exactly'
+        }
+      }
+    )
+    const retryButton = markup.match(
+      /<button[^>]*disabled=""[^>]*>Prepare retry<\/button>/u
+    )
+
+    expect(retryButton).toBeDefined()
+    expect(markup).toContain(
+      'Your current draft is preserved. Clear it before preparing this retry.'
+    )
   })
 })

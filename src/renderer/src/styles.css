@@ -2019,6 +2019,74 @@ kbd {
   font-weight: 650;
 }
 
+.composer-retry-notice {
+  display: flex;
+  width: calc(100% - 20px);
+  min-height: 48px;
+  align-items: center;
+  gap: 9px;
+  margin: 0 auto 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(239, 141, 132, 0.16);
+  border-radius: 9px;
+  color: #b8b2a7;
+  background: rgba(239, 141, 132, 0.045);
+}
+
+.composer-retry-icon {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  flex: 0 0 25px;
+  place-items: center;
+  border-radius: 7px;
+  color: var(--red);
+  background: rgba(239, 141, 132, 0.08);
+}
+
+.composer-retry-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.composer-retry-copy strong {
+  color: #d8d6cc;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.composer-retry-copy > span {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.composer-retry-notice > button {
+  min-height: 29px;
+  flex: 0 0 auto;
+  padding: 0 10px;
+  border: 1px solid rgba(239, 141, 132, 0.18);
+  border-radius: 7px;
+  color: #d9d7cd;
+  font-size: 10px;
+  font-weight: 620;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.composer-retry-notice > button:hover:not(:disabled) {
+  border-color: rgba(239, 141, 132, 0.34);
+  background: rgba(239, 141, 132, 0.08);
+}
+
+.composer-retry-notice > button:disabled {
+  color: #676a61;
+  border-color: var(--border);
+  background: rgba(255, 255, 255, 0.018);
+}
+
 /* Workspace panels */
 
 .workspace-panel {
@@ -6474,7 +6542,8 @@ kbd {
 .message-author,
 .deny-button,
 .approve-button,
-.composer-notice {
+.composer-notice,
+.composer-retry-notice {
   font-size: 12px;
 }
 
@@ -7013,6 +7082,16 @@ kbd,
     width: calc(100% - 24px);
   }
 
+  .composer-retry-notice {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .composer-retry-notice > button {
+    width: 100%;
+    margin-left: 34px;
+  }
+
   .modal-backdrop {
     padding: 14px;
   }
@@ -7225,7 +7304,9 @@ kbd,
   .git-diff-show-more,
   .git-diff-hunk-navigation button,
   .ask-agent-handoff,
-  .ask-agent-handoff button {
+  .ask-agent-handoff button,
+  .composer-retry-notice,
+  .composer-retry-notice > button {
     border: 1px solid ButtonText;
   }
 

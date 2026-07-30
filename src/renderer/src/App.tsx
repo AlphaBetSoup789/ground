@@ -40,6 +40,12 @@ import {
   shouldFocusDiffFollowupComposer
 } from './lib/diff-followup'
 import {
+  prepareFailedRunRetryDraft,
+  shouldFocusFailedRunRetryComposer,
+  taskMatchesFailedRunRetry,
+  type FailedRunRetrySource
+} from './lib/failed-run-retry'
+import {
   preserveNewerTaskSelection,
   selectTaskInSnapshot,
   type TaskSelectionRequest
@@ -626,6 +632,50 @@ export default function App(): React.JSX.Element {
     []
   )
 
+  const prepareFailedRunRetry = useCallback(
+    (source: FailedRunRetrySource): void => {
+      const latestTask = snapshotRef.current?.tasks.find(
+        (task) => task.id === source.taskId
+      )
+      if (!taskMatchesFailedRunRetry(latestTask, source)) return
+
+      setTaskDrafts((current) =>
+        prepareFailedRunRetryDraft(current, latestTask, source)
+      )
+      if (selectedTaskIdRef.current !== source.taskId) return
+      const selectionEpoch = selectedTaskEpochRef.current
+      window.requestAnimationFrame(() => {
+        const currentTask = snapshotRef.current?.tasks.find(
+          (task) => task.id === source.taskId
+        )
+        const composer =
+          document.querySelector<HTMLTextAreaElement>(
+            '#task-message-composer'
+          )
+        if (
+          composer &&
+          shouldFocusFailedRunRetryComposer({
+            sourceTaskId: source.taskId,
+            requestedSelectionEpoch: selectionEpoch,
+            selectedTaskId: selectedTaskIdRef.current,
+            currentSelectionEpoch: selectedTaskEpochRef.current,
+            sourceStillCurrent: taskMatchesFailedRunRetry(
+              currentTask,
+              source
+            ),
+            composerTaskId: composer.dataset.taskId,
+            composerDisabled: composer.disabled,
+            composerValue: composer.value,
+            expectedDraft: source.userContent
+          })
+        ) {
+          composer.focus()
+        }
+      })
+    },
+    []
+  )
+
   const acceptCreatedTask = useCallback((task: DesktopTask) => {
     setSnapshot((current) =>
       current
@@ -1034,6 +1084,7 @@ export default function App(): React.JSX.Element {
             onExportTask={(format) => void exportTask(format)}
             onDeleteTask={() => void deleteTask()}
             onAddHunkToPrompt={addHunkToPrompt}
+            onPrepareFailedRunRetry={prepareFailedRunRetry}
             onTaskCreated={acceptCreatedTask}
             onWorkspaceTasksChanged={() => void refresh()}
             onError={showError}
