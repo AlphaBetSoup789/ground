@@ -612,9 +612,9 @@ export class RunManager {
     ) {
       throw new Error('This task already has a run in progress')
     }
-    if (taskHasStartedManagedExecution(task)) {
+    if (taskHasUnresolvedManagedExecution(task)) {
       throw new Error(
-        'This task has a managed action with an unresolved outcome. Restart Ground to recover it before starting another run.'
+        'This task has a managed action with an unresolved outcome. Resolve its recovery state before starting another run.'
       )
     }
     const provider = this.store.getProvider(task.providerId)
@@ -718,9 +718,9 @@ export class RunManager {
         if (mutable.archivedAt) {
           throw new Error('Unarchive this task before starting a run')
         }
-        if (taskHasStartedManagedExecution(mutable)) {
+        if (taskHasUnresolvedManagedExecution(mutable)) {
           throw new Error(
-            'This task has a managed action with an unresolved outcome. Restart Ground to recover it before starting another run.'
+            'This task has a managed action with an unresolved outcome. Resolve its recovery state before starting another run.'
           )
         }
         mutable.items.push(userMessage)
@@ -771,9 +771,9 @@ export class RunManager {
     if (task.archivedAt) {
       throw new Error('Unarchive this task before starting a run')
     }
-    if (taskHasStartedManagedExecution(task)) {
+    if (taskHasUnresolvedManagedExecution(task)) {
       throw new Error(
-        'This task has a managed action with an unresolved outcome. Restart Ground to recover it before starting another run.'
+        'This task has a managed action with an unresolved outcome. Resolve its recovery state before starting another run.'
       )
     }
     if (task.providerId !== expected.providerId) {
@@ -2767,11 +2767,12 @@ function buildModelConversation(task: Task): ConversationItem[] {
   )
 }
 
-function taskHasStartedManagedExecution(task: Readonly<Task>): boolean {
+function taskHasUnresolvedManagedExecution(task: Readonly<Task>): boolean {
   return task.items.some(
     (item) =>
       item.kind === 'activity' &&
-      item.managedExecution?.phase === 'started'
+      (item.managedExecution?.phase === 'started' ||
+        item.managedExecution?.phase === 'uncertain')
   )
 }
 

@@ -769,6 +769,136 @@ describe('RunManager model runtime', () => {
     ).toBe(false)
   })
 
+  it('blocks a new run for a recovered approved uncertain execution', async () => {
+    const run = await harness([])
+    await run.store.mutateTask(run.taskId, (task) => {
+      task.runStatus = 'failed'
+      task.items.push({
+        id: 'recovered-approved-operation',
+        kind: 'activity',
+        runId: 'interrupted-run',
+        activityType: 'command',
+        title: 'Recovered command',
+        status: 'error',
+        toolName: 'run_command',
+        callId: 'recovered-approved-call',
+        result: 'Ground restarted before the command outcome was saved.',
+        createdAt: '2026-07-28T12:00:00.000Z',
+        managedExecution: {
+          version: 1,
+          operationId: 'recovered-approved-operation',
+          claim: 'approved',
+          kind: 'command',
+          actionSha256: 'a'.repeat(64),
+          approvalSha256: 'b'.repeat(64),
+          phase: 'uncertain',
+          startedAt: '2026-07-28T12:00:00.000Z',
+          interruptedAt: '2026-07-28T12:00:01.000Z'
+        }
+      })
+    })
+
+    expect(() => run.manager.assertTaskCanStart(run.taskId)).toThrow(
+      /unresolved outcome/i
+    )
+    await expect(
+      run.manager.start(run.taskId, 'Do not start after recovery')
+    ).rejects.toThrow(/unresolved outcome/i)
+    expect(run.requests).toEqual([])
+    expect(
+      run.store
+        .getTask(run.taskId)
+        .items.some(
+          (item) =>
+            item.kind === 'message' &&
+            item.content === 'Do not start after recovery'
+        )
+    ).toBe(false)
+  })
+
+  it('blocks a new run for a recovered legacy uncertain execution', async () => {
+    const run = await harness([])
+    await run.store.mutateTask(run.taskId, (task) => {
+      task.runStatus = 'failed'
+      task.items.push({
+        id: 'recovered-legacy-operation',
+        kind: 'activity',
+        runId: 'interrupted-run',
+        activityType: 'tool',
+        title: 'Recovered legacy write',
+        status: 'error',
+        toolName: 'write_file',
+        result: 'Ground cannot prove whether this legacy write completed.',
+        createdAt: '2026-07-28T12:00:00.000Z',
+        managedExecution: {
+          version: 1,
+          operationId: 'recovered-legacy-operation',
+          claim: 'legacy-untracked',
+          kind: 'workspace-write',
+          phase: 'uncertain',
+          startedAt: '2026-07-28T12:00:00.000Z',
+          interruptedAt: '2026-07-28T12:00:01.000Z'
+        }
+      })
+    })
+
+    expect(() => run.manager.assertTaskCanStart(run.taskId)).toThrow(
+      /unresolved outcome/i
+    )
+    await expect(
+      run.manager.start(run.taskId, 'Do not start after legacy recovery')
+    ).rejects.toThrow(/unresolved outcome/i)
+    expect(run.requests).toEqual([])
+    expect(
+      run.store
+        .getTask(run.taskId)
+        .items.some(
+          (item) =>
+            item.kind === 'message' &&
+            item.content === 'Do not start after legacy recovery'
+        )
+    ).toBe(false)
+  })
+
+  it('allows a new run when managed executions are completed', async () => {
+    const run = await harness([
+      (request) => textResponse(request, 'Completed claims are terminal.')
+    ])
+    await run.store.mutateTask(run.taskId, (task) => {
+      task.items.push({
+        id: 'completed-operation',
+        kind: 'activity',
+        runId: 'completed-run',
+        activityType: 'command',
+        title: 'Completed command',
+        status: 'success',
+        toolName: 'run_command',
+        callId: 'completed-call',
+        result: 'Command completed.',
+        durationMs: 5,
+        createdAt: '2026-07-28T12:00:00.000Z',
+        managedExecution: {
+          version: 1,
+          operationId: 'completed-operation',
+          claim: 'approved',
+          kind: 'command',
+          actionSha256: 'c'.repeat(64),
+          approvalSha256: 'd'.repeat(64),
+          phase: 'completed',
+          startedAt: '2026-07-28T12:00:00.000Z',
+          completedAt: '2026-07-28T12:00:01.000Z'
+        }
+      })
+    })
+
+    expect(() => run.manager.assertTaskCanStart(run.taskId)).not.toThrow()
+    await expect(
+      run.manager.start(run.taskId, 'Continue after completed work')
+    ).resolves.toMatch(/^run_/)
+    expect((await run.terminal).type).toBe('run-completed')
+    expect(run.requests).toHaveLength(1)
+  })
+
   it('refuses to start archived tasks even when called outside the desktop IPC boundary', async () => {
     const run = await harness([])
     await run.store.setTaskArchived(run.taskId, true)
