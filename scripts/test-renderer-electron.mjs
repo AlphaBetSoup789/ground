@@ -1108,6 +1108,334 @@ try {
     await page.getByRole('button', { name: 'Send message' }).waitFor()
   })
 
+  await run('paused timeline output offers a task-bound jump to latest', async () => {
+    await page.setViewportSize({ width: 680, height: 520 })
+    await page.emulateMedia({
+      reducedMotion: 'reduce',
+      forcedColors: 'active'
+    })
+    await page
+      .getByRole('complementary', { name: 'Task navigation' })
+      .getByRole('button', { name: 'Close sidebar' })
+      .click()
+
+    const timeline = page.getByRole('log', {
+      name: 'Task conversation'
+    })
+    const composer = page.getByRole('textbox', { name: 'Message' })
+    const prompt = [
+      'Stream enough task activity to verify paused timeline following.',
+      '',
+      ...Array.from(
+        { length: 14 },
+        (_, index) =>
+          `Review checkpoint ${index + 1}: preserve this reading-position evidence.`
+      )
+    ].join('\n')
+    const assistantMessages = page.locator(
+      '.timeline .message-assistant .markdown'
+    )
+    const initialAssistantCount = await assistantMessages.count()
+
+    await composer.fill(prompt)
+    await page.getByRole('button', { name: 'Send message' }).click()
+    await waitForValue(
+      () => assistantMessages.count(),
+      initialAssistantCount + 1,
+      'the deterministic stream should add one assistant response'
+    )
+    const streamingAssistant = assistantMessages.last()
+    await waitForValue(
+      async () => ((await streamingAssistant.textContent()) ?? '').length > 0,
+      true,
+      'the deterministic assistant should begin streaming'
+    )
+    await waitForValue(
+      () =>
+        timeline.evaluate(
+          (element) =>
+            element.scrollHeight - element.clientHeight > 140
+        ),
+      true,
+      'the long task should produce a scrollable timeline'
+    )
+    const jump = page.getByRole('button', { name: 'Jump to latest' })
+    await waitForValue(
+      () =>
+        timeline.evaluate(
+          (element) =>
+            element.scrollHeight -
+            element.scrollTop -
+            element.clientHeight <=
+            1
+        ),
+      true,
+      'a large initial send should remain at the exact bottom while following'
+    )
+    assert.equal(
+      await jump.count(),
+      0,
+      'content growth must not be mistaken for a reader pausing follow mode'
+    )
+
+    const pausedTop = await timeline.evaluate((element) => {
+      const maxScrollTop = element.scrollHeight - element.clientHeight
+      element.scrollTop = Math.max(0, maxScrollTop - 120)
+      element.dispatchEvent(
+        new Event('scroll', { bubbles: true })
+      )
+      return element.scrollTop
+    })
+    await jump.waitFor()
+    const firstStreamLength =
+      ((await streamingAssistant.textContent()) ?? '').length
+    await waitForValue(
+      async () =>
+        ((await streamingAssistant.textContent()) ?? '').length >
+        firstStreamLength,
+      true,
+      'new output should continue while timeline following is paused'
+    )
+    const secondStreamLength =
+      ((await streamingAssistant.textContent()) ?? '').length
+    await waitForValue(
+      async () =>
+        ((await streamingAssistant.textContent()) ?? '').length >
+        secondStreamLength,
+      true,
+      'more than one streamed delta should arrive while paused'
+    )
+    assert.equal(
+      await timeline.evaluate((element) => element.scrollTop),
+      pausedTop,
+      'streaming output must preserve the reader position while paused'
+    )
+
+    const stopRun = page.getByRole('button', { name: 'Stop run' })
+    if (await stopRun.count()) await stopRun.click()
+    await page.getByRole('button', { name: 'Send message' }).waitFor()
+    const stablePausedTop = await timeline.evaluate((element) => {
+      const maxScrollTop = element.scrollHeight - element.clientHeight
+      element.scrollTop = Math.max(0, maxScrollTop - 120)
+      element.dispatchEvent(
+        new Event('scroll', { bubbles: true })
+      )
+      return element.scrollTop
+    })
+    await jump.waitFor()
+    await jump.focus()
+    await page.setViewportSize({ width: 680, height: 600 })
+    await jump.waitFor({ state: 'detached' })
+    assert.equal(
+      await timeline.evaluate(
+        (element) => element === document.activeElement
+      ),
+      true,
+      'hiding a focused jump control after resize should preserve focus on the timeline'
+    )
+    assert.equal(
+      await timeline.evaluate((element) => element.scrollTop),
+      stablePausedTop,
+      'resizing within the follow threshold must not change the reading position'
+    )
+    assert.equal(
+      await page.locator('.timeline-jump-status').textContent(),
+      '',
+      'responsive reconciliation must not announce a jump the user did not request'
+    )
+    await page.setViewportSize({ width: 680, height: 520 })
+    await jump.waitFor()
+    assert.equal(
+      await timeline.evaluate((element) => element.scrollTop),
+      stablePausedTop,
+      'restoring the narrow viewport must preserve the paused reading position'
+    )
+
+    const pausedFollowPrompt =
+      'Keep this new request paused until I choose to jump.'
+    const assistantCountBeforePausedSend = await assistantMessages.count()
+    await composer.fill(pausedFollowPrompt)
+    await page.getByRole('button', { name: 'Send message' }).click()
+    await page.getByText(pausedFollowPrompt, { exact: true }).waitFor()
+    await waitForValue(
+      () => assistantMessages.count(),
+      assistantCountBeforePausedSend + 1,
+      'sending while paused should add a new assistant response'
+    )
+    const resumedAssistant = assistantMessages.last()
+    await waitForValue(
+      async () => ((await resumedAssistant.textContent()) ?? '').length > 0,
+      true,
+      'the second deterministic assistant should begin streaming'
+    )
+    assert.equal(
+      await timeline.evaluate((element) => element.scrollTop),
+      stablePausedTop,
+      'sending a new message must not resume timeline following while paused'
+    )
+
+    const jumpBounds = await jump.boundingBox()
+    assert.ok(jumpBounds, 'the narrow jump control should have layout bounds')
+    assert.ok(
+      jumpBounds.x >= 0 &&
+        jumpBounds.x + jumpBounds.width <= 680 &&
+        jumpBounds.y >= 0 &&
+        jumpBounds.y + jumpBounds.height <= 520,
+      `the jump control should remain inside the narrow viewport; received ${JSON.stringify(jumpBounds)}`
+    )
+    const jumpPresentation = await jump.evaluate((element) => {
+      const style = getComputedStyle(element)
+      return {
+        borderVisible:
+          style.borderTopStyle !== 'none' &&
+          Number.parseFloat(style.borderTopWidth) > 0,
+        transitionDurations: style.transitionDuration
+          .split(',')
+          .map((duration) => {
+            const value = Number.parseFloat(duration)
+            return duration.trim().endsWith('ms')
+              ? value
+              : value * 1_000
+          })
+      }
+    })
+    assert.equal(
+      jumpPresentation.borderVisible,
+      true,
+      'forced colors should preserve a visible jump-control boundary'
+    )
+    assert.equal(
+      jumpPresentation.transitionDurations.every(
+        (duration) => duration <= 0.01
+      ),
+      true,
+      'reduced motion should remove jump-control transitions'
+    )
+
+    await jump.focus()
+    await jump.press('Enter')
+    await jump.waitFor({ state: 'detached' })
+    await page.getByRole('status').filter({
+      hasText: 'Moved to latest activity. Following new output.'
+    }).waitFor()
+    assert.equal(
+      await timeline.evaluate(
+        (element) => element === document.activeElement
+      ),
+      true,
+      'keyboard activation should move focus to the current task timeline'
+    )
+    const timelineFocusPresentation = await timeline.evaluate((element) => {
+      const style = getComputedStyle(element)
+      return {
+        outlineVisible:
+          style.outlineStyle !== 'none' &&
+          Number.parseFloat(style.outlineWidth) > 0,
+        outlineOffset: Number.parseFloat(style.outlineOffset)
+      }
+    })
+    assert.equal(
+      timelineFocusPresentation.outlineVisible,
+      true,
+      'the focused timeline should retain a visible forced-color outline'
+    )
+    assert.ok(
+      timelineFocusPresentation.outlineOffset <= 0,
+      'the timeline focus outline must be drawn inside its clipped shell'
+    )
+    await waitForValue(
+      () =>
+        timeline.evaluate(
+          (element) =>
+            element.scrollHeight -
+            element.scrollTop -
+            element.clientHeight <=
+            1
+        ),
+      true,
+      'jump activation should move to the exact current bottom'
+    )
+
+    const resumedLength =
+      ((await resumedAssistant.textContent()) ?? '').length
+    await waitForValue(
+      async () =>
+        ((await resumedAssistant.textContent()) ?? '').length >
+        resumedLength,
+      true,
+      'another delta should arrive after following resumes'
+    )
+    await waitForValue(
+      () =>
+        timeline.evaluate(
+          (element) =>
+            element.scrollHeight -
+            element.scrollTop -
+            element.clientHeight <=
+            1
+        ),
+      true,
+      'resumed following should keep later output at the bottom'
+    )
+
+    await timeline.evaluate((element) => {
+      const maxScrollTop = element.scrollHeight - element.clientHeight
+      element.scrollTop = Math.max(0, maxScrollTop - 120)
+      element.dispatchEvent(
+        new Event('scroll', { bubbles: true })
+      )
+    })
+    await jump.waitFor()
+    await page.keyboard.press(taskSearchShortcut)
+    const search = page.getByRole('searchbox', {
+      name: 'Search tasks'
+    })
+    await search.fill('auth')
+    await search.press('Enter')
+    await waitForValue(
+      () => page.getByLabel('Task title').inputValue(),
+      'Explain the auth flow',
+      'task switching should replace the paused source timeline'
+    )
+    assert.equal(
+      await jump.count(),
+      0,
+      'a paused jump control must not carry into another task'
+    )
+    assert.equal(
+      await page.locator('.timeline-jump-status').textContent(),
+      '',
+      'a prior task jump announcement must not carry into another task'
+    )
+
+    await page.keyboard.press(taskSearchShortcut)
+    await search.fill('dashboard')
+    await search.press('Enter')
+    await waitForValue(
+      () => page.getByLabel('Task title').inputValue(),
+      'Refine the project dashboard',
+      'the streaming source task should remain selectable'
+    )
+    await waitForValue(
+      () =>
+        timeline.evaluate(
+          (element) =>
+            element.scrollHeight -
+            element.scrollTop -
+            element.clientHeight <=
+            1
+        ),
+      true,
+      'returning to a task should reset it to current output'
+    )
+    assert.equal(
+      await jump.count(),
+      0,
+      'task reset should not restore a stale jump control'
+    )
+    if (await stopRun.count()) await stopRun.click()
+  })
+
   await run('mock run can be sent and cancelled from the real renderer', async () => {
     const composer = page.getByRole('textbox', { name: 'Message' })
     const prompt = 'Cancel this deterministic renderer run'

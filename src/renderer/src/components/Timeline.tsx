@@ -4,10 +4,12 @@ import {
   useId,
   useMemo,
   useRef,
-  useState
+  useState,
+  type Ref
 } from 'react'
 import {
   AlertTriangle,
+  ArrowDown,
   Bot,
   Check,
   ChevronRight,
@@ -59,6 +61,8 @@ interface TimelineProps {
 
 const TIMELINE_PAGE_SIZE = 200
 const TIMELINE_FOLLOW_DISTANCE_PX = 80
+const TIMELINE_JUMP_ANNOUNCEMENT =
+  'Moved to latest activity. Following new output.'
 
 export function shouldFollowTimeline(
   viewport: Pick<HTMLElement, 'clientHeight' | 'scrollHeight' | 'scrollTop'>
@@ -69,6 +73,33 @@ export function shouldFollowTimeline(
   )
 }
 
+export function shouldOfferTimelineJump(
+  viewport: Pick<HTMLElement, 'clientHeight' | 'scrollHeight' | 'scrollTop'>
+): boolean {
+  return (
+    viewport.scrollHeight > viewport.clientHeight &&
+    !shouldFollowTimeline(viewport)
+  )
+}
+
+export function shouldApplyTimelineJump(input: {
+  requestedTaskId: string
+  currentTaskId: string
+  requestedViewportIsCurrent: boolean
+}): boolean {
+  return (
+    input.requestedTaskId === input.currentTaskId &&
+    input.requestedViewportIsCurrent
+  )
+}
+
+function moveTimelineToLatest(timeline: HTMLElement): void {
+  const priorScrollBehavior = timeline.style.scrollBehavior
+  timeline.style.scrollBehavior = 'auto'
+  timeline.scrollTop = timeline.scrollHeight
+  timeline.style.scrollBehavior = priorScrollBehavior
+}
+
 function isActiveRunStatus(status: RunStatus | undefined): boolean {
   return status === 'running' || status === 'awaiting-approval'
 }
@@ -76,6 +107,22 @@ function isActiveRunStatus(status: RunStatus | undefined): boolean {
 interface AssistantAnnouncementState {
   text: string
   revision: number
+}
+
+interface TimelineJumpState {
+  taskId: string
+  visible: boolean
+  announcement: string
+  revision: number
+}
+
+function initialTimelineJumpState(taskId: string): TimelineJumpState {
+  return {
+    taskId,
+    visible: false,
+    announcement: '',
+    revision: 0
+  }
 }
 
 function useAssistantRunAnnouncement(
@@ -201,13 +248,18 @@ function useAssistantRunAnnouncement(
 
 export function Timeline(props: TimelineProps): React.JSX.Element {
   const timelineRef = useRef<HTMLElement>(null)
+  const timelineColumnRef = useRef<HTMLDivElement>(null)
+  const jumpButtonRef = useRef<HTMLButtonElement>(null)
   const followOutputRef = useRef(true)
-  const previousItemCountRef = useRef(props.task.items.length)
   const taskIdRef = useRef(props.task.id)
   const handoffButtonRef = useRef<HTMLButtonElement>(null)
   const [visibleCount, setVisibleCount] = useState(TIMELINE_PAGE_SIZE)
   const [handoffPending, setHandoffPending] = useState<string>()
   const [handoffStatus, setHandoffStatus] = useState('')
+  const [jumpState, setJumpState] = useState<TimelineJumpState>(() =>
+    initialTimelineJumpState(props.task.id)
+  )
+  const timelineId = useId()
   const handoffDescriptionId = useId()
   const assistantAnnouncement = useAssistantRunAnnouncement(props.task)
   const lastItem = props.task.items.at(-1)
@@ -218,6 +270,109 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     ? askToAgentHandoffSource(props.task, props.provider)
     : undefined
   taskIdRef.current = props.task.id
+  const jumpVisible =
+    jumpState.taskId === props.task.id && jumpState.visible
+  const jumpAnnouncement =
+    jumpState.taskId === props.task.id
+      ? jumpState.announcement
+      : ''
+  const focusTimelineIfJumpFocused = useCallback(
+    (timeline: HTMLElement): void => {
+      if (jumpButtonRef.current === document.activeElement) {
+        timeline.focus({ preventScroll: true })
+      }
+    },
+    []
+  )
+  const updateTimelineJumpVisibility = useCallback(
+    (timeline: HTMLElement, visible: boolean): void => {
+      const sourceTaskId = props.task.id
+      if (taskIdRef.current !== sourceTaskId) return
+
+      if (!visible) focusTimelineIfJumpFocused(timeline)
+      setJumpState((current) => {
+        if (taskIdRef.current !== sourceTaskId) return current
+        const source =
+          current.taskId === sourceTaskId
+            ? current
+            : initialTimelineJumpState(sourceTaskId)
+        const announcement = visible ? '' : source.announcement
+        if (
+          source.visible === visible &&
+          source.announcement === announcement
+        ) {
+          return source
+        }
+        return {
+          ...source,
+          visible,
+          announcement
+        }
+      })
+    },
+    [focusTimelineIfJumpFocused, props.task.id]
+  )
+  const updateTimelineFollow = useCallback(
+    (timeline: HTMLElement): void => {
+      const sourceTaskId = props.task.id
+      if (taskIdRef.current !== sourceTaskId) return
+
+      followOutputRef.current = shouldFollowTimeline(timeline)
+      updateTimelineJumpVisibility(
+        timeline,
+        shouldOfferTimelineJump(timeline)
+      )
+    },
+    [props.task.id, updateTimelineJumpVisibility]
+  )
+  const jumpToLatest = useCallback((): void => {
+    const requestedTaskId = props.task.id
+    const timeline = timelineRef.current
+    if (
+      !timeline ||
+      !shouldApplyTimelineJump({
+        requestedTaskId,
+        currentTaskId: taskIdRef.current,
+        requestedViewportIsCurrent: timelineRef.current === timeline
+      })
+    ) {
+      return
+    }
+    if (!shouldOfferTimelineJump(timeline)) {
+      focusTimelineIfJumpFocused(timeline)
+      setJumpState((current) =>
+        current.taskId === requestedTaskId
+          ? { ...current, visible: false }
+          : current
+      )
+      return
+    }
+
+    followOutputRef.current = true
+    moveTimelineToLatest(timeline)
+    timeline.focus({ preventScroll: true })
+    setJumpState((current) => {
+      if (
+        !shouldApplyTimelineJump({
+          requestedTaskId,
+          currentTaskId: taskIdRef.current,
+          requestedViewportIsCurrent: timelineRef.current === timeline
+        })
+      ) {
+        return current
+      }
+      const source =
+        current.taskId === requestedTaskId
+          ? current
+          : initialTimelineJumpState(requestedTaskId)
+      return {
+        ...source,
+        visible: false,
+        announcement: TIMELINE_JUMP_ANNOUNCEMENT,
+        revision: source.revision + 1
+      }
+    })
+  }, [focusTimelineIfJumpFocused, props.task.id])
   const requestAgentHandoff = useCallback(
     (source: AskToAgentHandoffSource): void => {
       const continueInAgent = props.onContinueInAgent
@@ -267,63 +422,119 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     setVisibleCount(TIMELINE_PAGE_SIZE)
     setHandoffPending(undefined)
     setHandoffStatus('')
+    setJumpState(initialTimelineJumpState(props.task.id))
     followOutputRef.current = true
-    previousItemCountRef.current = props.task.items.length
   }, [props.task.id])
 
   useEffect(() => {
-    const newUserMessage =
-      props.task.items.length > previousItemCountRef.current &&
-      lastItem?.kind === 'message' &&
-      lastItem.role === 'user'
-    if (newUserMessage) followOutputRef.current = true
-    previousItemCountRef.current = props.task.items.length
+    const timeline = timelineRef.current
+    if (!timeline || typeof ResizeObserver === 'undefined') return
 
+    const sourceTaskId = props.task.id
+    const observer = new ResizeObserver(() => {
+      if (
+        taskIdRef.current === sourceTaskId &&
+        timelineRef.current === timeline
+      ) {
+        if (followOutputRef.current) {
+          moveTimelineToLatest(timeline)
+          updateTimelineJumpVisibility(timeline, false)
+        } else {
+          updateTimelineJumpVisibility(
+            timeline,
+            shouldOfferTimelineJump(timeline)
+          )
+        }
+      }
+    })
+    observer.observe(timeline)
+    if (timelineColumnRef.current) {
+      observer.observe(timelineColumnRef.current)
+    }
+
+    return () => observer.disconnect()
+  }, [
+    props.task.id,
+    props.task.items.length === 0,
+    updateTimelineJumpVisibility
+  ])
+
+  useEffect(() => {
     const timeline = timelineRef.current
     if (timeline && followOutputRef.current) {
-      timeline.scrollTop = timeline.scrollHeight
+      moveTimelineToLatest(timeline)
+      setJumpState((current) =>
+        current.taskId === props.task.id && current.visible
+          ? { ...current, visible: false }
+          : current
+      )
     }
-  }, [contentKey, lastItem, props.task.items.length])
+  }, [contentKey, props.task.id])
 
   if (!props.task.items.length) {
     return (
       <>
-        <section
-          ref={timelineRef}
-          className="timeline timeline-empty"
-          aria-label="Task conversation"
-          onScroll={(event) => {
-            followOutputRef.current = shouldFollowTimeline(event.currentTarget)
-          }}
-        >
-          <div className="empty-task">
-            <div className="empty-task-icon">
-              <Sparkles size={18} />
+        <div className="timeline-shell" data-task-id={props.task.id}>
+          <section
+            ref={timelineRef}
+            id={timelineId}
+            className="timeline timeline-empty"
+            aria-label="Task conversation"
+            tabIndex={-1}
+            onScroll={(event) =>
+              updateTimelineFollow(event.currentTarget)
+            }
+          >
+            <div className="empty-task">
+              <div className="empty-task-icon">
+                <Sparkles size={18} />
+              </div>
+              <p className="empty-kicker">
+                {props.task.mode === 'agent'
+                  ? 'Agent workspace'
+                  : 'Focused conversation'}
+              </p>
+              <h2>What would you like to work on?</h2>
+              <p className="empty-description">
+                {props.task.mode === 'agent'
+                  ? 'I can inspect this workspace, propose edits, and run approved commands.'
+                  : 'Ask for an explanation, review, or plan. Workspace access stays read-only.'}
+              </p>
+              <div className="suggestion-list">
+                {props.suggestions.map((suggestion) => (
+                  <button
+                    type="button"
+                    key={suggestion}
+                    onClick={() => props.onSuggestion(suggestion)}
+                  >
+                    <span>{suggestion}</span>
+                    <ChevronRight size={14} />
+                  </button>
+                ))}
+              </div>
+              <div className="empty-provider">
+                <span
+                  className={
+                    props.provider?.kind === 'cli'
+                      ? 'provider-pip cli'
+                      : 'provider-pip'
+                  }
+                />
+                {props.provider?.name ?? 'Choose a provider'}
+                {props.provider?.model && (
+                  <span>· {props.provider.model}</span>
+                )}
+              </div>
             </div>
-            <p className="empty-kicker">
-              {props.task.mode === 'agent' ? 'Agent workspace' : 'Focused conversation'}
-            </p>
-            <h2>What would you like to work on?</h2>
-            <p className="empty-description">
-              {props.task.mode === 'agent'
-                ? 'I can inspect this workspace, propose edits, and run approved commands.'
-                : 'Ask for an explanation, review, or plan. Workspace access stays read-only.'}
-            </p>
-            <div className="suggestion-list">
-              {props.suggestions.map((suggestion) => (
-                <button type="button" key={suggestion} onClick={() => props.onSuggestion(suggestion)}>
-                  <span>{suggestion}</span>
-                  <ChevronRight size={14} />
-                </button>
-              ))}
-            </div>
-            <div className="empty-provider">
-              <span className={props.provider?.kind === 'cli' ? 'provider-pip cli' : 'provider-pip'} />
-              {props.provider?.name ?? 'Choose a provider'}
-              {props.provider?.model && <span>· {props.provider.model}</span>}
-            </div>
-          </div>
-        </section>
+          </section>
+          <TimelineJumpControl
+            visible={false}
+            announcement=""
+            revision={jumpState.revision}
+            controlsId={timelineId}
+            onJump={jumpToLatest}
+          />
+        </div>
         <AssistantAnnouncement announcement={assistantAnnouncement} />
       </>
     )
@@ -340,18 +551,21 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
 
   return (
     <>
-      <section
-        ref={timelineRef}
-        className="timeline"
-        role="log"
-        aria-label="Task conversation"
-        aria-live="polite"
-        aria-relevant="additions"
-        onScroll={(event) => {
-          followOutputRef.current = shouldFollowTimeline(event.currentTarget)
-        }}
-      >
-        <div className="timeline-column">
+      <div className="timeline-shell" data-task-id={props.task.id}>
+        <section
+          ref={timelineRef}
+          id={timelineId}
+          className="timeline"
+          role="log"
+          aria-label="Task conversation"
+          aria-live="polite"
+          aria-relevant="additions"
+          tabIndex={-1}
+          onScroll={(event) =>
+            updateTimelineFollow(event.currentTarget)
+          }
+        >
+          <div ref={timelineColumnRef} className="timeline-column">
           {props.task.items.some((item) => item.historyOnly) && (
             <div className="imported-history-note">
               <ShieldCheck size={13} />
@@ -502,8 +716,17 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
               Waiting for your approval
             </div>
           )}
-        </div>
-      </section>
+          </div>
+        </section>
+        <TimelineJumpControl
+          visible={jumpVisible}
+          announcement={jumpAnnouncement}
+          revision={jumpState.revision}
+          controlsId={timelineId}
+          onJump={jumpToLatest}
+          buttonRef={jumpButtonRef}
+        />
+      </div>
       <div
         className="visually-hidden"
         role="status"
@@ -513,6 +736,40 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
         {handoffStatus}
       </div>
       <AssistantAnnouncement announcement={assistantAnnouncement} />
+    </>
+  )
+}
+
+export function TimelineJumpControl(props: {
+  visible: boolean
+  announcement: string
+  revision: number
+  controlsId: string
+  onJump: () => void
+  buttonRef?: Ref<HTMLButtonElement>
+}): React.JSX.Element {
+  return (
+    <>
+      {props.visible && (
+        <button
+          className="timeline-jump-latest"
+          type="button"
+          aria-controls={props.controlsId}
+          onClick={props.onJump}
+          ref={props.buttonRef}
+        >
+          <ArrowDown size={14} aria-hidden="true" />
+          Jump to latest
+        </button>
+      )}
+      <div
+        className="visually-hidden timeline-jump-status"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        <span key={props.revision}>{props.announcement}</span>
+      </div>
     </>
   )
 }

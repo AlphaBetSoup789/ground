@@ -326,6 +326,8 @@ Requirements: GR-3, GR-8.1
   without queueing, steering, or sending it implicitly.
 - Let a user recover an exact retained failed request into an empty editable
   task-local draft without implying automatic or side-effect-safe replay.
+- Preserve timeline reading position while follow mode is paused, then offer one
+  keyboard-accessible, task-bound action that returns to exact current output.
 - Bind delayed selection, handoff, and focus work to the exact current task and
   source revision so stale renderer work cannot redirect a draft or selection.
 - Keep every prompt handoff visibly editable and require a separate explicit Send
@@ -344,6 +346,9 @@ Acceptance gate:
 - Failed-run recovery excludes imported history and outcome-unknown interrupted
   work, never replaces an occupied draft, and revalidates the exact run/message
   source before preparing text.
+- Streaming output cannot force a paused reader to the bottom; explicit
+  jump-to-latest activation resumes follow mode, announces the change, and cannot
+  carry stale control or scroll state into another task.
 - Input-method composition, stale async completion, responsive layout changes,
   and modal focus changes have renderer interaction evidence.
 

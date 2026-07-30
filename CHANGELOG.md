@@ -82,6 +82,10 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
   into an empty task-local draft, and still requires a separate explicit Send.
   Outcome-unknown interrupted runs and occupied drafts are never replaced or
   replayed.
+- A keyboard-accessible, task-bound **Jump to latest** timeline action that
+  appears only after the reader leaves the near-bottom follow threshold,
+  preserves paused streaming position, resumes exact-bottom following on
+  activation, and resets across task changes.
 - Three rotating validated state snapshots, automatic fallback from a corrupt or
   missing primary, unreadable-file quarantine, an in-app recovery browser,
   credential-free native export, and native-confirmed retained-snapshot restore.
@@ -154,16 +158,17 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
   behavior, responsive provider/MCP/task controls, accessible approval state, and
   reduced-motion/terminal accommodations.
 - Add a keyboard command palette, task-local process-memory composer drafts,
-  near-bottom-only timeline following, and bounded batched screen-reader
-  announcements for streamed assistant text.
-- Expand the Playwright-over-Electron renderer interaction suite to seventeen
+  near-bottom-only timeline following with an explicit return action, and bounded
+  batched screen-reader announcements for streamed assistant text.
+- Expand the Playwright-over-Electron renderer interaction suite to eighteen
   scenarios covering command-palette and task-search keyboard/focus behavior,
   accessible provider-form validation, truthful local-provider refusal recovery
   into a detected CLI, task-local, active-run, and failed-run draft preparation,
-  Ask-to-Agent and reviewed-hunk prompt handoffs, finished-run Git refresh with
-  review-position retention, failure/retry, and late-task isolation, deterministic send
-  cancellation, archive/search, responsive settings and sidebar selection,
-  reduced-motion CSS, and forced-color connection-path selection. It uses the
+  Ask-to-Agent and reviewed-hunk prompt handoffs, paused-streaming jump recovery,
+  finished-run Git refresh with review-position retention, failure/retry, and
+  late-task isolation, deterministic send cancellation, archive/search,
+  responsive settings and sidebar selection, reduced-motion CSS, and forced-color
+  connection-path selection. It uses the
   explicit browser-preview desktop mock and is not
   production-main/native/provider certification.
 - Recover interrupted managed writes, commands, and MCP calls as explicit

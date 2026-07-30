@@ -113,6 +113,8 @@ conformance runner; npm publication remains a separate maintainer release step.
 - Per-task unsent composer drafts while Ground is open, including draft-only
   preparation during a run or approval wait, plus a keyboard command palette for
   common workspace and provider actions
+- Near-bottom-only streaming follow with a task-bound **Jump to latest** action
+  that preserves reading position until the user deliberately resumes following
 - Reviewable failed-run recovery that copies the exact retained request into an
   empty editable task-local draft without automatically retrying or replacing
   newer text
@@ -159,14 +161,17 @@ The command palette is keyboard navigable, traps focus while open, restores prio
 focus, and ignores execution keys during input-method composition. Streaming text
 uses a separate batched polite announcement instead of repeatedly announcing the
 whole message, and the timeline follows new output only while the reader remains
-near the bottom. Unsent composer text is kept separately for each task for the
-current app process; it is not written to durable task state. While a task is
-running or waiting for approval, its textarea remains editable so the next prompt
-can be prepared. That text is not queued, sent, or used to steer the active run;
-the Stop control remains the only run action and `Ctrl/⌘ + Enter` is inert until
-the run finishes. When the latest retained run ends with **Run failed**, **Prepare
-retry** can copy only that run's exact non-imported user message into an empty
-task-local draft. Existing draft bytes are preserved, outcome-unknown **Run
+near the bottom. Scrolling away exposes **Jump to latest** without moving the
+viewport; keyboard activation returns to the exact current bottom, resumes
+following, and announces the change. The control and announcement state reset
+when the selected task changes. Unsent composer text is kept separately for each
+task for the current app process; it is not written to durable task state. While a
+task is running or waiting for approval, its textarea remains editable so the next
+prompt can be prepared. That text is not queued, sent, or used to steer the active
+run; the Stop control remains the only run action and `Ctrl/⌘ + Enter` is inert
+until the run finishes. When the latest retained run ends with **Run failed**,
+**Prepare retry** can copy only that run's exact non-imported user message into an
+empty task-local draft. Existing draft bytes are preserved, outcome-unknown **Run
 interrupted** recovery is excluded, and no provider or runtime is contacted until
 the user reviews and explicitly sends the draft. Responsive layouts, forced-color
 styles, reduced motion, and focus-visible states are implemented, but the project
@@ -712,11 +717,11 @@ explicit browser-preview desktop mock and drives it through Playwright. It cover
 command-palette focus/navigation, keyboard-complete task search and narrow-sidebar
 focus, native HTML provider-form validation, task-local, active-run, and
 failed-run draft preparation, Ask-to-Agent and reviewed-hunk draft handoffs,
-structured Git diff navigation and finished-run refresh, mock send/cancel,
-archive/search, responsive
-settings, reduced-motion and forced-color styles, plus the
+paused-streaming reading-position recovery, structured Git diff navigation and
+finished-run refresh, mock send/cancel, archive/search, responsive settings,
+reduced-motion and forced-color styles, plus the
 local-template/refused-connection recovery path into a detected CLI. The current
-suite contains 17 scenarios. CI runs it on macOS, Windows, and Linux/Xvfb. It does
+suite contains 18 scenarios. CI runs it on macOS, Windows, and Linux/Xvfb. It does
 not load the production preload/main process,
 invoke native permissions, use a real provider, or replace screen-reader/manual
 accessibility testing.

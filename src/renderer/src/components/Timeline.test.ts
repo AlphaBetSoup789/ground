@@ -6,7 +6,13 @@ import type {
   ProviderFailureKind,
   ProviderProfile
 } from '../../../shared/types'
-import { shouldFollowTimeline, Timeline } from './Timeline'
+import {
+  shouldApplyTimelineJump,
+  shouldFollowTimeline,
+  shouldOfferTimelineJump,
+  Timeline,
+  TimelineJumpControl
+} from './Timeline'
 
 const TIMELINE_FAILURE_PRESENTATIONS = {
   'connection-refused': {
@@ -102,9 +108,92 @@ describe('timeline output following', () => {
       shouldFollowTimeline({
         clientHeight: 600,
         scrollHeight: 1_600,
-        scrollTop: 800
+        scrollTop: 919
       })
     ).toBe(false)
+  })
+
+  it('offers a jump only for a scrollable viewport beyond the follow threshold', () => {
+    expect(
+      shouldOfferTimelineJump({
+        clientHeight: 600,
+        scrollHeight: 600,
+        scrollTop: 0
+      })
+    ).toBe(false)
+    expect(
+      shouldOfferTimelineJump({
+        clientHeight: 600,
+        scrollHeight: 1_600,
+        scrollTop: 920
+      })
+    ).toBe(false)
+    expect(
+      shouldOfferTimelineJump({
+        clientHeight: 600,
+        scrollHeight: 1_600,
+        scrollTop: 919
+      })
+    ).toBe(true)
+  })
+
+  it('applies a jump only to the exact current task viewport', () => {
+    expect(
+      shouldApplyTimelineJump({
+        requestedTaskId: 'task-a',
+        currentTaskId: 'task-a',
+        requestedViewportIsCurrent: true
+      })
+    ).toBe(true)
+    expect(
+      shouldApplyTimelineJump({
+        requestedTaskId: 'task-a',
+        currentTaskId: 'task-b',
+        requestedViewportIsCurrent: true
+      })
+    ).toBe(false)
+    expect(
+      shouldApplyTimelineJump({
+        requestedTaskId: 'task-a',
+        currentTaskId: 'task-a',
+        requestedViewportIsCurrent: false
+      })
+    ).toBe(false)
+  })
+
+  it('renders a native jump action outside a polite status region', () => {
+    const markup = renderToStaticMarkup(
+      createElement(TimelineJumpControl, {
+        visible: true,
+        announcement:
+          'Moved to latest activity. Following new output.',
+        revision: 1,
+        controlsId: 'task-timeline',
+        onJump: () => undefined
+      })
+    )
+
+    expect(markup).toContain(
+      'class="timeline-jump-latest" type="button" aria-controls="task-timeline"'
+    )
+    expect(markup).toContain('Jump to latest')
+    expect(markup).toContain(
+      'class="visually-hidden timeline-jump-status" role="status" aria-live="polite" aria-atomic="true"'
+    )
+    expect(markup).toContain(
+      'Moved to latest activity. Following new output.'
+    )
+
+    const hiddenMarkup = renderToStaticMarkup(
+      createElement(TimelineJumpControl, {
+        visible: false,
+        announcement: '',
+        revision: 0,
+        controlsId: 'task-timeline',
+        onJump: () => undefined
+      })
+    )
+    expect(hiddenMarkup).not.toContain('Jump to latest')
   })
 
   it('separates streamed text from its batched screen-reader announcer', () => {

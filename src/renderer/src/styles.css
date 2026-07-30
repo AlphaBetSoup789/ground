@@ -1095,11 +1095,53 @@ kbd {
 
 /* Timeline */
 
+.timeline-shell {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .timeline {
+  width: 100%;
+  height: 100%;
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
   scroll-behavior: smooth;
+}
+
+.timeline:focus-visible {
+  outline: 2px solid rgba(216, 255, 125, 0.46);
+  outline-offset: -2px;
+}
+
+.timeline-jump-latest {
+  position: absolute;
+  z-index: 3;
+  bottom: 12px;
+  left: 50%;
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 12px;
+  transform: translateX(-50%);
+  border: 1px solid rgba(216, 255, 125, 0.2);
+  border-radius: 999px;
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 650;
+  background: rgba(31, 33, 26, 0.94);
+  box-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(14px);
+}
+
+.timeline-jump-latest:hover {
+  border-color: rgba(216, 255, 125, 0.38);
+  color: var(--accent);
+  background: rgba(39, 42, 31, 0.98);
 }
 
 .timeline-column {
@@ -7070,6 +7112,11 @@ kbd,
     width: calc(100% - 28px);
   }
 
+  .timeline-jump-latest {
+    bottom: 10px;
+    max-width: calc(100% - 28px);
+  }
+
   .ask-agent-handoff {
     grid-template-columns: 1fr;
   }
@@ -7286,6 +7333,12 @@ kbd,
     box-shadow: none;
   }
 
+  .timeline:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+    box-shadow: none;
+  }
+
   .task-row-selected,
   .activity-card,
   .composer,
@@ -7305,6 +7358,7 @@ kbd,
   .git-diff-hunk-navigation button,
   .ask-agent-handoff,
   .ask-agent-handoff button,
+  .timeline-jump-latest,
   .composer-retry-notice,
   .composer-retry-notice > button {
     border: 1px solid ButtonText;

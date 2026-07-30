@@ -615,21 +615,25 @@ but this keyboard baseline is not a complete screen-reader certification.
 Assistant streaming remains visually live but uses a separate polite announcer
 that batches and normalizes bounded chunks. Timeline following is conditional on
 the viewport remaining near the latest output, preserving a reader’s scroll
-position. Responsive styles, forced-color treatment, focus-visible states, and
-reduced-motion rules are part of the public-preview baseline; they are not a claim of
-complete cross-platform accessibility certification.
+position. Leaving that threshold exposes a renderer-only **Jump to latest**
+control outside the live log. Activation moves the exact current task viewport to
+its current bottom, restores follow mode, transfers focus to the log, and emits a
+separate polite status; task identity gates presentation and activation.
+Responsive styles, forced-color treatment, focus-visible states, and
+reduced-motion rules are part of the public-preview baseline; they are not a claim
+of complete cross-platform accessibility certification.
 
 A Playwright-over-Electron suite drives that real built renderer with the
-explicit browser-preview desktop mock. Its 17 scenarios cover palette and
+explicit browser-preview desktop mock. Its 18 scenarios cover palette and
 task-search keyboard/focus, including narrow-sidebar focus, provider-form labels
 and Chromium constraint validation, local-template/refused-connection recovery
 into a detected CLI, task-local, active-run, and failed-run draft preparation,
-Ask-to-Agent and reviewed-hunk handoffs, structured Git diff navigation and
-request-bound finished-run refresh including failure/retry and late-task isolation,
-deterministic send/cancel,
-archive/search, responsive settings, reduced-motion CSS, and forced-color
-connection-path selection. It does not load production main/preload authority or
-replace manual screen-reader/native review.
+Ask-to-Agent and reviewed-hunk handoffs, paused-streaming jump recovery,
+structured Git diff navigation and request-bound finished-run refresh including
+failure/retry and late-task isolation, deterministic send/cancel, archive/search,
+responsive settings, reduced-motion CSS, and forced-color connection-path
+selection. It does not load production main/preload authority or replace manual
+screen-reader/native review.
 
 ## Current composition and migration
 

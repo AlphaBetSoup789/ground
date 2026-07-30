@@ -154,18 +154,23 @@ activation and writes only to an empty draft keyed by the source task. It exclud
 outcome-unknown interrupted work, performs no IPC or automatic replay, and still
 requires explicit Send.
 
+Timeline jump recovery keeps only task-tagged renderer presentation state. It
+does not read new content, cross IPC, persist a position, or alter a run. A stale
+task cannot present or activate another task’s control, and activation affects
+only the current timeline viewport and follow flag.
+
 ## Implemented controls
 
 - Packaged renderer content is local; development origins are loopback-only.
 - Context isolation, restricted navigation, a narrow preload bridge, and strict IPC
   caller validation reduce renderer authority.
-- A 17-scenario Playwright-over-Electron suite drives the real built renderer’s
+- An 18-scenario Playwright-over-Electron suite drives the real built renderer’s
   command and task-search keyboard/focus behavior, including narrow-sidebar focus,
   form validation, task-local, active-run, and failed-run draft preparation,
-  reviewed handoffs,
-  structured Git review and request-bound finished-run refresh, cancellation,
-  archive/search, responsive layout, forced colors, and reduced-motion behavior.
-  It deliberately uses the browser-preview
+  reviewed handoffs, paused-streaming jump recovery, structured Git review and
+  request-bound finished-run refresh, cancellation, archive/search, responsive
+  layout, forced colors, and reduced-motion behavior. It deliberately uses the
+  browser-preview
   desktop mock, so it is not evidence for production main/preload authority,
   native approvals, or complete screen-reader accessibility.
 - Workspace grants and CLI authorization are created in the main process.
