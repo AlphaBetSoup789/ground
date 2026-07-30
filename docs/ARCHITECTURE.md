@@ -567,31 +567,50 @@ authenticated native coding-agent session.
 Native package workflows target macOS arm64/x64, Windows x64, and Linux x64. A
 fixed packaged smoke verifies app identity, OS-encrypted vault round-trip, the
 fail-closed Cancel result of a real native approval dialog, PTY, Git, exact local
-MCP launch/call, process-tree cleanup, and one deterministic packaged provider
-first turn. That provider subprobe uses a credential-free, token-bound
-literal-loopback OpenAI-compatible fixture. The packaged main process saves and
-persistently verifies its profile, streams one task turn through the production
-registry and `RunManager`, reloads state, and verifies successful assistant output,
-provider attribution, continuation state, and idle status without a persisted
-failure. It does not exercise hosted credentials, internet or vendor behavior,
-CLIs, tools, or other provider protocols.
+MCP launch/call, process-tree cleanup, and the M1.1 provider/runtime matrix.
+
+The matrix is split into independently required evidence blocks. The positive
+provider block saves, persistently verifies, runs, and reloads both a
+credential-free token-bound OpenAI-compatible profile and a first-class OpenAI
+Responses profile with a synthetic versioned credential, exact Bearer
+authorization, and `store: false`. The expected-failure block persists failed
+connection readiness for a closed literal-loopback port and malformed compatible
+discovery/generation shapes, then proves `RunManager` blocks both before dispatch.
+The CLI block resolves the Node interpreter supplied by the outer smoke harness,
+creates a token-bound Codex-dialect child, and crosses the production executable,
+configuration, invocation, workspace, parser, session, activity, usage, and
+durability boundaries. A completed Codex error item must persist as one successful
+diagnostic notice while the turn completes.
+
+The unattended CLI fixture cannot click a positive native dialog, so native-smoke
+composition substitutes a fail-closed authority that accepts exactly one
+configuration and one invocation for the hashed runner, hashed script, argv, cwd,
+adapter, and stdin transport. Normal application composition continues to use the
+real native dialog. The outer harness separately requires the selected interpreter
+hash to equal its own `process.execPath`; the evidence states that human approval,
+passive detection, installed/authenticated Codex, vendor sandbox/tool behavior,
+live credentials, DNS/TLS, external services, and race-free script-argument
+binding against a concurrent same-user replacement were not exercised. It also
+does not prove cleanup of a hung or hostile external CLI after abnormal
+application exit.
 
 The distributable layer reruns native scope against an extracted macOS ZIP, a
 temporarily installed Windows NSIS package, or an extracted Linux AppImage and
 emits an artifact-hash-bound evidence record. Release aggregation requires all four
-target records, including the provider subprobe. These are bounded runtime checks,
+target records, including all provider and CLI subprobes. These are bounded runtime checks,
 not signing, notarization, DMG/DEB installation, renderer, accessibility,
 live-provider/CLI, or distribution certification.
 
 For the current source, a local macOS arm64 `package:mac` build and unpacked native
-smoke passed, including the deterministic provider turn. Current-source
+smoke passed, including the complete deterministic M1.1 provider/runtime matrix.
+Current-source
 distributable scope and four-target aggregation have not been run. The older
 [four-target Package previews run](https://github.com/AlphaBetSoup789/ground/actions/runs/30473714099)
 completed the required macOS arm64, macOS x64, Windows x64, and Linux x64 jobs for
-source commit `a3073a8`, but predates the packaged-provider-turn requirement. Its
-artifact-bound records prove only the earlier smoke contract and cannot satisfy the
-current aggregate. Neither evidence set certifies signing, notarization, DMG/DEB
-installation, renderer accessibility, live providers/CLIs, or supported
+source commit `a3073a8`, but predates the expanded provider/runtime matrix. Its
+artifact-bound records prove only the earlier smoke contract and cannot satisfy
+the current aggregate. Neither evidence set certifies signing, notarization,
+DMG/DEB installation, renderer accessibility, live providers/CLIs, or supported
 distribution.
 
 The next storage boundary is a transactional, append-only event store with schema

@@ -71,10 +71,12 @@ unpacked app's main process, renderer document, and sandboxed preload without
 browser automation. The native smoke additionally checks packaged identity,
 performs an OS-encrypted credential-vault round trip, opens and automatically
 cancels a real native approval dialog, and exercises the packaged PTY binding, Git
-status, a fixed exact-envelope local stdio MCP exchange, and bounded process-tree
-cleanup. The distributable smoke reruns that native scope after extracting the
-macOS ZIP, temporarily installing and verifying removal of the Windows NSIS
-package, or extracting the Linux AppImage. It does not test DMG or DEB installation.
+status, deterministic provider successes and expected failures, a smoke-owned
+recognized Codex-dialect child with exact two-phase authorization, a fixed
+exact-envelope local stdio MCP exchange, and bounded process-tree cleanup. The
+distributable smoke reruns that native scope after extracting the macOS ZIP,
+temporarily installing and verifying removal of the Windows NSIS package, or
+extracting the Linux AppImage. It does not test DMG or DEB installation.
 
 Linux native/distributable smokes and real credential saves require a working
 Secret Service/libsecret backend and an unlocked keyring; Electron’s `basic_text`

@@ -79,7 +79,7 @@ are not necessarily release-certified.
 - [x] Add a packaged, credential-free, token-bound loopback OpenAI-compatible
   readiness and first-turn fixture that crosses the production registry,
   `RunManager`, and durable state without claiming external-provider certification
-- [ ] Complete the remaining M1.1 production-app smoke matrix for a direct
+- [x] Complete the remaining M1.1 production-app smoke matrix for a direct
   first-class API, a recognized CLI deterministic child, and malformed
   provider/runtime responses
 
@@ -97,8 +97,9 @@ are not necessarily release-certified.
   commits, and clean managed-worktree create/remove
 - [x] Add a recoverable selected-file restore/undo workflow
 - [x] Add fixed packaged-app identity, encrypted-vault, native-dialog, PTY, Git,
-  deterministic compatible-provider first-turn, MCP-launch, and process-tree
-  cancellation runtime evidence
+  deterministic compatible/first-class provider turns, expected provider
+  failures, recognized-CLI success with a non-fatal warning, MCP launch, and
+  process-tree cancellation runtime evidence
 - [ ] Add adversarial packaged renderer-interaction and accessibility end-to-end
   certification
 
@@ -126,8 +127,8 @@ are not necessarily release-certified.
 - [x] Require distributable-bound runtime evidence for macOS arm64/x64, Windows
   x64, and Linux x64, including temporary NSIS installation and ZIP/AppImage
   extraction
-- [ ] Re-run the current provider-first-turn runtime-evidence contract against all
-  four native distributables and verify the aggregate
+- [ ] Re-run the current provider/runtime-matrix evidence contract against all four
+  native distributables and verify the aggregate
 - [x] Scaffold a tag workflow for checksums, CycloneDX SBOM, build/SBOM
   attestations, and a draft prerelease
 - [ ] Produce signed, notarized macOS artifacts from protected CI

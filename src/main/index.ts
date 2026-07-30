@@ -106,7 +106,12 @@ import {
   shouldMigrateLegacyData,
   writePackagedSmokeResult
 } from './packaged-smoke'
+import {
+  PackagedCliSmokeTrustAuthority,
+  runPackagedCliSmoke
+} from './packaged-cli-smoke'
 import { runPackagedProviderSmoke } from './packaged-provider-smoke'
+import { runPackagedProviderFailureSmoke } from './packaged-provider-failure-smoke'
 import {
   CliTrustRegistry,
   type CliTrustRequest,
@@ -1982,7 +1987,15 @@ if (!ownsInstance) {
     if (credentialNotice) store.addRecoveryNotice(credentialNotice)
     const workspaceGrants = new WorkspaceGrantRegistry()
     await workspaceGrants.restore(store.snapshot().tasks.map((task) => task.workspacePath))
-    const cliTrust = new CliTrustRegistry(confirmCliTrust)
+    const packagedCliSmokeTrustAuthority =
+      packagedSmokeConfig?.scope === 'native'
+        ? new PackagedCliSmokeTrustAuthority(packagedSmokeConfig)
+        : undefined
+    const cliTrust = new CliTrustRegistry(
+      packagedCliSmokeTrustAuthority
+        ? packagedCliSmokeTrustAuthority.confirm
+        : confirmCliTrust
+    )
     const authorizeCliInvocation = (
       request: Parameters<CliTrustRegistry['authorizeInvocation']>[0]
     ) => cliTrust.authorizeInvocation(request)
@@ -2055,18 +2068,46 @@ if (!ownsInstance) {
       if (packagedSmokeConfig.scope === 'native') {
         Object.assign(
           checks,
-          await runPackagedNativeSmoke(packagedSmokeConfig, () =>
-            runPackagedProviderSmoke({
-              token: packagedSmokeConfig.token,
-              directory: packagedSmokeConfig.directory,
-              userDataPath: packagedSmokeConfig.userDataPath,
-              store,
-              providers,
-              runs,
-              workspaceGrants,
-              runEvents: () => packagedSmokeRunEvents
-            })
-          )
+          await runPackagedNativeSmoke(packagedSmokeConfig, {
+            provider: () =>
+              runPackagedProviderSmoke({
+                token: packagedSmokeConfig.token,
+                directory: packagedSmokeConfig.directory,
+                userDataPath: packagedSmokeConfig.userDataPath,
+                store,
+                providers,
+                runs,
+                workspaceGrants,
+                runEvents: () => packagedSmokeRunEvents
+              }),
+            providerFailures: () =>
+              runPackagedProviderFailureSmoke({
+                token: packagedSmokeConfig.token,
+                directory: packagedSmokeConfig.directory,
+                userDataPath: packagedSmokeConfig.userDataPath,
+                store,
+                providers,
+                runs,
+                workspaceGrants,
+                runEvents: () => packagedSmokeRunEvents
+              }),
+            cli: () => {
+              if (!packagedCliSmokeTrustAuthority) {
+                throw new Error(
+                  'Packaged native CLI smoke trust authority is unavailable'
+                )
+              }
+              return runPackagedCliSmoke({
+                config: packagedSmokeConfig,
+                store,
+                providers,
+                runs,
+                workspaceGrants,
+                trustAuthority: packagedCliSmokeTrustAuthority,
+                runEvents: () => packagedSmokeRunEvents
+              })
+            }
+          })
         )
       }
       await finishPackagedSmoke(checks)

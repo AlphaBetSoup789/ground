@@ -3,6 +3,8 @@ import path from 'node:path'
 import process from 'node:process'
 import { sha256File } from './lib/packaged-components.mjs'
 import {
+  hasCompleteCliRuntimeEvidence,
+  hasCompleteProviderFailureRuntimeEvidence,
   hasCompleteProviderRuntimeEvidence,
   REQUIRED_NATIVE_RUNTIME_CHECKS
 } from './lib/package-runtime-evidence-contract.mjs'
@@ -87,6 +89,17 @@ for (const target of targets) {
     invalid(evidenceName, 'target metadata does not match the release')
   }
   if (
+    !hasCompleteCliRuntimeEvidence(document.evidence?.cliRuntime) ||
+    document.runtimeHarness?.cliRunnerMatched !== true ||
+    !/^[a-f0-9]{64}$/u.test(
+      document.runtimeHarness?.nodeSha256 ?? ''
+    ) ||
+    document.runtimeHarness.nodeSha256 !==
+      document.evidence?.cliRuntime?.fixture?.runnerNodeSha256
+  ) {
+    invalid(evidenceName, 'recognized CLI runtime evidence is incomplete')
+  }
+  if (
     REQUIRED_NATIVE_RUNTIME_CHECKS.some(
       (name) => document.checks?.[name] !== true
     )
@@ -122,6 +135,16 @@ for (const target of targets) {
     )
   ) {
     invalid(evidenceName, 'provider runtime evidence is incomplete')
+  }
+  if (
+    !hasCompleteProviderFailureRuntimeEvidence(
+      document.evidence?.providerFailureRuntime
+    )
+  ) {
+    invalid(
+      evidenceName,
+      'provider expected-failure runtime evidence is incomplete'
+    )
   }
   if (
     document.distributable?.name !== target.artifact ||

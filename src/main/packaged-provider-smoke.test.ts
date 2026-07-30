@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -28,7 +28,7 @@ import {
 const TOKEN = '0123456789abcdef0123456789abcdef'
 const temporaryDirectories: string[] = []
 
-function keylessVault(): SecretVault {
+function inMemoryVault(): SecretVault {
   const values = new Map<string, string>()
   return {
     get: (reference: string) => values.get(reference),
@@ -43,7 +43,7 @@ function keylessVault(): SecretVault {
       for (const reference of references) values.delete(reference)
     },
     assertSteadyState: () => {
-      // This keyless fixture never approaches vault capacity.
+      // This focused fixture never approaches vault capacity.
     }
   } as unknown as SecretVault
 }
@@ -68,7 +68,7 @@ describe('packaged provider first-turn smoke', () => {
     const statePath = path.join(userDataPath, 'ground-state.json')
     const store = new StateStore(statePath)
     await store.load()
-    const vault = keylessVault()
+    const vault = inMemoryVault()
     const workspaceGrants = new WorkspaceGrantRegistry()
     const providerOperations = new ProviderOperationGate()
     const events: RunEvent[] = []
@@ -115,6 +115,7 @@ describe('packaged provider first-turn smoke', () => {
     })
 
     expect(evidence).toMatchObject({
+      version: 2,
       fixture: {
         protocol: 'openai-compatible',
         binding: 'token-bound-literal-loopback',
@@ -136,25 +137,108 @@ describe('packaged provider first-turn smoke', () => {
         modelSessionPersisted: true,
         noFailurePersisted: true
       },
+      openAiResponses: {
+        fixture: {
+          providerKind: 'openai',
+          protocol: 'openai-responses',
+          adapterId: 'openai.responses',
+          binding: 'token-bound-literal-loopback',
+          externalCredentialsUsed: false,
+          syntheticCredentialAuthorizationValidated: true,
+          modelDiscoveryRequests: 1,
+          streamingResponseRequests: 1,
+          streamedContentChunks: 2,
+          responsesRequestValidated: true,
+          storeDisabled: true
+        },
+        credentials: {
+          required: true,
+          versionedReferencePersisted: true,
+          reusedForReadiness: true,
+          reusedForFirstTurn: true,
+          absentFromPersistedState: true
+        },
+        readiness: {
+          passed: true,
+          persisted: true,
+          scope: 'connection'
+        },
+        firstTurn: {
+          runCompletedEventObserved: true,
+          taskIdleAfterStateReload: true,
+          assistantMarkerPersisted: true,
+          providerAttributionPersisted: true,
+          modelSessionPersisted: true,
+          noFailurePersisted: true
+        }
+      },
       claims: {
         proves: [...PACKAGED_PROVIDER_SMOKE_PROVES],
         doesNotProve: [...PACKAGED_PROVIDER_SMOKE_DOES_NOT_PROVE]
       }
     })
-    expect(events.some((event) => event.type === 'run-completed')).toBe(true)
+    expect(
+      events.filter((event) => event.type === 'run-completed')
+    ).toHaveLength(2)
     expect(events.some((event) => event.type === 'run-error')).toBe(false)
+    expect(JSON.stringify(evidence)).not.toContain(
+      'ground-packaged-fixture-'
+    )
 
     const reloaded = new StateStore(statePath)
     await reloaded.load()
-    const task = reloaded.snapshot().tasks[0]
-    expect(task).toMatchObject({
+    const snapshot = reloaded.snapshot()
+    const tasks = snapshot.tasks
+    expect(tasks).toHaveLength(2)
+    const openAiProvider = snapshot.providers.find(
+      (provider) => provider.kind === 'openai'
+    )
+    expect(openAiProvider).toMatchObject({
+      kind: 'openai',
+      model: 'ground-packaged-openai-responses',
+      hasApiKey: true,
+      verification: {
+        status: 'passed',
+        scope: 'connection'
+      }
+    })
+    expect(openAiProvider?.credentialRevision).toMatch(
+      /^credential_/u
+    )
+    expect(
+      tasks.find((task) =>
+        task.items.some(
+          (item) =>
+            item.kind === 'message' &&
+            item.role === 'assistant' &&
+            item.provider?.kind === 'openai-compatible'
+        )
+      )
+    ).toMatchObject({
       runStatus: 'idle',
       mode: 'agent'
     })
+    const openAiTask = tasks.find(
+      (task) => task.providerId === openAiProvider?.id
+    )
     expect(
-      task?.items.find(
-        (item) => item.kind === 'message' && item.role === 'assistant'
-      )
+      openAiProvider
+        ? openAiTask?.modelSessions?.[openAiProvider.id]
+        : undefined
+    ).toMatchObject({
+      adapterId: 'openai.responses',
+      origin: 'ground',
+      model: 'ground-packaged-openai-responses'
+    })
+    expect(
+      tasks
+        .flatMap((task) => task.items)
+        .find(
+          (item) =>
+            item.kind === 'message' &&
+            item.role === 'assistant' &&
+            item.provider?.kind === 'openai-compatible'
+        )
     ).toMatchObject({
       content: `ground-packaged-provider-ok-${TOKEN}`,
       provider: {
@@ -162,5 +246,38 @@ describe('packaged provider first-turn smoke', () => {
         model: 'ground-packaged-compatible'
       }
     })
+    expect(
+      tasks.find((task) =>
+        task.items.some(
+          (item) =>
+            item.kind === 'message' &&
+            item.role === 'assistant' &&
+            item.provider?.kind === 'openai'
+        )
+      )
+    ).toMatchObject({
+      runStatus: 'idle',
+      mode: 'agent'
+    })
+    expect(
+      tasks
+        .flatMap((task) => task.items)
+        .find(
+          (item) =>
+            item.kind === 'message' &&
+            item.role === 'assistant' &&
+            item.provider?.kind === 'openai'
+        )
+    ).toMatchObject({
+      content:
+        `ground-packaged-openai-responses-ok-${TOKEN}`,
+      provider: {
+        kind: 'openai',
+        model: 'ground-packaged-openai-responses'
+      }
+    })
+    expect(await readFile(statePath, 'utf8')).not.toContain(
+      'ground-packaged-fixture-'
+    )
   })
 })

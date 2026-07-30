@@ -8,10 +8,26 @@ import { afterEach, describe, expect, it } from 'vitest'
 import packageMetadata from '../package.json' with { type: 'json' }
 import { classifyUnsignedMacSignature } from './lib/mac-signature.mjs'
 import {
+  CLI_RUNTIME_DOES_NOT_PROVE,
+  CLI_RUNTIME_PROVES,
+  PROVIDER_FAILURE_RUNTIME_DOES_NOT_PROVE,
+  PROVIDER_FAILURE_RUNTIME_PROVES,
   PROVIDER_RUNTIME_DOES_NOT_PROVE,
   PROVIDER_RUNTIME_PROVES,
   REQUIRED_NATIVE_RUNTIME_CHECKS
 } from './lib/package-runtime-evidence-contract.mjs'
+import {
+  PACKAGED_CLI_SMOKE_DOES_NOT_PROVE,
+  PACKAGED_CLI_SMOKE_PROVES
+} from '../src/main/packaged-cli-smoke.ts'
+import {
+  PACKAGED_PROVIDER_FAILURE_SMOKE_DOES_NOT_PROVE,
+  PACKAGED_PROVIDER_FAILURE_SMOKE_PROVES
+} from '../src/main/packaged-provider-failure-smoke.ts'
+import {
+  PACKAGED_PROVIDER_SMOKE_DOES_NOT_PROVE,
+  PACKAGED_PROVIDER_SMOKE_PROVES
+} from '../src/main/packaged-provider-smoke.ts'
 
 const execFileAsync = promisify(execFile)
 const projectRoot = path.resolve(import.meta.dirname, '..')
@@ -69,6 +85,27 @@ afterEach(async () => {
 })
 
 describe('release artifact and runtime-evidence verification', () => {
+  it('keeps packaged-runtime proof claims synchronized with the release contract', () => {
+    expect([...PACKAGED_PROVIDER_SMOKE_PROVES]).toEqual([
+      ...PROVIDER_RUNTIME_PROVES
+    ])
+    expect([...PACKAGED_PROVIDER_SMOKE_DOES_NOT_PROVE]).toEqual([
+      ...PROVIDER_RUNTIME_DOES_NOT_PROVE
+    ])
+    expect([...PACKAGED_PROVIDER_FAILURE_SMOKE_PROVES]).toEqual([
+      ...PROVIDER_FAILURE_RUNTIME_PROVES
+    ])
+    expect([
+      ...PACKAGED_PROVIDER_FAILURE_SMOKE_DOES_NOT_PROVE
+    ]).toEqual([...PROVIDER_FAILURE_RUNTIME_DOES_NOT_PROVE])
+    expect([...PACKAGED_CLI_SMOKE_PROVES]).toEqual([
+      ...CLI_RUNTIME_PROVES
+    ])
+    expect([...PACKAGED_CLI_SMOKE_DOES_NOT_PROVE]).toEqual([
+      ...CLI_RUNTIME_DOES_NOT_PROVE
+    ])
+  })
+
   it('uses canonical Linux x64 names and accepts only unsigned macOS identities', () => {
     expect(packageMetadata.build.linux.artifactName).toBe(
       'Ground-${version}-linux-x64.${ext}'
@@ -126,6 +163,10 @@ describe('release artifact and runtime-evidence verification', () => {
         platform,
         architecture,
         installationSource: source,
+        runtimeHarness: {
+          nodeSha256: 'b'.repeat(64),
+          cliRunnerMatched: true
+        },
         distributable: {
           name: artifact,
           sha256: sha256(contents)
@@ -150,8 +191,53 @@ describe('release artifact and runtime-evidence verification', () => {
           },
           nativeApproval: { cancelled: true },
           mcpLaunchApproval: { exactEnvelopeValidated: true },
-          providerRuntime: {
+          cliRuntime: {
             version: 1,
+            fixture: {
+              dialect: 'codex',
+              adapterId: 'openai.codex-cli',
+              binding: 'token-bound-runner-node-child',
+              selection: 'source-registered-recognized-adapter',
+              passiveDetectionExercised: false,
+              externalCredentialsUsed: false,
+              externalVendorCliUsed: false,
+              runnerNodeSha256: 'b'.repeat(64),
+              scriptSha256: 'c'.repeat(64),
+              structuredRecordsEmitted: 7,
+              stdinPromptTokenObserved: true
+            },
+            readiness: {
+              passed: true,
+              persisted: true,
+              scope: 'configuration'
+            },
+            trust: {
+              configurationAuthorizations: 1,
+              invocationAuthorizations: 1,
+              exactLaunchEnvelopeValidated: true,
+              exactConfigurationValidated: true,
+              exactInvocationValidated: true,
+              fixtureRevalidatedBeforeEachAuthorization: true,
+              humanApprovalExercised: false
+            },
+            firstTurn: {
+              runCompletedEventObserved: true,
+              taskIdleAfterStateReload: true,
+              assistantMarkerPersisted: true,
+              providerAttributionPersisted: true,
+              runtimeSessionPersisted: true,
+              successfulCommandLifecyclePersisted: true,
+              usagePersisted: true,
+              warningNoticeCount: 1,
+              noFailurePersisted: true
+            },
+            claims: {
+              proves: [...CLI_RUNTIME_PROVES],
+              doesNotProve: [...CLI_RUNTIME_DOES_NOT_PROVE]
+            }
+          },
+          providerRuntime: {
+            version: 2,
             fixture: {
               protocol: 'openai-compatible',
               binding: 'token-bound-literal-loopback',
@@ -173,9 +259,76 @@ describe('release artifact and runtime-evidence verification', () => {
               modelSessionPersisted: true,
               noFailurePersisted: true
             },
+            openAiResponses: {
+              fixture: {
+                providerKind: 'openai',
+                protocol: 'openai-responses',
+                adapterId: 'openai.responses',
+                binding: 'token-bound-literal-loopback',
+                externalCredentialsUsed: false,
+                syntheticCredentialAuthorizationValidated: true,
+                modelDiscoveryRequests: 1,
+                streamingResponseRequests: 1,
+                streamedContentChunks: 2,
+                responsesRequestValidated: true,
+                storeDisabled: true
+              },
+              credentials: {
+                required: true,
+                versionedReferencePersisted: true,
+                reusedForReadiness: true,
+                reusedForFirstTurn: true,
+                absentFromPersistedState: true
+              },
+              readiness: {
+                passed: true,
+                persisted: true,
+                scope: 'connection'
+              },
+              firstTurn: {
+                runCompletedEventObserved: true,
+                taskIdleAfterStateReload: true,
+                assistantMarkerPersisted: true,
+                providerAttributionPersisted: true,
+                modelSessionPersisted: true,
+                noFailurePersisted: true
+              }
+            },
             claims: {
               proves: [...PROVIDER_RUNTIME_PROVES],
               doesNotProve: [...PROVIDER_RUNTIME_DOES_NOT_PROVE]
+            }
+          },
+          providerFailureRuntime: {
+            version: 1,
+            fixture: {
+              protocol: 'openai-compatible',
+              binding: 'token-bound-literal-loopback',
+              externalCredentialsUsed: false,
+              malformedModelDiscoveryRequests: 1,
+              malformedGenerationRequests: 1
+            },
+            unavailableLoopback: {
+              expectedFailureObserved: true,
+              failureKind: 'connection-refused',
+              failedConnectionReadinessPersisted: true,
+              correctiveGuidanceObserved: true,
+              genericFetchFailureHidden: true,
+              runBlockedBeforeDispatch: true
+            },
+            malformedResponse: {
+              expectedFailureObserved: true,
+              phase: 'readiness',
+              failedConnectionReadinessPersisted: true,
+              invalidAssistantShapeObserved: true,
+              notMisclassifiedAsConnectionRefused: true,
+              runBlockedBeforeDispatch: true
+            },
+            claims: {
+              proves: [...PROVIDER_FAILURE_RUNTIME_PROVES],
+              doesNotProve: [
+                ...PROVIDER_FAILURE_RUNTIME_DOES_NOT_PROVE
+              ]
             }
           }
         }
@@ -235,6 +388,62 @@ describe('release artifact and runtime-evidence verification', () => {
     linuxEvidence.evidence.providerRuntime.claims.doesNotProve = [
       ...PROVIDER_RUNTIME_DOES_NOT_PROVE
     ]
+    await writeFile(
+      linuxEvidencePath,
+      `${JSON.stringify(linuxEvidence)}\n`
+    )
+
+    linuxEvidence.evidence.providerRuntime.openAiResponses.fixture.storeDisabled =
+      false
+    await writeFile(
+      linuxEvidencePath,
+      `${JSON.stringify(linuxEvidence)}\n`
+    )
+    await expect(
+      runScript('scripts/verify-package-runtime-evidence.mjs', [directory], {
+        GITHUB_SHA: releaseCommit
+      })
+    ).rejects.toThrow(/provider runtime evidence is incomplete/iu)
+    linuxEvidence.evidence.providerRuntime.openAiResponses.fixture.storeDisabled =
+      true
+
+    linuxEvidence.evidence.providerFailureRuntime.unavailableLoopback.runBlockedBeforeDispatch =
+      false
+    await writeFile(
+      linuxEvidencePath,
+      `${JSON.stringify(linuxEvidence)}\n`
+    )
+    await expect(
+      runScript('scripts/verify-package-runtime-evidence.mjs', [directory], {
+        GITHUB_SHA: releaseCommit
+      })
+    ).rejects.toThrow(/expected-failure runtime evidence is incomplete/iu)
+    linuxEvidence.evidence.providerFailureRuntime.unavailableLoopback.runBlockedBeforeDispatch =
+      true
+
+    linuxEvidence.evidence.cliRuntime.firstTurn.warningNoticeCount = 0
+    await writeFile(
+      linuxEvidencePath,
+      `${JSON.stringify(linuxEvidence)}\n`
+    )
+    await expect(
+      runScript('scripts/verify-package-runtime-evidence.mjs', [directory], {
+        GITHUB_SHA: releaseCommit
+      })
+    ).rejects.toThrow(/recognized CLI runtime evidence is incomplete/iu)
+    linuxEvidence.evidence.cliRuntime.firstTurn.warningNoticeCount = 1
+
+    linuxEvidence.runtimeHarness.nodeSha256 = 'd'.repeat(64)
+    await writeFile(
+      linuxEvidencePath,
+      `${JSON.stringify(linuxEvidence)}\n`
+    )
+    await expect(
+      runScript('scripts/verify-package-runtime-evidence.mjs', [directory], {
+        GITHUB_SHA: releaseCommit
+      })
+    ).rejects.toThrow(/recognized CLI runtime evidence is incomplete/iu)
+    linuxEvidence.runtimeHarness.nodeSha256 = 'b'.repeat(64)
     await writeFile(
       linuxEvidencePath,
       `${JSON.stringify(linuxEvidence)}\n`

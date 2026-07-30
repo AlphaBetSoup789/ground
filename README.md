@@ -650,10 +650,11 @@ authorization/attachments/scrollback, and Git filter neutralization,
 staging/commits/recoverable restore/worktree containment/removal.
 
 Compatibility and application tests use deterministic local fixtures, mocked
-transports/processes, one credential-free loopback OpenAI-compatible SSE wire
-server, and fixed native package probes. They do not make paid live-provider
-requests, contact a real cloud/Ollama/LM Studio deployment, or certify
-authenticated Codex, Claude, Gemini, Antigravity, or Generic CLI runs.
+transports/processes, token-bound loopback provider servers, a smoke-owned
+Codex-dialect child, and fixed native package probes. They do not make paid
+live-provider requests, contact a real cloud/Ollama/LM Studio deployment, or
+certify an installed and authenticated Codex, Claude, Gemini, Antigravity, or
+Generic CLI.
 
 ## Package a preview
 
@@ -685,18 +686,34 @@ matching native runners. They launch the unpacked app with an isolated temporary
 profile and verify real main/preload/document startup without browser automation.
 A bounded native smoke verifies packaged app identity, performs an OS-encrypted
 credential-vault set/reload/get/delete round trip, opens and automatically cancels
-a real native approval dialog, and exercises PTY, Git, a deterministic packaged
-OpenAI-compatible provider first turn, an exact local stdio MCP launch/call, and
-process-tree cleanup.
+a real native approval dialog, and exercises PTY, Git, the M1.1 provider/runtime
+matrix, an exact local stdio MCP launch/call, and process-tree cleanup.
 
-The provider subprobe starts a credential-free, token-bound server on literal
-loopback. Through the packaged main process it saves and persistently verifies one
-OpenAI-compatible profile, streams one first task turn through the production
-adapter registry and `RunManager`, reloads state, and checks the assistant marker,
-provider attribution, continuation state, idle task status, and absence of a
-persisted failure. It does not prove hosted credentials or internet reachability,
-the behavior of Ollama, LM Studio, or another vendor service, CLI execution, tool
-execution, or any provider protocol other than OpenAI-compatible.
+The provider/runtime matrix crosses the packaged main process, production static
+registry, `ProviderService`, `RunManager`, and durable state. It independently
+requires:
+
+- a credential-free literal-loopback OpenAI-compatible readiness check and
+  streamed first turn;
+- a first-class OpenAI Responses readiness check and streamed first turn using a
+  synthetic versioned credential, exact Bearer authorization, and `store: false`;
+- a closed literal-loopback endpoint classified as `connection-refused`, with
+  persisted failed readiness and dispatch blocked before a run event;
+- malformed compatible discovery and generation responses rejected without being
+  misclassified as a refused connection; and
+- a recognized Codex-dialect CLI turn through a token-bound Node child, including
+  exact configuration/invocation trust envelopes, native session, command
+  lifecycle, usage, and one non-fatal warning that must remain successful.
+
+The CLI child is created by the smoke in its private token directory, and its
+interpreter hash must match the Node executable running the outer smoke harness.
+The unattended fixture replaces the two positive human CLI dialog decisions with
+an exact smoke-only authority; it does not exercise passive detection or prove
+human acceptance or race-free script-argument binding against another same-user
+process. It also does not prove cleanup of a hung or hostile external CLI after
+abnormal application exit. None of these fixtures certify live credentials,
+internet/DNS/TLS behavior, an installed vendor CLI, a vendor sandbox, external
+tools, Ollama, LM Studio, or another vendor service.
 
 The distributable smoke extracts the macOS ZIP, silently installs the Windows NSIS
 package in a temporary directory and verifies the executable and installation
@@ -711,13 +728,14 @@ certification.
 
 For the current source, a local macOS arm64 `npm run package:mac` build and
 `npm run smoke:package:native` against its unpacked app passed, including the
-deterministic provider first turn. A current-source distributable smoke and
-four-target aggregate have not been run. The older
+complete deterministic M1.1 provider/runtime matrix described above. A
+current-source distributable smoke and four-target aggregate have not been run.
+The older
 [four-target Package previews run](https://github.com/AlphaBetSoup789/ground/actions/runs/30473714099)
 completed the required macOS arm64, macOS x64, Windows x64, and Linux x64 jobs for
-source commit `a3073a8`, but it predates the packaged-provider-turn requirement.
-Those artifact-bound records remain evidence only for that earlier smoke contract;
-they do not satisfy the current aggregate or certify later source or a supported
+source commit `a3073a8`, but it predates the expanded provider/runtime matrix.
+Those artifact-bound records remain evidence only for that earlier smoke contract
+and do not satisfy the current aggregate or certify later source or a supported
 distribution.
 
 Linux credentials require a working Secret Service/libsecret backend and an

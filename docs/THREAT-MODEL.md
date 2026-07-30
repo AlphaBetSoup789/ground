@@ -339,11 +339,16 @@ repository backup or rollback mechanism.
   canonical conversation after explicit opt-in.
 - Native package evidence is fixed and token-bound. It checks packaged identity, an
   OS-encrypted vault round trip, a production approval dialog’s fail-closed Cancel
-  result, PTY, Git, exact local MCP launch/call, and process cleanup, then repeats
-  that scope against an extracted macOS ZIP, temporarily installed Windows NSIS
-  package, or extracted Linux AppImage. Release aggregation requires
-  artifact-hash-bound records for macOS arm64/x64, Windows x64, and Linux x64.
-  The harness accepts no caller-selected executable or arbitrary MCP server.
+  result, PTY, Git, deterministic provider successes and expected failures, a
+  smoke-owned recognized Codex-dialect child, exact local MCP launch/call, and
+  process cleanup, then repeats that scope against an extracted macOS ZIP,
+  temporarily installed Windows NSIS package, or extracted Linux AppImage. The
+  positive CLI fixture uses a smoke-only authority restricted to its exact hashed
+  runner/script and two launch envelopes; normal application composition retains
+  native configuration and invocation dialogs. Release aggregation requires
+  artifact-hash-bound records for macOS arm64/x64, Windows x64, and Linux x64. The
+  harness accepts no caller-selected executable, arbitrary CLI child, or arbitrary
+  MCP server.
 
 ## Remaining release controls
 

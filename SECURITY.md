@@ -546,10 +546,15 @@ security recipient, before the first supported release.
   The driver strips process-loader/Node injection variables before launch. Native
   scope performs only fixed operations there: packaged identity, an encrypted
   `SecretVault` set/reload/get/delete round trip, a real production native approval
-  dialog aborted to its Cancel result, PTY, Git, an exact local MCP launch/call, and
-  process-tree cleanup. Its MCP fixture is an exact in-memory `-e` program bound to
-  Ground's own packaged executable; the one-shot auto-approval cannot authorize a
-  caller-supplied server.
+  dialog aborted to its Cancel result, PTY, Git, the deterministic provider/runtime
+  matrix, an exact local MCP launch/call, and process-tree cleanup. The matrix covers
+  compatible and first-class OpenAI success, refused-loopback and malformed
+  compatible failures, and one smoke-owned recognized Codex-dialect child. Positive
+  CLI authorization is confined to a smoke-only authority that accepts exactly the
+  hashed runner/script and configuration/invocation envelopes; normal composition
+  continues to use the native dialogs. The MCP fixture is an exact in-memory `-e`
+  program bound to Ground's own packaged executable; its one-shot auto-approval
+  cannot authorize a caller-supplied server.
 - A second driver runs native scope against an extracted macOS ZIP, a temporarily
   installed Windows NSIS package (then invokes its uninstaller), or an extracted
   Linux AppImage. Runtime-evidence records bind the package version,

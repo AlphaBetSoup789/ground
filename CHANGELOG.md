@@ -83,14 +83,18 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
   shipped-content SBOM coverage, and deterministic release checksums.
 - Native-runner packaged startup and runtime smokes: a private
   main/preload/document readiness handshake plus packaged identity, encrypted-vault
-  round trip, fail-closed native approval dialog, PTY, Git, one deterministic
-  credential-free OpenAI-compatible readiness and first-turn path, local stdio MCP,
-  and descendant-cleanup probes. Distributable smoke extracts the macOS ZIP,
+  round trip, fail-closed native approval dialog, PTY, Git, deterministic
+  OpenAI-compatible and first-class OpenAI Responses readiness/first-turn paths,
+  expected refused-loopback and malformed-response failures, a recognized
+  Codex-dialect child with successful non-fatal warning persistence, local stdio
+  MCP, and descendant-cleanup probes. Distributable smoke extracts the macOS ZIP,
   temporarily installs/uninstalls Windows NSIS, or extracts the Linux AppImage,
   then binds runtime-evidence records to the exact artifact and architecture.
 - A four-target packaging-evidence contract for macOS arm64, macOS x64, Windows
   x64, and Linux x64, with release-time evidence inventory, SHA-256 verification,
-  and mandatory packaged-provider-turn evidence.
+  independently mandatory provider success/failure and recognized-CLI evidence,
+  and an exact binding between the CLI fixture interpreter and its outer smoke
+  harness.
 
 ### Changed
 
@@ -260,8 +264,8 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
 ### Verification boundary
 
 - Compatibility and application suites use deterministic local fixtures, mocked
-  transports/processes, a credential-free loopback SSE integration through the
-  production OpenAI-compatible adapter, and fixed runtime/native package probes.
+  transports/processes, token-bound loopback provider integrations, a smoke-owned
+  recognized-CLI child, and fixed runtime/native package probes.
 - No CI check makes a paid live-provider request or certifies an authenticated
   Codex, Claude, Gemini, Antigravity, or Generic CLI agent turn.
 - Unsigned preview packages and runtime-evidence records are not signing,
