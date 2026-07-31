@@ -6,6 +6,7 @@ import type {
   ModelApiProvider,
   ModelProviderKind,
   ProviderDraft,
+  ProviderFailureKind,
   ProviderProfile,
   ProviderTestResult,
   ProviderVerification
@@ -57,6 +58,78 @@ const PROVIDER_DISCOVERY_TIMEOUT_MS = 10_000
 const COMPATIBLE_GENERATION_TIMEOUT_MS = 10_000
 const COMPATIBLE_GENERATION_MAX_TOKENS = 4
 const execFileAsync = promisify(execFile)
+
+const DNS_ERROR_CODES = new Set([
+  'EAI_AGAIN',
+  'EAI_FAIL',
+  'EAI_NONAME',
+  'ENODATA',
+  'ENONAME',
+  'ENOTFOUND'
+])
+const TLS_ERROR_CODES = new Set([
+  'CERT_HAS_EXPIRED',
+  'CERT_NOT_YET_VALID',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'ERR_SSL_CERTIFICATE_VERIFY_FAILED',
+  'ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION',
+  'ERR_SSL_WRONG_VERSION_NUMBER',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_GET_ISSUER_CERT',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE'
+])
+const TIMEOUT_ERROR_CODES = new Set([
+  'ERR_HTTP_HEADERS_TIMEOUT',
+  'ESOCKETTIMEDOUT',
+  'ETIMEDOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT'
+])
+const MAX_PROVIDER_ERROR_CAUSE_NODES = 32
+const PROVIDER_CREDENTIAL_REDACTION_MARKERS = [
+  '[redacted]',
+  '[credential removed]',
+  '[private value]',
+  '[removed]',
+  ''
+] as const
+
+class ProviderHttpResponseError extends Error {
+  constructor(
+    readonly status: number,
+    readonly rateLimitHeader: boolean,
+    message: string
+  ) {
+    super(message)
+    this.name = 'ProviderHttpResponseError'
+  }
+}
+
+class ProviderProtocolShapeError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'ProviderProtocolShapeError'
+  }
+}
+
+class ProviderProbeTimeoutError extends Error {
+  constructor(timeoutMs: number, cause: unknown) {
+    super(`timed out after ${timeoutMs / 1_000} seconds`, { cause })
+    this.name = 'ProviderProbeTimeoutError'
+  }
+}
+
+class CliExecutableNotFoundError extends Error {
+  constructor(command: string) {
+    super(
+      `Ground could not resolve ${command}. Choose an absolute executable path.`
+    )
+    this.name = 'CliExecutableNotFoundError'
+  }
+}
 
 export function assertProviderCanStartRun(provider: ProviderProfile): void {
   if (provider.verification?.status !== 'passed') {
@@ -269,20 +342,30 @@ function discoveredModels(kind: ModelProviderKind, payload: unknown): string[] {
     .slice(0, 100)
 }
 
-function hasOpenAiCompatibleDiscoveryShape(payload: unknown): boolean {
+function hasModelDiscoveryShape(
+  kind: ModelProviderKind,
+  payload: unknown
+): boolean {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     return false
   }
-  const entries = (payload as Record<string, unknown>).data
+  const entries =
+    kind === 'google'
+      ? (payload as Record<string, unknown>).models
+      : (payload as Record<string, unknown>).data
   return (
     Array.isArray(entries) &&
     entries.every(
-      (entry) =>
-        Boolean(entry) &&
-        typeof entry === 'object' &&
-        !Array.isArray(entry) &&
-        typeof (entry as Record<string, unknown>).id === 'string' &&
-        ((entry as Record<string, unknown>).id as string).length > 0
+      (entry) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+          return false
+        }
+        const identifier =
+          kind === 'google'
+            ? (entry as Record<string, unknown>).name
+            : (entry as Record<string, unknown>).id
+        return typeof identifier === 'string' && identifier.trim().length > 0
+      }
     )
   )
 }
@@ -298,7 +381,9 @@ function compatibleChatEndpoint(baseUrl: string): string {
 
 function validateCompatibleGeneration(payload: unknown): void {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    throw new Error('Generation probe returned an invalid response object')
+    throw new ProviderProtocolShapeError(
+      'Generation probe returned an invalid response object'
+    )
   }
   const choices = (payload as Record<string, unknown>).choices
   if (
@@ -308,7 +393,9 @@ function validateCompatibleGeneration(payload: unknown): void {
     typeof choices[0] !== 'object' ||
     Array.isArray(choices[0])
   ) {
-    throw new Error('Generation probe returned an invalid choices array')
+    throw new ProviderProtocolShapeError(
+      'Generation probe returned an invalid choices array'
+    )
   }
   const message = (choices[0] as Record<string, unknown>).message
   if (
@@ -317,7 +404,9 @@ function validateCompatibleGeneration(payload: unknown): void {
     Array.isArray(message) ||
     typeof (message as Record<string, unknown>).content !== 'string'
   ) {
-    throw new Error('Generation probe returned an invalid assistant message')
+    throw new ProviderProtocolShapeError(
+      'Generation probe returned an invalid assistant message'
+    )
   }
 }
 
@@ -327,7 +416,9 @@ async function readResponseText(
 ): Promise<string> {
   const declared = Number(response.headers.get('content-length'))
   if (Number.isFinite(declared) && declared > maximumBytes) {
-    throw new Error('Provider response exceeds its size limit')
+    throw new ProviderProtocolShapeError(
+      'Provider response exceeds its size limit'
+    )
   }
   if (!response.body) return ''
 
@@ -341,7 +432,9 @@ async function readResponseText(
       if (done) break
       total += value.byteLength
       if (total > maximumBytes) {
-        throw new Error('Provider response exceeds its size limit')
+        throw new ProviderProtocolShapeError(
+          'Provider response exceeds its size limit'
+        )
       }
       text += decoder.decode(value, { stream: true })
     }
@@ -353,15 +446,52 @@ async function readResponseText(
 }
 
 function redactKnownSecret(value: string, secret: string | undefined): string {
-  return secret
-    ? value.replaceAll(secret, '[redacted]')
-    : value
+  if (!secret) return value
+
+  const patterns = [
+    ...new Set([secret, JSON.stringify(secret).slice(1, -1)])
+  ].sort(
+    (left, right) => right.length - left.length || left.localeCompare(right)
+  )
+  const marker =
+    PROVIDER_CREDENTIAL_REDACTION_MARKERS.find((candidate) =>
+      patterns.every((pattern) => !candidate.includes(pattern))
+    ) ?? ''
+  let redacted = value
+  for (const pattern of patterns) {
+    redacted = redacted.replaceAll(pattern, marker)
+  }
+
+  // A replacement can join surrounding text into another raw or escaped
+  // occurrence. Remove any such reconstructed value before bounding output.
+  let removedReconstructedValue = true
+  while (removedReconstructedValue) {
+    removedReconstructedValue = false
+    for (const pattern of patterns) {
+      if (!redacted.includes(pattern)) continue
+      redacted = redacted.replaceAll(pattern, '')
+      removedReconstructedValue = true
+    }
+  }
+  return redacted
 }
 
-function safeNetworkErrorCode(error: unknown): string | undefined {
+function safeNetworkErrorCodes(error: unknown): string[] {
   const pending: unknown[] = [error]
   const visited = new Set<object>()
-  while (pending.length > 0 && visited.size < 32) {
+  const codes: string[] = []
+  const enqueue = (candidate: unknown): void => {
+    if (
+      candidate !== undefined &&
+      pending.length + visited.size < MAX_PROVIDER_ERROR_CAUSE_NODES
+    ) {
+      pending.push(candidate)
+    }
+  }
+  while (
+    pending.length > 0 &&
+    visited.size < MAX_PROVIDER_ERROR_CAUSE_NODES
+  ) {
     const candidate = pending.shift()
     if (
       (typeof candidate !== 'object' || candidate === null) &&
@@ -378,18 +508,121 @@ function safeNetworkErrorCode(error: unknown): string | undefined {
         typeof code === 'string' &&
         /^[A-Z][A-Z0-9_]{1,63}$/u.test(code)
       ) {
-        return code
+        codes.push(code)
       }
       const cause = (candidate as { cause?: unknown }).cause
-      if (cause !== undefined) pending.push(cause)
+      enqueue(cause)
       if (candidate instanceof AggregateError) {
-        pending.push(...candidate.errors)
+        const errors = candidate.errors
+        if (Array.isArray(errors)) {
+          const remaining =
+            MAX_PROVIDER_ERROR_CAUSE_NODES -
+            pending.length -
+            visited.size
+          for (
+            let index = 0;
+            index < Math.min(errors.length, remaining);
+            index += 1
+          ) {
+            enqueue(errors[index])
+          }
+        }
       }
     } catch {
       // Treat unexpected accessors as opaque rather than exposing their output.
     }
   }
+  return [...new Set(codes)]
+}
+
+function safeNetworkErrorCode(error: unknown): string | undefined {
+  return safeNetworkErrorCodes(error)[0]
+}
+
+function responseSignalsRateLimit(response: Response): boolean {
+  return (
+    response.status === 429 ||
+    (response.status === 403 &&
+      response.headers.get('x-ratelimit-remaining')?.trim() === '0')
+  )
+}
+
+function providerHttpResponseError(
+  response: Response,
+  detail: string
+): ProviderHttpResponseError {
+  return new ProviderHttpResponseError(
+    response.status,
+    responseSignalsRateLimit(response),
+    `${response.status} ${response.statusText}${detail ? ` — ${detail}` : ''}`
+  )
+}
+
+async function providerHttpFailure(
+  response: Response,
+  apiKey: string | undefined
+): Promise<ProviderHttpResponseError> {
+  let detail = ''
+  try {
+    detail = redactKnownSecret(
+      await readResponseText(response, MAX_PROVIDER_ERROR_BYTES),
+      apiKey
+    )
+  } catch (error) {
+    detail = `response diagnostic unavailable: ${redactKnownSecret(
+      readableError(error),
+      apiKey
+    )}`
+  }
+  return providerHttpResponseError(response, detail)
+}
+
+function providerFailureKindFor(
+  error: unknown
+): ProviderFailureKind | undefined {
+  if (error instanceof ProviderProbeTimeoutError) return 'timeout'
+  if (error instanceof ProviderHttpResponseError) {
+    if (error.rateLimitHeader) return 'rate-limit'
+    if (error.status === 401 || error.status === 403) {
+      return 'authentication'
+    }
+    if (error.status === 408 || error.status === 504) return 'timeout'
+    return undefined
+  }
+  if (error instanceof ProviderProtocolShapeError) {
+    return 'protocol-shape'
+  }
+  if (error instanceof CliExecutableNotFoundError) {
+    return 'executable-not-found'
+  }
+  const codes = safeNetworkErrorCodes(error)
+  if (codes.includes('ECONNREFUSED')) return 'connection-refused'
+  if (codes.some((code) => DNS_ERROR_CODES.has(code))) return 'dns'
+  if (codes.some((code) => TLS_ERROR_CODES.has(code))) return 'tls'
+  if (codes.some((code) => TIMEOUT_ERROR_CODES.has(code))) return 'timeout'
   return undefined
+}
+
+function preferredProviderFailureKind(
+  errors: readonly unknown[]
+): ProviderFailureKind | undefined {
+  for (let index = errors.length - 1; index >= 0; index -= 1) {
+    const failureKind = providerFailureKindFor(errors[index])
+    if (failureKind) return failureKind
+  }
+  return undefined
+}
+
+function timeoutErrorIfGroundAborted(
+  error: unknown,
+  controller: AbortController,
+  timeoutExpired: boolean,
+  timeoutMs: number
+): unknown {
+  if (error instanceof ProviderHttpResponseError) return error
+  return timeoutExpired && controller.signal.aborted
+    ? new ProviderProbeTimeoutError(timeoutMs, error)
+    : error
 }
 
 function loopbackConnectionRefusedDetail(
@@ -423,8 +656,8 @@ function conciseProbeError(
   endpoint: string
 ): string {
   const baseDetail =
-    error instanceof Error && error.name === 'AbortError'
-      ? `timed out after ${timeoutMs / 1_000} seconds`
+    error instanceof ProviderProbeTimeoutError
+      ? error.message
       : redactKnownSecret(readableError(error), apiKey)
   const code = safeNetworkErrorCode(error)
   const detail =
@@ -764,11 +997,23 @@ export class ProviderService {
       draft.kind === 'cli'
         ? await this.testCli(draft)
         : await this.testModelApi(draft)
-    const verification: ProviderVerification = {
-      status: result.ok ? 'passed' : 'failed',
-      scope: draft.kind === 'cli' ? 'configuration' : 'connection',
-      checkedAt: nowIso()
-    }
+    const scope =
+      draft.kind === 'cli' ? 'configuration' : 'connection'
+    const checkedAt = nowIso()
+    const verification: ProviderVerification = result.ok
+      ? {
+          status: 'passed',
+          scope,
+          checkedAt
+        }
+      : {
+          status: 'failed',
+          scope,
+          checkedAt,
+          ...(result.failureKind
+            ? { failureKind: result.failureKind }
+            : {})
+        }
     const persisted = await this.persistVerification(
       draft,
       target,
@@ -908,10 +1153,12 @@ export class ProviderService {
         draft.command as string
       )
     } catch (error) {
+      const failureKind = providerFailureKindFor(error)
       return {
         ok: false,
         title: 'Configuration check failed',
-        detail: readableError(error)
+        detail: readableError(error),
+        ...(failureKind ? { failureKind } : {})
       }
     }
     const previewProvider: CliProvider = {
@@ -961,9 +1208,7 @@ export class ProviderService {
   private async validatedCliExecutable(command: string): Promise<string> {
     const resolved = await resolveExecutable(command)
     if (!resolved) {
-      throw new Error(
-        `Ground could not resolve ${command}. Choose an absolute executable path.`
-      )
+      throw new CliExecutableNotFoundError(command)
     }
     return validateCliExecutablePath(resolved, {
       workspaceRoots: this.configuredWorkspacePaths()
@@ -1065,8 +1310,12 @@ export class ProviderService {
       }
     }
     const discoveryController = new AbortController()
+    let discoveryTimeoutExpired = false
     const discoveryTimer = setTimeout(
-      () => discoveryController.abort(),
+      () => {
+        discoveryTimeoutExpired = true
+        discoveryController.abort()
+      },
       PROVIDER_DISCOVERY_TIMEOUT_MS
     )
     const discoveryEndpoint = modelDiscoveryEndpoint(
@@ -1081,11 +1330,7 @@ export class ProviderService {
         signal: discoveryController.signal
       })
       if (!response.ok) {
-        const detail = redactKnownSecret(
-          await readResponseText(response, MAX_PROVIDER_ERROR_BYTES),
-          apiKey
-        )
-        throw new Error(`${response.status} ${response.statusText}${detail ? ` — ${detail}` : ''}`)
+        throw await providerHttpFailure(response, apiKey)
       }
       const payloadText = await readResponseText(
         response,
@@ -1094,15 +1339,17 @@ export class ProviderService {
       let payload: unknown
       try {
         payload = JSON.parse(payloadText)
-      } catch {
-        throw new Error('Provider returned invalid model-discovery JSON')
+      } catch (error) {
+        throw new ProviderProtocolShapeError(
+          'Provider returned invalid model-discovery JSON',
+          { cause: error }
+        )
       }
-      if (
-        draft.kind === 'openai-compatible' &&
-        !hasOpenAiCompatibleDiscoveryShape(payload)
-      ) {
-        throw new Error(
-          'Provider model listing did not return an OpenAI-compatible data array'
+      if (!hasModelDiscoveryShape(draft.kind, payload)) {
+        throw new ProviderProtocolShapeError(
+          draft.kind === 'google'
+            ? 'Provider model listing did not return a Google models array'
+            : 'Provider model listing did not return a data array with model identifiers'
         )
       }
       const models = discoveredModels(draft.kind, payload)
@@ -1115,7 +1362,12 @@ export class ProviderService {
         models
       }
     } catch (error) {
-      discoveryError = error
+      discoveryError = timeoutErrorIfGroundAborted(
+        error,
+        discoveryController,
+        discoveryTimeoutExpired,
+        PROVIDER_DISCOVERY_TIMEOUT_MS
+      )
     } finally {
       clearTimeout(discoveryTimer)
     }
@@ -1124,6 +1376,7 @@ export class ProviderService {
       const connectionRefused = loopbackConnectionRefusedDetail(endpoint, [
         discoveryError
       ])
+      const failureKind = providerFailureKindFor(discoveryError)
       return {
         ok: false,
         title: 'Could not connect',
@@ -1135,15 +1388,19 @@ export class ProviderService {
             PROVIDER_DISCOVERY_TIMEOUT_MS,
             discoveryEndpoint
           ),
-        ...(connectionRefused
-          ? { failureKind: 'connection-refused' as const }
+        ...(failureKind
+          ? { failureKind }
           : {})
       }
     }
 
     const generationController = new AbortController()
+    let generationTimeoutExpired = false
     const generationTimer = setTimeout(
-      () => generationController.abort(),
+      () => {
+        generationTimeoutExpired = true
+        generationController.abort()
+      },
       COMPATIBLE_GENERATION_TIMEOUT_MS
     )
     const generationEndpoint = compatibleChatEndpoint(endpoint)
@@ -1169,13 +1426,7 @@ export class ProviderService {
         })
       })
       if (!response.ok) {
-        const detail = redactKnownSecret(
-          await readResponseText(response, MAX_PROVIDER_ERROR_BYTES),
-          apiKey
-        )
-        throw new Error(
-          `${response.status} ${response.statusText}${detail ? ` — ${detail}` : ''}`
-        )
+        throw await providerHttpFailure(response, apiKey)
       }
       const payloadText = await readResponseText(
         response,
@@ -1184,8 +1435,11 @@ export class ProviderService {
       let payload: unknown
       try {
         payload = JSON.parse(payloadText)
-      } catch {
-        throw new Error('Generation probe returned invalid JSON')
+      } catch (error) {
+        throw new ProviderProtocolShapeError(
+          'Generation probe returned invalid JSON',
+          { cause: error }
+        )
       }
       validateCompatibleGeneration(payload)
       return {
@@ -1196,9 +1450,19 @@ export class ProviderService {
         models: []
       }
     } catch (generationError) {
+      const classifiedGenerationError = timeoutErrorIfGroundAborted(
+        generationError,
+        generationController,
+        generationTimeoutExpired,
+        COMPATIBLE_GENERATION_TIMEOUT_MS
+      )
       const connectionRefused = loopbackConnectionRefusedDetail(endpoint, [
         discoveryError,
-        generationError
+        classifiedGenerationError
+      ])
+      const failureKind = preferredProviderFailureKind([
+        discoveryError,
+        classifiedGenerationError
       ])
       return {
         ok: false,
@@ -1213,14 +1477,14 @@ export class ProviderService {
               discoveryEndpoint
             )}`,
             `Generation probe failed: ${conciseProbeError(
-              generationError,
+              classifiedGenerationError,
               apiKey,
               COMPATIBLE_GENERATION_TIMEOUT_MS,
               generationEndpoint
             )}`
           ].join(' '),
-        ...(connectionRefused
-          ? { failureKind: 'connection-refused' as const }
+        ...(failureKind
+          ? { failureKind }
           : {})
       }
     } finally {

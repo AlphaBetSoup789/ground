@@ -1,6 +1,13 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import {
+  access,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  writeFile
+} from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -10,6 +17,8 @@ import {
 } from './lib/packaged-app.mjs'
 import { sha256File } from './lib/packaged-components.mjs'
 import {
+  hasCompleteCliRuntimeEvidence,
+  hasCompleteProviderFailureRuntimeEvidence,
   hasCompleteProviderRuntimeEvidence,
   REQUIRED_NATIVE_RUNTIME_CHECKS
 } from './lib/package-runtime-evidence-contract.mjs'
@@ -113,16 +122,91 @@ const blockedLaunchEnvironment = new Set([
   'PYTHONPATH',
   'RUBYOPT'
 ])
+const blockedProviderEnvironment = new Set([
+  'CODEX_ACCESS_TOKEN',
+  'CODEX_API_KEY',
+  'CODEX_CA_CERTIFICATE',
+  'CODEX_HOME',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NODE_EXTRA_CA_CERTS',
+  'NO_PROXY',
+  'OPENAI_API_KEY',
+  'OPENAI_ORGANIZATION',
+  'OPENAI_PROJECT',
+  'SSL_CERT_DIR',
+  'SSL_CERT_FILE'
+])
 const launchEnvironment = { ...process.env }
 for (const key of Object.keys(launchEnvironment)) {
-  if (blockedLaunchEnvironment.has(key.toUpperCase())) {
+  if (
+    blockedLaunchEnvironment.has(key.toUpperCase()) ||
+    blockedProviderEnvironment.has(key.toUpperCase())
+  ) {
     delete launchEnvironment[key]
   }
 }
+const runnerNode = await realpath(process.execPath)
+const runnerNodeSha256 = await sha256File(runnerNode)
+const runnerNodeDirectory = path.dirname(runnerNode)
+const inheritedPathKey = Object.keys(launchEnvironment).find(
+  (key) => key.toLowerCase() === 'path'
+)
+const inheritedPathEntries = ((
+  inheritedPathKey ? launchEnvironment[inheritedPathKey] : ''
+) ?? '')
+  .split(path.delimiter)
+  .filter((entry) => entry && path.isAbsolute(entry))
+  .filter(
+    (entry) => {
+      const candidate = path.resolve(entry)
+      const expected = path.resolve(runnerNodeDirectory)
+      return process.platform === 'win32'
+        ? candidate.toLowerCase() !== expected.toLowerCase()
+        : candidate !== expected
+    }
+  )
+if (inheritedPathKey && inheritedPathKey !== 'PATH') {
+  delete launchEnvironment[inheritedPathKey]
+}
+launchEnvironment.PATH = [
+  runnerNodeDirectory,
+  ...inheritedPathEntries
+].join(path.delimiter)
+let windowsSystemRoot = 'C:\\Windows'
 if (process.platform === 'win32') {
-  launchEnvironment.SystemRoot = 'C:\\Windows'
-  launchEnvironment.WINDIR = 'C:\\Windows'
-  launchEnvironment.ComSpec = 'C:\\Windows\\System32\\cmd.exe'
+  const inheritedSystemRootKey = Object.keys(launchEnvironment).find(
+    (key) => key.toLowerCase() === 'systemroot'
+  ) ?? Object.keys(launchEnvironment).find(
+    (key) => key.toLowerCase() === 'windir'
+  )
+  const inheritedSystemRoot = inheritedSystemRootKey
+    ? launchEnvironment[inheritedSystemRootKey]
+    : undefined
+  if (
+    typeof inheritedSystemRoot === 'string' &&
+    path.win32.isAbsolute(inheritedSystemRoot) &&
+    !inheritedSystemRoot.includes('\0')
+  ) {
+    windowsSystemRoot = path.win32.normalize(inheritedSystemRoot)
+  }
+  for (const key of Object.keys(launchEnvironment)) {
+    if (
+      ['systemroot', 'windir', 'comspec', 'pathext'].includes(
+        key.toLowerCase()
+      )
+    ) {
+      delete launchEnvironment[key]
+    }
+  }
+  launchEnvironment.SystemRoot = windowsSystemRoot
+  launchEnvironment.WINDIR = windowsSystemRoot
+  launchEnvironment.ComSpec = path.win32.join(
+    windowsSystemRoot,
+    'System32',
+    'cmd.exe'
+  )
+  launchEnvironment.PATHEXT = '.COM;.EXE;.BAT;.CMD'
 }
 launchEnvironment.GROUND_PACKAGED_SMOKE_DIRECTORY = smokeDirectory
 
@@ -141,13 +225,18 @@ function stopProcessTree(child) {
       return
     }
   }
+  const taskkill = path.win32.join(
+    windowsSystemRoot,
+    'System32',
+    'taskkill.exe'
+  )
   spawnSync(
-    'C:\\Windows\\System32\\taskkill.exe',
+    taskkill,
     ['/PID', String(child.pid), '/T', '/F'],
     {
       env: {
-        SystemRoot: 'C:\\Windows',
-        WINDIR: 'C:\\Windows'
+        SystemRoot: windowsSystemRoot,
+        WINDIR: windowsSystemRoot
       },
       shell: false,
       stdio: 'ignore',
@@ -243,7 +332,13 @@ try {
         evidence.credentialStorage?.backend !== 'gnome_libsecret') ||
       evidence.nativeApproval?.cancelled !== true ||
       evidence.mcpLaunchApproval?.exactEnvelopeValidated !== true ||
-      !hasCompleteProviderRuntimeEvidence(evidence.providerRuntime)
+      !hasCompleteProviderRuntimeEvidence(evidence.providerRuntime) ||
+      !hasCompleteProviderFailureRuntimeEvidence(
+        evidence.providerFailureRuntime
+      ) ||
+      !hasCompleteCliRuntimeEvidence(evidence.cliRuntime) ||
+      evidence.cliRuntime?.fixture?.runnerNodeSha256 !==
+        runnerNodeSha256
     ) {
       throw new Error(
         `Packaged native evidence failed validation: ${JSON.stringify(evidence)}`
@@ -289,6 +384,10 @@ try {
               }
             : {}),
           ...(commit ? { commit } : {}),
+          runtimeHarness: {
+            nodeSha256: runnerNodeSha256,
+            cliRunnerMatched: true
+          },
           checks: result.checks,
           evidence
         },

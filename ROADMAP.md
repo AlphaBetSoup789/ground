@@ -26,7 +26,8 @@ are not necessarily release-certified.
   opaque renderer attachments, detach/reattach, and bounded in-memory scrollback
 - [x] Git status, staged/unstaged diff, path staging/unstaging, exact-tree commits,
   exact-ref conditional updates, bounded history, recoverable selected-file
-  restore/undo, and clean managed-worktree create/remove
+  restore/undo, clean managed-worktree create/remove, and one request-bound
+  refresh of an open review after a run finishes
 - [x] Passive workspace-excluding Git discovery, native executable selection,
   private fingerprint preference, Git 2.23+ verification after confirmation, and
   exact identity revalidation before every launch
@@ -41,6 +42,9 @@ are not necessarily release-certified.
 - [x] Versioned task bundle import/export, Markdown export, and confirmed task
   deletion
 - [x] Safe task fork, reversible archive/restore, and bounded active/archive search
+- [x] Keyboard-complete task switching over the exact current filtered order,
+  including direct Enter activation, Arrow-key result focus, query clearing,
+  IME/modifier/no-result refusal, and request-bound narrow-sidebar focus
 - [x] Strict persisted-state validation, three rotating validated snapshots,
   automatic fallback, bounded no-follow reads, private atomic replacement,
   unreadable-file quarantine, and in-app recovery controls
@@ -52,12 +56,21 @@ are not necessarily release-certified.
 - [x] First-run Hosted API, Local server, and Installed CLI paths that identify the
   local values as a template, keep passive CLI detection non-authoritative, and
   limit stopped-server recovery to confirmed refused loopback connections
-- [x] Keyboard command palette, task-local unsent drafts, bounded streaming
-  announcements, near-bottom timeline following, responsive layout, forced-color
-  support, and reduced-motion behavior
-- [x] Cross-platform CI renderer interaction suite in Electron for keyboard/focus,
-  provider-form validation, local-provider refusal recovery, drafts, cancellation,
-  archive/search, responsive settings, forced colors, and reduced-motion behavior
+- [x] Keyboard command palette, task-local unsent drafts including draft-only
+  preparation during active runs and approval waits, bounded streaming
+  announcements, near-bottom timeline following with task-bound jump recovery,
+  source-bound assistant-response and fenced-code clipboard copy, responsive
+  layout, forced-color support, and reduced-motion behavior
+- [x] Exact failed-run request recovery into an empty task-local editable draft,
+  with occupied drafts and outcome-unknown interruptions preserved
+- [x] Reviewable Ask-to-Agent handoff that awaits the mode change, preserves
+  task-local drafts, and requires explicit Send before any run or provider egress
+- [x] Bounded reviewed-hunk-to-prompt handoff that preserves the source task's
+  editable draft and requires explicit Send before provider egress
+- [x] Cross-platform CI renderer interaction suite in Electron for command and
+  task-search keyboard/focus, provider-form validation, local-provider refusal
+  recovery, drafts, cancellation, archive/search, responsive settings, forced
+  colors, and reduced-motion behavior
 - [x] Baseline CI, CodeQL, issue forms, and contributor/security documentation
 
 ## Public alpha hardening
@@ -68,6 +81,9 @@ are not necessarily release-certified.
   the desktop provider screen and managed run loop
 - [x] Persist canonical model/tool history, per-item provider attribution, and
   normalized cross-provider tool exchanges
+- [x] Preserve the active user objective across bounded managed-API context,
+  retain complete recent tool exchanges, and update a visible notice when
+  projection or planner reductions change
 - [x] Publish version-pinned synthetic API-adapter and CLI-parser compatibility
   fixtures with explicit provenance and package/declaration drift checks
 - [x] Document source-trusted static model-adapter registration without runtime
@@ -79,9 +95,11 @@ are not necessarily release-certified.
 - [x] Add a packaged, credential-free, token-bound loopback OpenAI-compatible
   readiness and first-turn fixture that crosses the production registry,
   `RunManager`, and durable state without claiming external-provider certification
-- [ ] Complete the remaining M1.1 production-app smoke matrix for a direct
+- [x] Complete the remaining M1.1 production-app smoke matrix for a direct
   first-class API, a recognized CLI deterministic child, and malformed
   provider/runtime responses
+- [x] Add credential-safe typed readiness and run guidance for transport,
+  authentication, protocol, executable, and external-runtime startup failures
 
 ### Safe coding loop
 
@@ -95,16 +113,24 @@ are not necessarily release-certified.
   writes, commands, and MCP calls as outcome unknown without automatic replay
 - [x] Add Git status/diff/history, selected-path staging/unstaging, exact-tree
   commits, and clean managed-worktree create/remove
+- [x] Refresh a mounted Git review after an active run settles while retaining the
+  last overview and exact surviving file/hunk selection
 - [x] Add a recoverable selected-file restore/undo workflow
 - [x] Add fixed packaged-app identity, encrypted-vault, native-dialog, PTY, Git,
-  deterministic compatible-provider first-turn, MCP-launch, and process-tree
-  cancellation runtime evidence
+  deterministic compatible/first-class provider turns, expected provider
+  failures, recognized-CLI success with a non-fatal warning, MCP launch, and
+  process-tree cancellation runtime evidence
 - [ ] Add adversarial packaged renderer-interaction and accessibility end-to-end
   certification
 
 ### Durable workspace
 
-- [ ] Replace JSON snapshots with a transactional, append-only event store
+- [x] Add an audited transactional SQLite event-store foundation with deterministic
+  replay, strict schema/version gates, external-head verification, coordinated
+  publication, copy-on-migrate, verified backups, and crash-prefix tests
+- [ ] Complete the production cutover from JSON snapshots to that foundation,
+  including semantic task, run, activity, approval, managed-execution, provider,
+  and recovery events plus bounded compaction
 - [x] Add legacy file migration, strict state-schema validation, three rotating
   retained snapshots, automatic corruption fallback, unreadable-file quarantine,
   and a recovery banner
@@ -126,8 +152,8 @@ are not necessarily release-certified.
 - [x] Require distributable-bound runtime evidence for macOS arm64/x64, Windows
   x64, and Linux x64, including temporary NSIS installation and ZIP/AppImage
   extraction
-- [ ] Re-run the current provider-first-turn runtime-evidence contract against all
-  four native distributables and verify the aggregate
+- [ ] Re-run the current provider/runtime-matrix evidence contract against all four
+  native distributables and verify the aggregate
 - [x] Scaffold a tag workflow for checksums, CycloneDX SBOM, build/SBOM
   attestations, and a draft prerelease
 - [ ] Produce signed, notarized macOS artifacts from protected CI

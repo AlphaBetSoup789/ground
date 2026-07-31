@@ -58,12 +58,27 @@ async function waitForRemoval(targetPath, label, timeoutMs = 20_000) {
   }
 }
 
+function windowsSystemRoot(environment) {
+  const key = Object.keys(environment).find(
+    (name) => name.toLowerCase() === 'systemroot'
+  ) ?? Object.keys(environment).find(
+    (name) => name.toLowerCase() === 'windir'
+  )
+  const inherited = key ? environment[key] : undefined
+  return typeof inherited === 'string' &&
+    path.win32.isAbsolute(inherited) &&
+    !inherited.includes('\0')
+    ? path.win32.normalize(inherited)
+    : 'C:\\Windows'
+}
+
 async function runChecked(executable, args, options = {}) {
+  const childEnvironment = options.env ?? process.env
   await new Promise((resolve, reject) => {
     const child = spawn(executable, args, {
       cwd: options.cwd ?? projectRoot,
       detached: process.platform !== 'win32',
-      env: options.env ?? process.env,
+      env: childEnvironment,
       shell: false,
       stdio: options.stdio ?? 'inherit',
       windowsHide: true
@@ -91,13 +106,14 @@ async function runChecked(executable, args, options = {}) {
     })
     timer = setTimeout(() => {
       if (process.platform === 'win32' && child.pid) {
+        const systemRoot = windowsSystemRoot(childEnvironment)
         const killer = spawn(
-          'C:\\Windows\\System32\\taskkill.exe',
+          path.win32.join(systemRoot, 'System32', 'taskkill.exe'),
           ['/PID', String(child.pid), '/T', '/F'],
           {
             env: {
-              SystemRoot: 'C:\\Windows',
-              WINDIR: 'C:\\Windows'
+              SystemRoot: systemRoot,
+              WINDIR: systemRoot
             },
             shell: false,
             stdio: 'ignore',

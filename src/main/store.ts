@@ -314,7 +314,7 @@ function forkTimeline(items: TaskItem[], ids: ForkIds): TaskItem[] {
             callId: mappedForkId(ids.callIds, item.callId, 'history-call')
           }
         : {})
-    }
+    } as ActivityItem
   })
 }
 

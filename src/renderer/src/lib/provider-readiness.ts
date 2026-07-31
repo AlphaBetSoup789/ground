@@ -1,4 +1,5 @@
 import type { ProviderProfile } from '../../../shared/types'
+import { providerFailureGuidance } from '../../../shared/provider-failure-guidance'
 
 export interface ProviderReadinessPresentation {
   tone: 'neutral' | 'success' | 'error'
@@ -30,14 +31,18 @@ export function providerReadiness(
 
   const checkedAt = checkedTime(verification.checkedAt)
   if (verification.status === 'failed') {
+    const guidance = providerFailureGuidance(verification.failureKind)
     return {
       tone: 'error',
       shortLabel: 'Check failed',
       title:
-        verification.scope === 'connection'
+        guidance?.title ??
+        (verification.scope === 'connection'
           ? 'Connection check failed'
-          : 'Configuration check failed',
-      detail: `Last checked ${checkedAt}. Review the saved settings and run Test again.`
+          : 'Configuration check failed'),
+      detail: guidance
+        ? `Last checked ${checkedAt}. ${guidance.correctiveGuidance}`
+        : `Last checked ${checkedAt}. Review the saved settings and run Test again.`
     }
   }
 

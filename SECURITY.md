@@ -138,6 +138,13 @@ security recipient, before the first supported release.
   non-streaming four-token generation probe to the canonical
   `/chat/completions` route. Both paths reject redirects and validate bounded JSON
   shapes.
+- Provider guidance is selected only from a strict bounded category derived in
+  main from structured status/header, cause-code, Ground-owned timer, parser, or
+  executable/process-launch evidence. Failed readiness and run activities may
+  persist that category. Readiness persists no diagnostic text; run history keeps
+  only its existing bounded, credential-redacted detail and adds no cause graph,
+  response-body field, or raw structured provider-code field. Display prose
+  cannot unlock specialized recovery UI.
 - Run startup reserves the exact task revision, provider revision and configuration
   fingerprint, and credential boundary before native CLI authorization or
   workspace access. Provider saves, deletes, and verification writes are excluded
@@ -365,6 +372,11 @@ security recipient, before the first supported release.
 - Staging and unstaging accept selected literal paths only, reject repository-wide
   and VCS-metadata mutations, recheck eligibility after a native default-cancel
   confirmation, and never overwrite working-tree files.
+- Adding a reviewed Git hunk to a prompt is not a Git operation. The renderer
+  accepts only a complete non-truncated active hunk, builds one visibly escaped
+  untrusted-workspace context block of at most 32,000 characters, and appends it
+  to the exact source task's unsent process-local draft. It does not invoke a
+  provider, tool, approval, or Git mutation; explicit Send remains required.
 - Commits bind the exact prepared index tree, repository/worktree identities,
   expected parent, and exact checked-out symbolic local ref. Detached-HEAD commits
   are refused. They use a non-dereferencing compare-and-swap update, and disable
@@ -505,10 +517,12 @@ security recipient, before the first supported release.
   path as ordinary task content. Ground-generated command activity replaces the
   canonical workspace prefix with `<workspace>` while retaining the full exact
   path only in the native approval envelope.
-- Task history uses a JSON snapshot rather than a transactional, append-only event
-  store and has a 128 MiB ceiling per generation. Three rotating retained
-  snapshots and their user-selectable recovery UI are bounded crash recovery, not
-  durable version history, sync, or an arbitrary snapshot-import system.
+- The production desktop stores task history in the bounded JSON snapshot engine
+  with a 128 MiB ceiling per generation. Three rotating retained snapshots and
+  their user-selectable recovery UI are bounded crash recovery, not durable version
+  history, sync, or an arbitrary snapshot-import system. The audited SQLite ledger
+  exists only as an uncomposed source/test foundation and does not yet provide
+  transactional task, run, approval, or recovery persistence.
 - No-follow file opens are used where the host exposes `O_NOFOLLOW`. Windows
   reparse-point handling does not yet provide an equivalent race-free guarantee
   against a hostile same-user process.
@@ -546,10 +560,15 @@ security recipient, before the first supported release.
   The driver strips process-loader/Node injection variables before launch. Native
   scope performs only fixed operations there: packaged identity, an encrypted
   `SecretVault` set/reload/get/delete round trip, a real production native approval
-  dialog aborted to its Cancel result, PTY, Git, an exact local MCP launch/call, and
-  process-tree cleanup. Its MCP fixture is an exact in-memory `-e` program bound to
-  Ground's own packaged executable; the one-shot auto-approval cannot authorize a
-  caller-supplied server.
+  dialog aborted to its Cancel result, PTY, Git, the deterministic provider/runtime
+  matrix, an exact local MCP launch/call, and process-tree cleanup. The matrix covers
+  compatible and first-class OpenAI success, refused-loopback and malformed
+  compatible failures, and one smoke-owned recognized Codex-dialect child. Positive
+  CLI authorization is confined to a smoke-only authority that accepts exactly the
+  hashed runner/script and configuration/invocation envelopes; normal composition
+  continues to use the native dialogs. The MCP fixture is an exact in-memory `-e`
+  program bound to Ground's own packaged executable; its one-shot auto-approval
+  cannot authorize a caller-supplied server.
 - A second driver runs native scope against an extracted macOS ZIP, a temporarily
   installed Windows NSIS package (then invokes its uninstaller), or an extracted
   Linux AppImage. Runtime-evidence records bind the package version,

@@ -79,6 +79,8 @@ conformance runner; npm publication remains a separate maintainer release step.
 - Streaming assistant output and normalized runtime activity
 - Ask mode with bounded read-only workspace tools, and Agent mode with the full
   Ground-managed tool set
+- Reviewable Ask-to-Agent handoff that switches the task mode and prepares an
+  editable task-local draft without starting a run
 - Provider switching with per-item provider attribution and normalized tool-call
   and tool-result context
 - First-run provider setup split into Hosted API, Local server, and Installed CLI
@@ -92,11 +94,13 @@ conformance runner; npm publication remains a separate maintainer release step.
 - Sensitive-path filtering and workspace-relative model-visible paths
 - Portable JSON task bundles, Markdown transcript export, and confirmed task
   deletion
-- Safe task forks, reversible archive/restore, and bounded search across active or
-  archived task history
+- Safe task forks, reversible archive/restore, and bounded, keyboard-complete
+  search across active or archived task history
 - Interactive, multi-session task terminals backed by a real local PTY
-- Git branch/status, staged and unstaged diffs, path staging/unstaging, exact-tree
-  commits bound to the exact approved checked-out local branch, bounded history,
+- Git branch/status, structured per-file staged and unstaged diff review with
+  keyboard hunk navigation, a bounded reviewed-hunk-to-editable-prompt action,
+  and an exact raw-patch fallback, path staging/unstaging, exact-tree commits
+  bound to the exact approved checked-out local branch, bounded history,
   recoverable selected-file restore/undo, and managed-worktree create/remove
 - Remote Streamable HTTP and local stdio MCP servers with namespaced tools,
   launch and definition trust, and per-call approval
@@ -106,8 +110,18 @@ conformance runner; npm publication remains a separate maintainer release step.
   redaction, opaque activity identities, abort-safe projection, and
   compatibility-bound session persistence
 - Run cancellation, command timeouts, and process-group termination
-- Per-task unsent composer drafts while Ground is open, plus a keyboard command
-  palette for common workspace and provider actions
+- Per-task unsent composer drafts while Ground is open, including draft-only
+  preparation during a run or approval wait, plus a keyboard command palette for
+  common workspace and provider actions
+- Near-bottom-only streaming follow with a task-bound **Jump to latest** action
+  that preserves reading position until the user deliberately resumes following
+- Source-bound **Copy response** and fenced-block **Copy code** actions on stable
+  assistant output. The main process re-resolves the exact retained source before
+  a user-activated plain-text clipboard write; copying never starts a run,
+  contacts a provider, or mutates a draft
+- Reviewable failed-run recovery that copies the exact retained request into an
+  empty editable task-local draft without automatically retrying or replacing
+  newer text
 - A bounded, atomic local state document plus three rotating last-known-good
   snapshots, corruption quarantine, an in-app recovery browser, credential-free
   export, and native-confirmed retained-snapshot restore that drains and seals
@@ -118,10 +132,10 @@ conformance runner; npm publication remains a separate maintainer release step.
 
 ## Run Ground
 
-Ground supports Node.js 22.12 or newer. The reproducible CI and release toolchain
-uses Node.js 24.18.0 (from `.nvmrc`) and npm 11.16.0. Install that npm version
-with your toolchain manager before running project commands; use
-`npm run toolchain:check` when reproducing CI or a release.
+Ground supports Node.js 22.16+ within the 22.x LTS line, or Node.js 24+. The
+reproducible CI and release toolchain uses Node.js 24.18.0 (from `.nvmrc`) and npm
+11.16.0. Install that npm version with your toolchain manager before running
+project commands; use `npm run toolchain:check` when reproducing CI or a release.
 
 From a source checkout:
 
@@ -151,10 +165,39 @@ The command palette is keyboard navigable, traps focus while open, restores prio
 focus, and ignores execution keys during input-method composition. Streaming text
 uses a separate batched polite announcement instead of repeatedly announcing the
 whole message, and the timeline follows new output only while the reader remains
-near the bottom. Unsent composer text is kept separately for each task for the
-current app process; it is not written to durable task state. Responsive layouts,
-forced-color styles, reduced motion, and focus-visible states are implemented, but
-the project does not yet claim a complete cross-platform accessibility audit.
+near the bottom. Scrolling away exposes **Jump to latest** without moving the
+viewport. Follow remains paused through later messages and responsive layout
+changes until keyboard or pointer activation returns to the exact current bottom,
+resumes following, and announces the change. The control and announcement state
+reset when the selected task changes. Stable assistant messages expose **Copy
+response**, and each represented fenced code block exposes **Copy code**. The
+preload requires active user activation and sends only a bounded source identity;
+the main process re-resolves the exact task, message, content, and code-node
+offsets before writing plain text. The renderer receives only success or failure,
+ignores late results from stale tasks or content, and announces repeatable visible
+and polite status without moving focus. The bridge has no clipboard-read, rich
+HTML, or arbitrary-text operation. Unsent composer text is kept separately for
+each task for the current app process; it is not written to durable task state.
+While a task is running or waiting for approval, its textarea remains editable so
+the next prompt can be prepared. That text is not queued, sent, or used to steer
+the active run; the Stop control remains the only run action and `Ctrl/⌘ + Enter`
+is inert until the run finishes. When the latest retained run ends with **Run
+failed**, **Prepare retry** can copy only that run's exact non-imported user
+message into an
+empty task-local draft. Existing draft bytes are preserved, outcome-unknown **Run
+interrupted** recovery is excluded, and no provider or runtime is contacted until
+the user reviews and explicitly sends the draft. Responsive layouts, forced-color
+styles, reduced motion, and focus-visible states are implemented, but the project
+does not yet claim a complete cross-platform accessibility audit.
+
+`Ctrl/⌘ + K` opens the sidebar when necessary and focuses the search field for the
+current active or archived scope. In that field, Enter opens the first current
+result, Arrow Down and Arrow Up focus the first and last current results, and
+Escape clears a nonempty query before a second Escape leaves search. Activation
+clears the query and selects the exact current result by its opaque task ID.
+Input-method composition, modified key combinations, and an empty result set are
+left alone. After activation, narrow-layout close and returned focus run only
+while the originating selection request and task remain current.
 
 ## Connect a model
 
@@ -184,6 +227,12 @@ Ground will not start a task with that provider until **Test** passes for the ex
 saved revision; changing and saving it requires another test. First-class API tests
 use each provider’s model-discovery authentication and response shape. A CLI test
 validates the saved executable configuration without claiming a live model run.
+Failed checks retain only a bounded failure category while keeping the immediate,
+redacted diagnostic available in the settings view. Ground gives corrective
+guidance for refused connections, DNS, TLS, authentication, rate limits, timeouts,
+incompatible response shapes, missing executables, and CLI startup failures. The
+same safe categories can appear on failed run activities; unknown failures stay
+generic instead of being guessed from error prose.
 API-key and CLI-environment replacements are staged under new opaque versioned
 vault references before the profile points to them, so a failed state write cannot
 overwrite the secret used by the previously verified profile. Run startup reserves
@@ -255,6 +304,24 @@ writes, and commands are not advertised in Ask mode. The provider’s advanced
 settings can override the context-window estimate and maximum response tokens, and
 can opt into low, medium, or high reasoning effort. These values are best-effort
 provider inputs: an incompatible endpoint or model may reject them.
+
+For managed API runs, Ground reserves the latest user message as the active
+objective before it fills the remaining request budget with recent complete
+conversation and tool-result groups. If an exact but dominant objective would
+displace all newer evidence, Ground keeps a visibly marked, bounded head-and-tail
+form so both can fit; it never splits a complete tool group. A budget too small
+even for the marked objective fails before provider egress. The single **Context
+window managed** timeline activity updates when later rounds require a different
+reduction, while the full task history remains local.
+
+After a completed, non-imported Ask response, an idle task with a workspace and an
+Agent-capable provider offers **Continue in Agent**. The action is bound to that
+exact task, provider, and assistant response. It persists Agent mode, then prepares
+an editable task-local draft and focuses the composer; it preserves any draft the
+user already wrote. The response remains context, not execution authority: Ground
+does not start a run, carry an approval forward, or contact the provider until the
+user explicitly sends the draft. Provider sessions are mode-bound, so an
+Ask/read-only session is not silently resumed with Agent authority.
 
 ### CLI agent
 
@@ -486,7 +553,10 @@ provider-owned state, and incomplete tool exchanges; and preserves the source
 task’s readable canonical history and workspace selection. Archiving is reversible
 and disables new Ground run/workspace actions until restored. An already running
 PTY is detached rather than killed and may continue at the OS level. Sidebar search
-is local, bounded, and can be scoped to active or archived tasks.
+is local, bounded, and can be scoped to active or archived tasks. Keyboard
+activation uses the displayed current filtered order and delegates the selected
+opaque task ID to the same selection path as a pointer activation; it does not
+cache an earlier result identity.
 
 ## Workspace terminal and Git
 
@@ -501,11 +571,37 @@ are process-local and end when Ground quits.
 
 The Git panel reads branch/ahead/behind state, staged, unstaged, untracked, and
 conflicted paths, staged and unstaged unified diffs, bounded commit history, and
-registered worktrees. It can stage or unstage selected paths, commit the exact
-prepared index tree, create a branch in a dedicated managed worktree and open it as
-a new task, remove a clean worktree registered inside that managed root, and
-restore selected unstaged tracked files or untracked files through a recoverable
-workflow. Ground requires Git 2.23 or newer.
+registered worktrees. Diff review is organized by file, preserves old and new line
+numbers, summarizes additions and deletions, and supports keyboard file and hunk
+navigation. Unsupported, binary, malformed, or safety-bounded patch segments fail
+closed to their raw text; the complete captured patch is always available through
+the raw view. Hostile presentation controls are shown there as visible Unicode
+escapes, with an explicit copy-exact action for the underlying captured text.
+Large structured patches are disclosed incrementally instead of mounting every
+line at once.
+
+If the panel is open when the selected task's run completes, stops, or fails,
+Ground reads the repository once more without blanking the last successful
+overview. An exact file and hunk selection survives when that review identity
+still exists; removed or identity-changed targets fall back to a valid current
+selection. Late or superseded reads remain bound to the task and request that
+started them. If the refresh fails, the last overview remains visible with an
+inline error and explicit **Retry** action.
+
+For a complete structured hunk, **Add hunk to prompt** appends only that active
+hunk to the exact task's process-local editable draft. The block records staged
+or working-tree provenance, the parsed path reported by Git, and visibly escaped
+captured lines under an explicit whole-block
+untrusted-and-potentially-stale-workspace-text label. The complete block must fit
+32,000 characters and is never sliced. This action does not send a message,
+contact a provider, approve an operation, or change Git; the user can edit the
+draft and must press **Send** separately.
+
+The panel can stage or unstage selected paths, commit the exact prepared index
+tree, create a branch in a dedicated managed worktree and open it as a new task,
+remove a clean worktree registered inside that managed root, and restore selected
+unstaged tracked files or untracked files through a recoverable workflow. Ground
+requires Git 2.23 or newer.
 
 Git discovery passively fingerprints fixed conventional paths and absolute entries
 from Ground’s launch PATH, excluding any path controlled by a configured workspace.
@@ -620,6 +716,7 @@ and conformance suite.
 ```bash
 npm run verify
 npm run test:e2e:renderer
+npm run smoke:clipboard:native
 npm audit --audit-level=high
 ```
 
@@ -631,13 +728,33 @@ dependencies.
 
 `test:e2e:renderer` launches the real built React renderer in Electron with the
 explicit browser-preview desktop mock and drives it through Playwright. It covers
-command-palette focus/navigation, native HTML provider-form validation, task-local
-drafts, mock send/cancel, archive/search, responsive settings, reduced-motion and
-forced-color styles, plus the local-template/refused-connection recovery path into
-a detected CLI. The current suite contains seven scenarios. CI runs it on macOS,
-Windows, and Linux/Xvfb. It does not load the production preload/main process,
-invoke native permissions, use a real provider, or replace screen-reader/manual
-accessibility testing.
+command-palette focus/navigation, keyboard-complete task search and narrow-sidebar
+focus, native HTML provider-form validation, task-local, active-run, and
+failed-run draft preparation, Ask-to-Agent and reviewed-hunk draft handoffs,
+paused-streaming reading-position recovery, source-bound assistant-response and
+fenced-code clipboard copy, structured Git diff navigation and finished-run
+refresh, mock send/cancel, archive/search, responsive settings, reduced-motion
+and forced-color styles, plus the
+local-template/refused-connection recovery path into a detected CLI. The current
+suite contains 19 scenarios. CI runs it on macOS, Windows, and Linux/Xvfb. It does
+not load the production preload/main process, invoke native permissions, use a
+real provider, or replace screen-reader/manual accessibility testing. Separate
+main-service and preload tests cover canonical source re-resolution, strict
+request bounds, write failure, and user-activation gating at the production
+bridge boundary.
+
+`smoke:clipboard:native` builds Ground, launches the compiled production main
+and sandboxed preload with an isolated deterministic task, and drives the native
+assistant clipboard boundary through Electron. It verifies deny-all renderer
+permissions, inactive user-activation refusal with no clipboard change, and exact
+pointer- and keyboard-activated response/code writes through trusted IPC and
+Electron's main-process clipboard. The smoke requires no provider credentials,
+refuses to mutate clipboard formats it cannot restore, restores prior common
+text/HTML/RTF/bookmark/image content on exit, checks ownership before each
+planned mutation, and refuses restoration over detected newer content. Because
+the OS clipboard has no atomic lease, do not use it during this short smoke.
+Cleanup failure fails the smoke. This is source-build production-boundary
+evidence rather than installer or screen-reader certification.
 
 The suite covers provider event normalization and output bounds, CLI argv/event
 parsing and cancellation, native session metadata, renderer/IPC trust checks,
@@ -650,10 +767,11 @@ authorization/attachments/scrollback, and Git filter neutralization,
 staging/commits/recoverable restore/worktree containment/removal.
 
 Compatibility and application tests use deterministic local fixtures, mocked
-transports/processes, one credential-free loopback OpenAI-compatible SSE wire
-server, and fixed native package probes. They do not make paid live-provider
-requests, contact a real cloud/Ollama/LM Studio deployment, or certify
-authenticated Codex, Claude, Gemini, Antigravity, or Generic CLI runs.
+transports/processes, token-bound loopback provider servers, a smoke-owned
+Codex-dialect child, and fixed native package probes. They do not make paid
+live-provider requests, contact a real cloud/Ollama/LM Studio deployment, or
+certify an installed and authenticated Codex, Claude, Gemini, Antigravity, or
+Generic CLI.
 
 ## Package a preview
 
@@ -685,18 +803,35 @@ matching native runners. They launch the unpacked app with an isolated temporary
 profile and verify real main/preload/document startup without browser automation.
 A bounded native smoke verifies packaged app identity, performs an OS-encrypted
 credential-vault set/reload/get/delete round trip, opens and automatically cancels
-a real native approval dialog, and exercises PTY, Git, a deterministic packaged
-OpenAI-compatible provider first turn, an exact local stdio MCP launch/call, and
-process-tree cleanup.
+a real native approval dialog, and exercises PTY, Git, the M1.1 provider/runtime
+matrix, an exact local stdio MCP launch/call, and process-tree cleanup.
 
-The provider subprobe starts a credential-free, token-bound server on literal
-loopback. Through the packaged main process it saves and persistently verifies one
-OpenAI-compatible profile, streams one first task turn through the production
-adapter registry and `RunManager`, reloads state, and checks the assistant marker,
-provider attribution, continuation state, idle task status, and absence of a
-persisted failure. It does not prove hosted credentials or internet reachability,
-the behavior of Ollama, LM Studio, or another vendor service, CLI execution, tool
-execution, or any provider protocol other than OpenAI-compatible.
+The provider/runtime matrix crosses the packaged main process, production static
+registry, `ProviderService`, `RunManager`, and durable state. It independently
+requires:
+
+- a credential-free literal-loopback OpenAI-compatible readiness check and
+  streamed first turn;
+- a first-class OpenAI Responses readiness check and streamed first turn using a
+  synthetic versioned credential, exact Bearer authorization, and `store: false`;
+- a closed literal-loopback endpoint classified as `connection-refused`, with
+  persisted failed readiness and dispatch blocked before a run event;
+- malformed compatible discovery and generation responses classified as
+  `protocol-shape`, with that bounded kind persisted in failed readiness and
+  dispatch blocked before a run event; and
+- a recognized Codex-dialect CLI turn through a token-bound Node child, including
+  exact configuration/invocation trust envelopes, native session, command
+  lifecycle, usage, and one non-fatal warning that must remain successful.
+
+The CLI child is created by the smoke in its private token directory, and its
+interpreter hash must match the Node executable running the outer smoke harness.
+The unattended fixture replaces the two positive human CLI dialog decisions with
+an exact smoke-only authority; it does not exercise passive detection or prove
+human acceptance or race-free script-argument binding against another same-user
+process. It also does not prove cleanup of a hung or hostile external CLI after
+abnormal application exit. None of these fixtures certify live credentials,
+internet/DNS/TLS behavior, an installed vendor CLI, a vendor sandbox, external
+tools, Ollama, LM Studio, or another vendor service.
 
 The distributable smoke extracts the macOS ZIP, silently installs the Windows NSIS
 package in a temporary directory and verifies the executable and installation
@@ -711,13 +846,14 @@ certification.
 
 For the current source, a local macOS arm64 `npm run package:mac` build and
 `npm run smoke:package:native` against its unpacked app passed, including the
-deterministic provider first turn. A current-source distributable smoke and
-four-target aggregate have not been run. The older
+complete deterministic M1.1 provider/runtime matrix described above. A
+current-source distributable smoke and four-target aggregate have not been run.
+The older
 [four-target Package previews run](https://github.com/AlphaBetSoup789/ground/actions/runs/30473714099)
 completed the required macOS arm64, macOS x64, Windows x64, and Linux x64 jobs for
-source commit `a3073a8`, but it predates the packaged-provider-turn requirement.
-Those artifact-bound records remain evidence only for that earlier smoke contract;
-they do not satisfy the current aggregate or certify later source or a supported
+source commit `a3073a8`, but it predates the expanded provider/runtime matrix.
+Those artifact-bound records remain evidence only for that earlier smoke contract
+and do not satisfy the current aggregate or certify later source or a supported
 distribution.
 
 Linux credentials require a working Secret Service/libsecret backend and an
@@ -741,10 +877,13 @@ official artifact has been published or certified. Read
 - Saved providers must pass Test for their exact persisted revision before a run.
   A successful CLI configuration test proves resolution and argument construction,
   not authentication, provider availability, or a live agent turn.
-- Task persistence uses an atomic local JSON document plus three rotating validated
-  snapshots with a 128 MiB ceiling per generation. Settings can inspect and export
-  those generations and restore a retained one after native confirmation, but
-  Ground has no transactional event log or arbitrary state-snapshot import.
+- The desktop still persists tasks in an atomic local JSON document plus three
+  rotating validated snapshots with a 128 MiB ceiling per generation. Settings can
+  inspect and export those generations and restore a retained one after native
+  confirmation. The source tree now includes an audited transactional SQLite
+  event-store foundation and a copy-on-migrate path, but they are not wired into
+  production task, run, approval, or recovery flows; arbitrary state-snapshot
+  import also remains unsupported.
 - State and credential files use no-follow opens where the platform exposes them;
   Windows reparse points do not yet have an equivalent race-free same-user
   guarantee.
@@ -760,10 +899,10 @@ official artifact has been published or certified. Read
 - MCP currently supports tools over unauthenticated Streamable HTTP and local
   stdio. Remote headers/OAuth, resources, prompts, Apps/UI, and elicitation are not
   implemented.
-- Ground converts configured token limits into a conservative UTF-8 byte budget
-  and keeps recent complete tool exchanges, but it does not yet use each model’s
-  exact tokenizer or provide semantic repository indexing and summarizing
-  compaction.
+- Ground converts configured token limits into a conservative UTF-8 byte budget,
+  keeps the active objective plus recent complete tool exchanges, and reports
+  bounded reductions. It does not yet use each model’s exact tokenizer or provide
+  semantic repository indexing and Ground-owned summarizing compaction.
 - Generic CLIs have limited event semantics and no native session resume.
 - Ground does not automatically resume an interrupted managed action. If it
   restarts with a durable action-start claim but no recorded outcome, it marks the

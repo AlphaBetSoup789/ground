@@ -9,6 +9,8 @@ import {
 } from '../cli-environment'
 import {
   assertValidCliSessionId,
+  CliProcessExitError,
+  CliProtocolError,
   runCli,
   type CliActivity,
   type CliInvocationAuthorizer,
@@ -22,6 +24,11 @@ import type {
   AgentRuntimeInspection
 } from './contracts'
 import { MAX_NORMALIZED_COST_USD } from './event-stream'
+import {
+  ProviderError,
+  protocolProviderError,
+  toProviderError
+} from './errors'
 import type {
   AgentActivityKind,
   AgentRunRequest,
@@ -32,6 +39,54 @@ import { z } from 'zod'
 
 const MAX_CLI_ARGUMENT_CHARACTERS = 32_000
 const MAX_DIAGNOSTIC_NOTICE_CHARACTERS = 10_000
+
+function cliRuntimeFailure(
+  error: unknown,
+  signal: AbortSignal
+): unknown {
+  // Preserve the adapter contract's native AbortError. The outer conformance
+  // layer owns cancellation normalization after iterator cleanup.
+  if (signal.aborted) return error
+  if (error instanceof ProviderError) return error
+  if (error instanceof CliProtocolError) {
+    return protocolProviderError(error.message, error)
+  }
+  if (error instanceof CliProcessExitError) {
+    return new ProviderError(error.message, {
+      category: 'process-exit',
+      retryable: false,
+      cause: error
+    })
+  }
+  const code =
+    error && typeof error === 'object' &&
+    typeof (error as { code?: unknown }).code === 'string'
+      ? (error as { code: string }).code.toUpperCase()
+      : undefined
+  if (code === 'ENOENT' || code === 'ENOTDIR') {
+    return new ProviderError(
+      error instanceof Error ? error.message : 'CLI executable was not found',
+      {
+        category: 'executable-not-found',
+        retryable: false,
+        providerCode: code,
+        cause: error
+      }
+    )
+  }
+  if (code === 'EACCES' || code === 'EPERM') {
+    return new ProviderError(
+      error instanceof Error ? error.message : 'CLI process could not start',
+      {
+        category: 'process-exit',
+        retryable: false,
+        providerCode: code,
+        cause: error
+      }
+    )
+  }
+  return toProviderError(error, { signal })
+}
 
 export * from '../cli-runtime-bindings'
 
@@ -610,7 +665,7 @@ export class CliRuntimeAdapter implements AgentRuntimeAdapter<CliProvider> {
           : 'The CLI runtime ended before reporting completion.'
       )
       emitDiagnostics()
-      queue.close(error)
+      queue.close(cliRuntimeFailure(error, signal))
     }
   }
 }

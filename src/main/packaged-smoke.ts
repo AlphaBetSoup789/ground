@@ -42,7 +42,9 @@ import {
   type TerminalPtyFactory
 } from './terminal-service'
 import { prepareCliEnvironmentPlan } from './cli-environment'
+import type { PackagedCliSmokeEvidence } from './packaged-cli-smoke'
 import type { PackagedProviderSmokeEvidence } from './packaged-provider-smoke'
+import type { PackagedProviderFailureSmokeEvidence } from './packaged-provider-failure-smoke'
 
 const SMOKE_DIRECTORY_PREFIX = 'ground-packaged-smoke-'
 const RESULT_FILENAME = 'result.json'
@@ -92,7 +94,15 @@ interface PackagedNativeEvidence {
   mcpLaunchApproval: {
     exactEnvelopeValidated: true
   }
+  cliRuntime: PackagedCliSmokeEvidence
   providerRuntime: PackagedProviderSmokeEvidence
+  providerFailureRuntime: PackagedProviderFailureSmokeEvidence
+}
+
+interface PackagedNativeSmokeRunners {
+  provider: () => Promise<PackagedProviderSmokeEvidence>
+  providerFailures: () => Promise<PackagedProviderFailureSmokeEvidence>
+  cli: () => Promise<PackagedCliSmokeEvidence>
 }
 
 export interface WindowsTerminalProbe {
@@ -1054,7 +1064,7 @@ function reportNativeSmokeProgress(
 
 export async function runPackagedNativeSmoke(
   config: PackagedSmokeConfig,
-  runProviderSmoke: () => Promise<PackagedProviderSmokeEvidence>
+  runners: PackagedNativeSmokeRunners
 ): Promise<Record<string, boolean>> {
   const workspace = path.join(config.directory, 'workspace')
   const worktreeRoot = path.join(config.directory, 'worktrees')
@@ -1081,8 +1091,16 @@ export async function runPackagedNativeSmoke(
   reportNativeSmokeProgress('git', 'passed')
 
   reportNativeSmokeProgress('provider', 'starting')
-  const providerRuntimeEvidence = await runProviderSmoke()
+  const providerRuntimeEvidence = await runners.provider()
   checks.providerCompatibleFirstTurn = true
+  checks.providerOpenAiResponsesFirstTurn = true
+  const cliRuntimeEvidence = await runners.cli()
+  checks.recognizedCliFirstTurn = true
+  checks.cliNonFatalWarningSuccessful = true
+  const providerFailureRuntimeEvidence =
+    await runners.providerFailures()
+  checks.providerUnavailableLoopbackHandled = true
+  checks.providerMalformedResponseHandled = true
   reportNativeSmokeProgress('provider', 'passed')
 
   reportNativeSmokeProgress('mcp', 'starting')
@@ -1101,7 +1119,9 @@ export async function runPackagedNativeSmoke(
     mcpLaunchApproval: {
       exactEnvelopeValidated: exactMcpLaunchEnvelopeValidated
     },
-    providerRuntime: providerRuntimeEvidence
+    cliRuntime: cliRuntimeEvidence,
+    providerRuntime: providerRuntimeEvidence,
+    providerFailureRuntime: providerFailureRuntimeEvidence
   }
   await writeFile(
     path.join(config.directory, NATIVE_EVIDENCE_FILENAME),

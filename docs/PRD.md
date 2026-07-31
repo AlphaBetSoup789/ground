@@ -348,8 +348,9 @@ These require explicit product or architecture decisions before implementation:
   improves repository understanding without duplicating an IDE?
 - Which parts of multi-agent orchestration should Ground own versus delegate to a
   capable external runtime?
-- What local-first representation should replace snapshot JSON while preserving
-  import/export clarity and side-effect recovery?
+- How should the audited SQLite foundation be cut over incrementally while
+  preserving the JSON rollback source, import/export clarity, secret-reference
+  lifecycle, and side-effect recovery?
 - Which optional team or encrypted-sync capabilities can exist without weakening
   the no-account local workflow?
 - What compatibility and accessibility matrix is realistic for the first signed

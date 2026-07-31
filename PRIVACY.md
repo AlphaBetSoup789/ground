@@ -97,8 +97,10 @@ restore a retained one after native confirmation. State exports do not include t
 separate credential-vault document or Git-executable preference. They can contain
 opaque `pendingSecretDeletes` reference strings because those are part of the
 selected state generation, but not their ciphertext or plaintext values. The field
-is excluded from ordinary renderer snapshots. Operational filesystem failures stop
-loading instead of moving valid data. The primary,
+is excluded from ordinary renderer snapshots. The production composition does not
+create or consult a SQLite task database; that module is currently a source/test
+foundation rather than a second live task-history copy. Operational filesystem
+failures stop loading instead of moving valid data. The primary,
 retained generations, quarantine files, and user-created exports are not encrypted
 at rest, so task history and other non-secret metadata have the same protection as
 the user’s local account and disk.
@@ -121,6 +123,16 @@ provider-attributed local history and can reconstruct normalized tool exchanges
 when a user switches providers; this means relevant prior messages and tool results
 may be sent to the newly selected provider. Foreign provider-owned continuation
 state is not replayed.
+
+Within the configured managed-API request budget, Ground gives the latest user
+message priority as the active objective and then includes recent complete
+conversation/tool-result groups. If the exact objective would otherwise displace
+all newer evidence, Ground may send a visibly marked bounded form containing its
+beginning and end; the local timeline retains the full text. Ground reports
+timeline-projection and request-planner reductions in an updating local activity.
+If even a marked objective cannot fit, Ground fails before contacting the model
+adapter for that request. This policy applies to Ground-managed API requests, not
+to the provider-internal context behavior of external CLI runtimes.
 
 Testing a connection sends a model-discovery request and the configured credential,
 if required, to that endpoint. If an OpenAI-compatible `/models` response cannot

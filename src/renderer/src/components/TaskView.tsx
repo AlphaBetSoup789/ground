@@ -18,6 +18,7 @@ import {
   Trash2
 } from 'lucide-react'
 import type {
+  CopyAssistantOutputInput,
   DesktopActivityItem,
   DesktopTask,
   ProviderProfile,
@@ -25,7 +26,12 @@ import type {
   TaskExportFormat,
   TaskPatch
 } from '../../../shared/types'
+import {
+  failedRunRetrySource,
+  type FailedRunRetrySource
+} from '../lib/failed-run-retry'
 import { providerReadiness } from '../lib/provider-readiness'
+import type { AskToAgentHandoffSource } from '../lib/ask-agent-handoff'
 import { Composer } from './Composer'
 import { GitPanel } from './GitPanel'
 import { TerminalPanel } from './TerminalPanel'
@@ -38,9 +44,14 @@ interface TaskViewProps {
   providers: ProviderProfile[]
   draft: string
   onDraftChange: (value: string) => void
+  onRestoreDraft: (value: string) => void
+  askToAgentPending: boolean
   sidebarOpen: boolean
   onCloseSidebar: () => void
   onUpdateTask: (patch: TaskPatch) => void
+  onContinueInAgent: (
+    source: AskToAgentHandoffSource
+  ) => Promise<boolean>
   onChooseWorkspace: () => void
   onRevealWorkspace: () => void
   onStartRun: (prompt: string) => Promise<void>
@@ -49,12 +60,17 @@ interface TaskViewProps {
     item: DesktopActivityItem,
     approved: boolean
   ) => Promise<void>
+  onCopyAssistantOutput: (
+    input: CopyAssistantOutputInput
+  ) => Promise<boolean>
   onOpenSettings: (providerId?: string) => void
   onImportTask: () => void
   onForkTask: () => void
   onSetArchived: (archived: boolean) => void
   onExportTask: (format: TaskExportFormat) => void
   onDeleteTask: () => void
+  onAddHunkToPrompt: (taskId: string, block: string) => void
+  onPrepareFailedRunRetry: (source: FailedRunRetrySource) => void
   onTaskCreated: (task: DesktopTask) => void
   onWorkspaceTasksChanged: () => void
   onError: (error: unknown) => void
@@ -68,10 +84,15 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
   const taskMenuTriggerRef = useRef<HTMLButtonElement>(null)
   const provider = props.providers.find((candidate) => candidate.id === props.task.providerId)
   const readiness = provider ? providerReadiness(provider) : undefined
+  const retrySource = failedRunRetrySource(props.task)
 
   useEffect(() => {
     setTaskMenuOpen(false)
   }, [props.task.id])
+
+  useEffect(() => {
+    if (props.askToAgentPending) setTaskMenuOpen(false)
+  }, [props.askToAgentPending])
 
   useEffect(() => {
     if (props.task.archivedAt) setWorkspacePanel(undefined)
@@ -155,7 +176,10 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
 
   return (
     <div
+      data-task-id={props.task.id}
       className={`task-view${workspacePanel ? ' workspace-panel-open' : ''}${
+        workspacePanel ? ` workspace-panel-${workspacePanel}` : ''
+      }${
         isArchived ? ' archived-task-view' : ''
       }${provider?.verification?.status !== 'passed' ? ' provider-needs-test' : ''}`}
     >
@@ -213,7 +237,9 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
                 type="button"
                 className={props.task.mode === mode ? 'active' : ''}
                 onClick={() => props.onUpdateTask({ mode })}
-                disabled={isRunning || isArchived}
+                disabled={
+                  isRunning || isArchived || props.askToAgentPending
+                }
                 aria-pressed={props.task.mode === mode}
                 title={mode === 'ask' ? 'Ask mode' : 'Agent mode'}
               >
@@ -232,7 +258,9 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
             <select
               value={props.task.providerId}
               onChange={(event) => props.onUpdateTask({ providerId: event.target.value })}
-              disabled={isRunning || isArchived}
+              disabled={
+                isRunning || isArchived || props.askToAgentPending
+              }
               aria-label="Provider"
               title="Provider for this task. New tasks use your latest choice."
             >
@@ -284,6 +312,7 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
             className="icon-button header-settings"
             type="button"
             onClick={() => props.onOpenSettings(provider?.id)}
+            disabled={props.askToAgentPending}
             aria-label="Provider settings"
           >
             <Settings2 size={16} />
@@ -295,6 +324,7 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
               className="icon-button"
               type="button"
               onClick={() => setTaskMenuOpen((current) => !current)}
+              disabled={props.askToAgentPending}
               aria-label="Task actions"
               aria-haspopup="menu"
               aria-expanded={taskMenuOpen}
@@ -457,6 +487,7 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
             This task is archived. Its history is read-only until you restore it.
           </span>
           <button
+            className="archived-task-restore"
             type="button"
             onClick={() => props.onSetArchived(false)}
           >
@@ -481,15 +512,21 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
         onSetImportedHistory={(include) =>
           props.onUpdateTask({ includeImportedHistory: include })
         }
+        onContinueInAgent={props.onContinueInAgent}
+        onCopyAssistantOutput={props.onCopyAssistantOutput}
       />
 
       <Composer
         draft={props.draft}
         onDraftChange={props.onDraftChange}
+        onRestoreDraft={props.onRestoreDraft}
         task={props.task}
         provider={provider}
         disabled={isArchived}
+        sendBlocked={props.askToAgentPending}
+        failedRunRetry={retrySource}
         onChooseWorkspace={props.onChooseWorkspace}
+        onPrepareFailedRunRetry={props.onPrepareFailedRunRetry}
         onSend={props.onStartRun}
         onStop={props.onStopRun}
       />
@@ -509,8 +546,11 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
             />
           ) : (
             <GitPanel
+              key={props.task.id}
               taskId={props.task.id}
+              runStatus={props.task.runStatus}
               workspaceReady={Boolean(props.task.workspace)}
+              onAddHunkToPrompt={props.onAddHunkToPrompt}
               onTaskCreated={props.onTaskCreated}
               onWorkspaceTasksChanged={props.onWorkspaceTasksChanged}
               onError={props.onError}

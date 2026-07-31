@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir } from 'node:fs/promises'
 import os from 'node:os'
@@ -17,6 +17,10 @@ import type {
   TerminalSessionInfo
 } from '../shared/types'
 import { ApplicationMutationGate } from './application-mutation-gate'
+import {
+  assistantOutputClipboardIpcOperation,
+  AssistantOutputClipboardService
+} from './assistant-output-clipboard'
 import {
   GitServiceError,
   GitWorkspaceService,
@@ -106,7 +110,12 @@ import {
   shouldMigrateLegacyData,
   writePackagedSmokeResult
 } from './packaged-smoke'
+import {
+  PackagedCliSmokeTrustAuthority,
+  runPackagedCliSmoke
+} from './packaged-cli-smoke'
 import { runPackagedProviderSmoke } from './packaged-provider-smoke'
+import { runPackagedProviderFailureSmoke } from './packaged-provider-failure-smoke'
 import {
   CliTrustRegistry,
   type CliTrustRequest,
@@ -560,6 +569,12 @@ function registerIpc(
   mcp: McpManager,
   dataDirectory: string
 ): void {
+  const assistantOutputClipboard = new AssistantOutputClipboardService(
+    store,
+    clipboard
+  )
+  const assistantOutputClipboardIpc =
+    assistantOutputClipboardIpcOperation(assistantOutputClipboard)
   const terminalAccess = new TerminalAccessRegistry()
   const terminalSenderCleanupInstalled = new Set<number>()
   const gitServices = new Map<string, Promise<GitWorkspaceService>>()
@@ -815,6 +830,12 @@ function registerIpc(
       activeRunEvents: activeEvents
     }
   })
+
+  handleTrusted(
+    assistantOutputClipboardIpc.channel,
+    (_event, rawInput: unknown) =>
+      assistantOutputClipboardIpc.invoke(rawInput)
+  )
 
   handleTrusted(IPC.listStateSnapshots, () =>
     store.listLocalStateSnapshots()
@@ -1982,7 +2003,15 @@ if (!ownsInstance) {
     if (credentialNotice) store.addRecoveryNotice(credentialNotice)
     const workspaceGrants = new WorkspaceGrantRegistry()
     await workspaceGrants.restore(store.snapshot().tasks.map((task) => task.workspacePath))
-    const cliTrust = new CliTrustRegistry(confirmCliTrust)
+    const packagedCliSmokeTrustAuthority =
+      packagedSmokeConfig?.scope === 'native'
+        ? new PackagedCliSmokeTrustAuthority(packagedSmokeConfig)
+        : undefined
+    const cliTrust = new CliTrustRegistry(
+      packagedCliSmokeTrustAuthority
+        ? packagedCliSmokeTrustAuthority.confirm
+        : confirmCliTrust
+    )
     const authorizeCliInvocation = (
       request: Parameters<CliTrustRegistry['authorizeInvocation']>[0]
     ) => cliTrust.authorizeInvocation(request)
@@ -2055,18 +2084,46 @@ if (!ownsInstance) {
       if (packagedSmokeConfig.scope === 'native') {
         Object.assign(
           checks,
-          await runPackagedNativeSmoke(packagedSmokeConfig, () =>
-            runPackagedProviderSmoke({
-              token: packagedSmokeConfig.token,
-              directory: packagedSmokeConfig.directory,
-              userDataPath: packagedSmokeConfig.userDataPath,
-              store,
-              providers,
-              runs,
-              workspaceGrants,
-              runEvents: () => packagedSmokeRunEvents
-            })
-          )
+          await runPackagedNativeSmoke(packagedSmokeConfig, {
+            provider: () =>
+              runPackagedProviderSmoke({
+                token: packagedSmokeConfig.token,
+                directory: packagedSmokeConfig.directory,
+                userDataPath: packagedSmokeConfig.userDataPath,
+                store,
+                providers,
+                runs,
+                workspaceGrants,
+                runEvents: () => packagedSmokeRunEvents
+              }),
+            providerFailures: () =>
+              runPackagedProviderFailureSmoke({
+                token: packagedSmokeConfig.token,
+                directory: packagedSmokeConfig.directory,
+                userDataPath: packagedSmokeConfig.userDataPath,
+                store,
+                providers,
+                runs,
+                workspaceGrants,
+                runEvents: () => packagedSmokeRunEvents
+              }),
+            cli: () => {
+              if (!packagedCliSmokeTrustAuthority) {
+                throw new Error(
+                  'Packaged native CLI smoke trust authority is unavailable'
+                )
+              }
+              return runPackagedCliSmoke({
+                config: packagedSmokeConfig,
+                store,
+                providers,
+                runs,
+                workspaceGrants,
+                trustAuthority: packagedCliSmokeTrustAuthority,
+                runEvents: () => packagedSmokeRunEvents
+              })
+            }
+          })
         )
       }
       await finishPackagedSmoke(checks)

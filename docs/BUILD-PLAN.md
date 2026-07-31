@@ -198,6 +198,15 @@ Requirements: GR-6
 - Design migration from current bounded JSON state with fail-closed rollback.
 - Keep export formats deliberately separate from the internal recovery log.
 
+Foundation status: the source/test layer now implements transactional append,
+deterministic replay, strict schema/version gates, external-head verification,
+coordinated publication, single-link protected-file validation, durable
+publication cleanup, copy-on-migrate from JSON v2, verified backups, and
+crash-prefix coverage. It is not production-composed. Completing M2.1 still
+requires semantic events for tasks, runs, activities, approvals, managed
+executions, provider revisions, and recovery checkpoints; bounded compaction; and
+desktop migration/cutover from the JSON `StateStore`.
+
 Acceptance gate:
 
 - Crash injection at every publish boundary recovers to a valid prefix.
@@ -279,6 +288,10 @@ Requirements: GR-3.6, GR-6
 - Keep provider-native session acceleration optional.
 - Define invalidation when provider, workspace, mode, or imported-history policy
   changes.
+- As a non-summarizing precursor, reserve the active user objective inside every
+  bounded managed-API request, keep complete tool exchanges atomic, and report
+  timeline-projection and request-planner reductions without recounting compatible
+  session history.
 
 Acceptance gate:
 
@@ -296,6 +309,8 @@ Requirements: GR-3, GR-4
   capability checks and egress previews.
 - Add focused changed-file review, per-hunk discussion, approval summaries, and
   test-result presentation.
+- Refresh an already-open Git review once when its task leaves an active run,
+  retaining the prior overview and any still-valid file/hunk position.
 - Preserve accessibility and portable export behavior for supported attachment
   metadata.
 
@@ -304,7 +319,62 @@ Acceptance gate:
 - Unsupported providers fail before egress with a clear capability explanation.
 - Attachment bytes, parsed text, previews, and exports have explicit size,
   persistence, and deletion rules.
-- Diff review remains bound to current file/index identities.
+- Diff review remains bound to current file and hunk review identities.
+- Late or overlapping repository reads cannot cross task boundaries or blank a
+  usable review while a finished-run refresh is pending.
+
+### M3.4 Task interaction and navigation — P1
+
+Requirements: GR-3, GR-8.1
+
+- Keep command discovery, task search, task switching, and task-local drafts
+  keyboard-complete across desktop and narrow layouts.
+- Let a user deliberately move reviewed context—such as an Ask response or one
+  complete Git hunk—into an editable draft without starting a run.
+- Let a user prepare the next task-local prompt while a run or approval is active
+  without queueing, steering, or sending it implicitly.
+- Let a user recover an exact retained failed request into an empty editable
+  task-local draft without implying automatic or side-effect-safe replay.
+- Preserve timeline reading position while follow mode is paused, then offer one
+  keyboard-accessible, task-bound action that returns to exact current output.
+- Let a user copy the exact stored assistant markdown or one represented fenced
+  code block through a source-bound, write-only clipboard bridge without starting
+  a run or mutating a draft.
+- Bind delayed selection, handoff, and focus work to the exact current task and
+  source revision so stale renderer work cannot redirect a draft or selection.
+- Keep every prompt handoff visibly editable and require a separate explicit Send
+  before provider or runtime egress.
+
+Acceptance gate:
+
+- Task search, result activation, command discovery, task switching, and sidebar
+  exit can be completed by keyboard with deterministic focus on supported window
+  sizes.
+- Task-local drafts survive task switching and remain attributable to exactly one
+  task, including drafts prepared while another run is still active.
+- Context-to-draft actions preserve existing text, refuse incomplete or oversized
+  input, and cannot create a user message, run, approval, tool call, or provider
+  request by themselves.
+- Failed-run recovery excludes imported history and outcome-unknown interrupted
+  work, never replaces an occupied draft, and revalidates the exact run/message
+  source before preparing text.
+- Streaming output cannot force a paused reader to the bottom; explicit
+  jump-to-latest activation resumes follow mode, announces the change, and cannot
+  carry stale control or scroll state into another task.
+- Assistant-output copy is absent for the latest active assistant source, writes
+  only main-re-resolved exact Markdown or represented fenced-code text after user
+  activation, and never exposes clipboard reads, arbitrary-text writes, or trusted
+  destination handling.
+- Copy status is visible and politely announced without copied content; repeated
+  attempts reannounce, focus remains stable, and late completion cannot cross
+  task, message, content, or request ownership.
+- Required native Electron evidence loads the compiled production
+  main/preload/renderer with isolated state, proves deny-all renderer clipboard
+  permissions and inactive bridge refusal, and verifies exact pointer and
+  keyboard writes without provider credentials or unrecoverable clipboard
+  mutation.
+- Input-method composition, stale async completion, responsive layout changes,
+  and modal focus changes have renderer interaction evidence.
 
 ## M4 — Ground-owned parallel work
 
@@ -523,9 +593,9 @@ explicit non-guarantees.
 
 ### More orchestration increases side-effect ambiguity
 
-Mitigation: finish the event store and interruption semantics before automatic
-parallel integration; isolate work in managed worktrees; require user-owned merge
-authority.
+Mitigation: complete production event-store composition, semantic coverage, and
+interruption semantics before automatic parallel integration; isolate work in
+managed worktrees; require user-owned merge authority.
 
 ### Indexing and attachments expand privacy exposure
 

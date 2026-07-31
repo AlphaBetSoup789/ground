@@ -92,13 +92,55 @@ Agent mode can also advertise approval-gated full writes, exact localized edits,
 commands, and definition-trusted MCP tools. The model profile can supply an
 explicit context window, maximum output tokens, and optional reasoning effort.
 Context selection reserves output and safety headroom, converts the remaining
-tokens to a conservative UTF-8 byte budget, keeps recent complete tool exchanges,
-and records a timeline notice when guidance, tools, or older items are reduced.
-Core read/write/command definitions and a minimum repository-guidance allowance
-receive priority in small windows. This byte estimate is safer for multibyte text
-than a characters-per-token ratio but is not the model’s exact tokenizer. These
-numeric/reasoning settings are user-supplied protocol hints, not model capability
-certification.
+tokens to a conservative UTF-8 byte budget, and identifies the last user-message
+occurrence as the active objective. It reserves that objective before selecting a
+recent suffix of complete conversation/tool-result groups. If an exact objective
+fits alone but would exclude every newer group, a Unicode-safe bounded head-and-tail
+form with an explicit Ground marker is considered; it is used only when doing so
+retains newer evidence. A request that cannot represent even the marker fails
+before adapter egress. Source occurrence indices, rather than text or message IDs,
+prevent accidental duplication while complete tool groups remain atomic and in
+source order.
+
+The earlier task-timeline projection counts only model-projectable entries not
+already represented by a compatible session. Its omissions and the later request
+planner’s omissions remain separate, so resuming a session does not falsely count
+mirrored history. One persisted **Context window managed** activity is updated as
+the management state or exact counts change. Core read/write/command definitions
+and a minimum repository-guidance allowance receive priority in small windows.
+This byte estimate is safer for multibyte text than a characters-per-token ratio
+but is not the model’s exact tokenizer. These numeric/reasoning settings are
+user-supplied protocol hints, not model capability certification.
+
+The renderer’s Ask-to-Agent handoff is a two-step convenience, not a new authority
+path. It binds the action to an idle task’s exact non-imported assistant response
+and Agent-capable provider, awaits the existing persisted mode update, and fills
+only that task’s unsent composer draft. A task switch during the update cannot
+redirect the draft or focus. The existing run-start boundary still requires an
+explicit Send, exact provider readiness, and the normal managed approvals or
+disclosed native CLI permission policy. Model and native runtime continuation
+records remain mode-bound and are not reused across the handoff.
+
+Structured Git review can also append the active complete hunk to an unsent
+task-local composer draft. The renderer formats the current parsed hunk
+synchronously, labels its staged/working provenance, visibly escapes hostile
+presentation text, and refuses incomplete, truncated, or over-32,000-character
+blocks rather than slicing them. Each loaded Git overview is retained with its
+source task ID, hidden on any task mismatch, and remounted across task changes.
+The callback carries that exact source task ID; delayed focus additionally binds
+the current task-selection epoch and the composer's task identity. This is review
+context only: it adds no Git, IPC, provider, approval, or persistence authority,
+and provider egress still requires an explicit Send through the normal run-start
+boundary.
+
+While Git review is mounted, the renderer observes only the selected task's
+materialized run status. One `running`/`awaiting-approval` to `idle`/`failed`
+edge invokes the existing read-only overview request without clearing the last
+successful result. Request versions and task-tagged overviews reject late
+responses. File selection uses path/status/occurrence identity; hunk selection
+adds its exact range/header identity, so an unchanged review position survives
+unrelated patch insertion while a removed or shifted target falls back
+conservatively. This adds no watcher, polling, IPC, or Git mutation authority.
 
 Provider configuration has a separate persisted readiness state. Saving creates an
 unverified provider revision. **Test** can persist `passed` or `failed` only when
@@ -114,10 +156,17 @@ authorization or workspace lookup. Provider mutation and verification publicatio
 cannot interleave with that reservation or an active run.
 
 Corrective UI is unlocked by typed main-process evidence rather than renderer
-message matching. In the current narrow case, only an actual refused connection to
-a literal-loopback provider carries `connection-refused`; that result can show the
-local startup/model/port checklist and detected-CLI alternatives. Authentication,
-protocol-shape, and other uncategorized failures retain their original diagnostics.
+message matching. The bounded taxonomy covers refused connections, DNS, TLS,
+authentication, rate limits, Ground-owned probe timeouts, incompatible protocol
+shapes, missing executables, and explicit external-runtime startup failures.
+Classification uses HTTP status and rate-limit headers, bounded cause-chain codes,
+Ground-owned timers, parser sentinels, and executable/process launch errors. Only
+the category is added to failed readiness or an error activity. Readiness retains
+no diagnostic text; run history keeps its existing bounded, credential-redacted
+detail but adds no cause graph, response-body field, or raw structured
+provider-code field. Unknown failures retain their bounded diagnostic without
+specialized guidance. Enhanced local startup/model/port recovery remains narrower:
+it requires an actual refused connection to a literal-loopback endpoint.
 
 ### Agent runtime adapters
 
@@ -390,7 +439,21 @@ readable but cannot start runs, change provider/mode/workspace settings, or invo
 new workspace-service actions until restored. Existing PTYs are detached rather
 than terminated, so a process already running in that shell can continue at the OS
 level. Sidebar search examines bounded recent timeline content and can be scoped to
-active or archived tasks.
+active or archived tasks. Its keyboard policy operates on the exact filtered task
+order used by the current committed render: Enter selects the first result by its
+opaque task ID, while Arrow Down and Arrow Up focus the live first and last result
+rows. Result identities are not reconstructed from display labels or cached across
+renders. Input-method composition, modified combinations, and an empty result set
+are inert, and activation clears the query.
+
+Task selection rechecks that opaque ID against the latest renderer snapshot and
+applies a functional settings-only update, preserving concurrent task and run-event
+changes before delegating to the existing typed main-process selection boundary.
+A rejection of the current IPC request causes an authoritative snapshot refresh;
+every refresh preserves a task selection that began after that refresh's captured
+selection boundary. Post-selection close/return-focus work is bound to the
+originating request, task, and user-interaction context so a delayed completion
+cannot redirect focus after the user has moved elsewhere.
 
 An explicit fork creates new task/item/run/tool-call identities. It keeps readable
 timeline content, the selected provider/mode/workspace, and complete normalized
@@ -528,25 +591,71 @@ partial edit that leaves values blank must resolve the exact old envelope.
 ## Renderer interaction model
 
 The renderer keeps unsent composer drafts in process memory keyed by task, so
-switching tasks does not mix text and no draft gains durable authority. A global
-command palette provides filterable keyboard actions, traps/restores focus, and
-does not interpret command keys while an input method is composing. Modal state
-makes the underlying app surface inert.
+switching tasks does not mix text and no draft gains durable authority. A running
+or approval-waiting task keeps its textarea editable, but exposes Stop as the only
+run action and suppresses the Send shortcut without consuming the draft. The text
+is neither queued nor sent to steer the active run; a later turn still requires an
+explicit Send through the ordinary run-start boundary. The unresolved initial
+start request and archived tasks keep the textarea disabled. A failed start
+restores its submitted text only when that exact source task still has no newer
+draft. A retained terminal `Run failed` item can separately expose a renderer-only
+retry source only when it belongs to the latest retained non-imported run and the
+latest non-imported user message shares its exact run identity. Activation
+rederives that occurrence from the latest snapshot, then uses the same empty-only
+draft restore rule. Outcome-unknown `Run interrupted` markers are excluded.
+Delayed focus also requires the same task, selection epoch, current source,
+composer identity, enabled state, and exact prepared value.
+
+A global command palette provides filterable keyboard actions, traps/restores
+focus, and does not interpret command keys while an input method is composing.
+Modal state makes the underlying app surface inert. Task search exposes its
+current bounded result count and navigation instructions to assistive technology,
+but this keyboard baseline is not a complete screen-reader certification.
 
 Assistant streaming remains visually live but uses a separate polite announcer
 that batches and normalizes bounded chunks. Timeline following is conditional on
 the viewport remaining near the latest output, preserving a reader’s scroll
-position. Responsive styles, forced-color treatment, focus-visible states, and
-reduced-motion rules are part of the public-preview baseline; they are not a claim of
-complete cross-platform accessibility certification.
+position. Leaving that threshold exposes a renderer-only **Jump to latest**
+control outside the live log. Paused follow remains sticky through later content
+and geometry changes. Activation moves the exact current task viewport to its
+current bottom, restores follow mode, transfers focus to the log, and emits a
+separate polite status; task identity gates presentation and activation.
+Stable assistant timeline messages expose **Copy response**, and represented
+fenced code blocks expose **Copy code**. The renderer sends a bounded task,
+message, expected-content, and target-offset identity through a dedicated
+write-only preload method that requires active user activation. Main applies the
+normal trusted-sender check, re-reads the canonical task, rejects a changed,
+missing, or latest-active assistant source, resolves the selected response or
+fenced node with the pinned Markdown parser, and performs a synchronous plain-text
+clipboard write. The preload exposes no clipboard read, arbitrary-text write, or
+rich-HTML primitive. Renderer feedback is request-, task-, message-, and
+content-bound so late completion cannot announce in another task; the fixed
+success/failure status contains none of the copied text and does not move focus.
+This reviewed boundary is recorded in
+[#42](https://github.com/AlphaBetSoup789/ground/issues/42).
+Responsive styles, forced-color treatment, focus-visible states, and
+reduced-motion rules are part of the public-preview baseline; they are not a claim
+of complete cross-platform accessibility certification.
 
 A Playwright-over-Electron suite drives that real built renderer with the
-explicit browser-preview desktop mock. Its seven scenarios cover palette
-keyboard/focus, provider-form labels and Chromium constraint validation,
-local-template/refused-connection recovery into a detected CLI, task-local drafts,
-deterministic send/cancel, archive/search, responsive settings, reduced-motion CSS,
-and the forced-color connection-path selection. It does not load production
-main/preload authority or replace manual screen-reader/native review.
+explicit browser-preview desktop mock. Its 19 scenarios cover palette and
+task-search keyboard/focus, including narrow-sidebar focus, provider-form labels
+and Chromium constraint validation, local-template/refused-connection recovery
+into a detected CLI, task-local, active-run, and failed-run draft preparation,
+Ask-to-Agent and reviewed-hunk handoffs, paused-streaming jump recovery,
+source-bound assistant-response and fenced-code clipboard copy, structured Git
+diff navigation and request-bound finished-run refresh including failure/retry
+and late-task isolation, deterministic send/cancel, archive/search, responsive
+settings, reduced-motion CSS, and forced-color connection-path selection. It
+does not load production main/preload authority or replace manual
+screen-reader/native review. Production main-service and preload unit tests
+separately exercise canonical-source resolution, failure, request bounds, and
+user-activation gating. A separate source-build native smoke loads the compiled
+production main, renderer, and sandboxed preload with a temporary state profile;
+it proves deny-all renderer clipboard permissions, inactive bridge refusal, and
+exact response/fenced-code writes through trusted IPC and Electron's
+main-process clipboard. That smoke runs in macOS, Windows, and Linux/Xvfb CI and
+does not claim packaged-installer or screen-reader certification.
 
 ## Current composition and migration
 
@@ -564,40 +673,72 @@ with system/user messages, tools, and streamed text. CI does not contact a real
 cloud, Ollama, or LM Studio deployment, make a paid request, or launch an
 authenticated native coding-agent session.
 
+An isolated `src/main/event-store` module now provides a transactional SQLite
+foundation: sequenced append-only events, a SHA-256 event chain, deterministic
+materialized projection replay, exact schema/version gates, coordinated writers,
+an external head witness, verified backups, single-link protected-file validation,
+durable publication-alias cleanup, and copy-on-migrate from JSON v2. It is not
+constructed by the production desktop, and its semantic event vocabulary is
+currently limited to `legacy-state.bootstrapped` and
+`settings.sidebar-collapsed-set`. Tasks, runs, activities, approvals, managed
+executions, provider revisions, recovery checkpoints, and their compaction policy
+therefore remain on the JSON `StateStore` until a later production cutover.
+
 Native package workflows target macOS arm64/x64, Windows x64, and Linux x64. A
 fixed packaged smoke verifies app identity, OS-encrypted vault round-trip, the
 fail-closed Cancel result of a real native approval dialog, PTY, Git, exact local
-MCP launch/call, process-tree cleanup, and one deterministic packaged provider
-first turn. That provider subprobe uses a credential-free, token-bound
-literal-loopback OpenAI-compatible fixture. The packaged main process saves and
-persistently verifies its profile, streams one task turn through the production
-registry and `RunManager`, reloads state, and verifies successful assistant output,
-provider attribution, continuation state, and idle status without a persisted
-failure. It does not exercise hosted credentials, internet or vendor behavior,
-CLIs, tools, or other provider protocols.
+MCP launch/call, process-tree cleanup, and the M1.1 provider/runtime matrix.
+
+The matrix is split into independently required evidence blocks. The positive
+provider block saves, persistently verifies, runs, and reloads both a
+credential-free token-bound OpenAI-compatible profile and a first-class OpenAI
+Responses profile with a synthetic versioned credential, exact Bearer
+authorization, and `store: false`. The expected-failure block persists failed
+connection readiness with bounded `connection-refused` and `protocol-shape`
+kinds for a closed literal-loopback port and malformed compatible
+discovery/generation shapes, then proves `RunManager` blocks both before dispatch.
+The CLI block resolves the Node interpreter supplied by the outer smoke harness,
+creates a token-bound Codex-dialect child, and crosses the production executable,
+configuration, invocation, workspace, parser, session, activity, usage, and
+durability boundaries. A completed Codex error item must persist as one successful
+diagnostic notice while the turn completes.
+
+The unattended CLI fixture cannot click a positive native dialog, so native-smoke
+composition substitutes a fail-closed authority that accepts exactly one
+configuration and one invocation for the hashed runner, hashed script, argv, cwd,
+adapter, and stdin transport. Normal application composition continues to use the
+real native dialog. The outer harness separately requires the selected interpreter
+hash to equal its own `process.execPath`; the evidence states that human approval,
+passive detection, installed/authenticated Codex, vendor sandbox/tool behavior,
+live credentials, DNS/TLS, external services, and race-free script-argument
+binding against a concurrent same-user replacement were not exercised. It also
+does not prove cleanup of a hung or hostile external CLI after abnormal
+application exit.
 
 The distributable layer reruns native scope against an extracted macOS ZIP, a
 temporarily installed Windows NSIS package, or an extracted Linux AppImage and
 emits an artifact-hash-bound evidence record. Release aggregation requires all four
-target records, including the provider subprobe. These are bounded runtime checks,
+target records, including all provider and CLI subprobes. These are bounded runtime checks,
 not signing, notarization, DMG/DEB installation, renderer, accessibility,
 live-provider/CLI, or distribution certification.
 
 For the current source, a local macOS arm64 `package:mac` build and unpacked native
-smoke passed, including the deterministic provider turn. Current-source
+smoke passed, including the complete deterministic M1.1 provider/runtime matrix.
+Current-source
 distributable scope and four-target aggregation have not been run. The older
 [four-target Package previews run](https://github.com/AlphaBetSoup789/ground/actions/runs/30473714099)
 completed the required macOS arm64, macOS x64, Windows x64, and Linux x64 jobs for
-source commit `a3073a8`, but predates the packaged-provider-turn requirement. Its
-artifact-bound records prove only the earlier smoke contract and cannot satisfy the
-current aggregate. Neither evidence set certifies signing, notarization, DMG/DEB
-installation, renderer accessibility, live providers/CLIs, or supported
+source commit `a3073a8`, but predates the expanded provider/runtime matrix. Its
+artifact-bound records prove only the earlier smoke contract and cannot satisfy
+the current aggregate. Neither evidence set certifies signing, notarization,
+DMG/DEB installation, renderer accessibility, live providers/CLIs, or supported
 distribution.
 
-The next storage boundary is a transactional, append-only event store with schema
-migrations and materialized task views. Stronger OS-specific confinement,
-handle-based executable authority, durable terminal/background-process state, and
-authenticated MCP are still future execution boundaries.
+The next storage step is production composition and semantic task/run coverage on
+top of the audited SQLite foundation, followed by bounded compaction and recovery
+UI. Stronger OS-specific confinement, handle-based executable authority, durable
+terminal/background-process state, and authenticated MCP are still future
+execution boundaries.
 
 See [PROVIDER-SDK.md](PROVIDER-SDK.md) for adapter requirements and
 [THREAT-MODEL.md](THREAT-MODEL.md) for the security consequences of these ownership

@@ -19,12 +19,12 @@ changes before implementation.
 
 ## Development setup
 
-Ground supports Node.js 22.12 or newer. CI, packaging, and release verification use
-the exact toolchain in `.nvmrc` and `packageManager`: Node.js 24.18.0 and npm
-11.16.0. npm 11.16.0 is required for the install policy; supported newer Node.js
-versions may be used for ordinary development. Use Node.js 24.18.0 and
-`npm run toolchain:check` when reproducing CI or release results. Then use the
-committed npm lockfile:
+Ground supports Node.js 22.16+ within the 22.x LTS line, or Node.js 24+. CI,
+packaging, and release verification use the exact toolchain in `.nvmrc` and
+`packageManager`: Node.js 24.18.0 and npm 11.16.0. npm 11.16.0 is required for the
+install policy; supported newer Node.js versions may be used for ordinary
+development. Use Node.js 24.18.0 and `npm run toolchain:check` when reproducing CI
+or release results. Then use the committed npm lockfile:
 
 ```bash
 npm ci
@@ -71,10 +71,12 @@ unpacked app's main process, renderer document, and sandboxed preload without
 browser automation. The native smoke additionally checks packaged identity,
 performs an OS-encrypted credential-vault round trip, opens and automatically
 cancels a real native approval dialog, and exercises the packaged PTY binding, Git
-status, a fixed exact-envelope local stdio MCP exchange, and bounded process-tree
-cleanup. The distributable smoke reruns that native scope after extracting the
-macOS ZIP, temporarily installing and verifying removal of the Windows NSIS
-package, or extracting the Linux AppImage. It does not test DMG or DEB installation.
+status, deterministic provider successes and expected failures, a smoke-owned
+recognized Codex-dialect child with exact two-phase authorization, a fixed
+exact-envelope local stdio MCP exchange, and bounded process-tree cleanup. The
+distributable smoke reruns that native scope after extracting the macOS ZIP,
+temporarily installing and verifying removal of the Windows NSIS package, or
+extracting the Linux AppImage. It does not test DMG or DEB installation.
 
 Linux native/distributable smokes and real credential saves require a working
 Secret Service/libsecret backend and an unlocked keyring; Electron’s `basic_text`
@@ -96,6 +98,7 @@ not native IPC, screen-reader, provider, or packaged-app certification.
 | `src/preload/` | Narrow renderer-to-main bridge |
 | `src/main/` | Desktop composition, policy, storage, tools, secrets, and runtimes |
 | `src/main/agent/` | Canonical provider-neutral contracts, event reducers, registry, and adapters |
+| `src/main/event-store/` | Isolated SQLite ledger, witness, migration, and backup foundation; not yet production-composed |
 | `packages/adapter-sdk/` | Provisional publishable manifest, declarations build, and adapter SDK guide |
 | `examples/` | Small dependency-free connection examples for public integration contracts |
 | `src/main/providers/` | Current provider/runtime transport implementations |

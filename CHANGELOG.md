@@ -40,6 +40,11 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
   saved API/CLI tests record pass or failure, and run startup requires a passing
   check. OpenAI-compatible tests fall back from an unavailable `/models` listing
   to one bounded minimal generation probe.
+- Structured provider diagnostics for refused connections, DNS, TLS,
+  authentication, rate limits, timeouts, protocol shape, missing executables, and
+  CLI startup failures. Readiness and failed-run history add only the bounded
+  category alongside existing bounded, redacted diagnostics, show shared
+  corrective guidance, and never infer a category from display text.
 - First-run provider onboarding with explicit Hosted API, Local server, and
   Installed CLI paths. The local path is labeled as a connection template rather
   than a bundled runtime; confirmed refused loopback connections receive targeted
@@ -55,10 +60,46 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
   name, model, and adapter—not endpoint, provider ID, credentials, or revisions.
 - Safe task forks that rekey portable history and strip runtime/approval authority,
   reversible archive/restore, and bounded search across active or archived tasks.
+- Keyboard-complete active/archive task search and switching: `Ctrl/⌘ + K`
+  reveals and focuses search, Enter opens the first current result, Arrow keys
+  enter the exact filtered result list, Escape clears or exits predictably, and
+  stale selection work cannot redirect focus across tasks or responsive layouts.
+- Reviewable Ask-to-Agent handoff that changes only the exact eligible task,
+  prepares an editable task-local implementation draft, and requires a separate
+  explicit Send before provider egress or workspace action.
+- Structured staged and working-tree diff review with per-file summaries,
+  keyboard hunk navigation, hostile-presentation escaping, bounded raw-patch
+  fallback, and a reviewed-hunk-to-prompt action that preserves existing draft
+  text without applying or sending the patch.
+- Mounted Git review now refreshes once when the selected task leaves an active
+  run, retaining the last successful overview during the read and preserving an
+  exact surviving file and hunk selection across the new patch.
+- Draft-only prompt preparation while a task is running or awaiting approval.
+  Stop remains the only active-run action, the Send shortcut is inert, task
+  switching preserves exact drafts, and nothing queues or steers the current run.
+- Failed-run recovery that binds a `Run failed` activity only to the latest
+  retained non-imported run and its exact user request, prepares that text only
+  into an empty task-local draft, and still requires a separate explicit Send.
+  Outcome-unknown interrupted runs and occupied drafts are never replaced or
+  replayed.
+- A keyboard-accessible, task-bound **Jump to latest** timeline action that
+  appears only after the reader leaves the near-bottom follow threshold,
+  preserves paused streaming position, resumes exact-bottom following on
+  activation, and resets across task changes.
+- Source-bound **Copy response** and fenced-block **Copy code** actions for stable
+  assistant output. A user-activation-gated preload request carries only the exact
+  source identity; main re-resolves canonical retained text before a plain-text
+  write and returns only bounded success or failure.
 - Three rotating validated state snapshots, automatic fallback from a corrupt or
   missing primary, unreadable-file quarantine, an in-app recovery browser,
   credential-free native export, and native-confirmed retained-snapshot restore.
 - An explicit fail-closed persisted-state v1-to-v2 migration dispatcher.
+- An isolated transactional SQLite event-store foundation with an append-only
+  SHA-256 event chain, deterministic materialized projection replay, strict schema
+  and version gates, an external head witness, coordinated writers, verified
+  backups, fail-closed external hard-link checks, durably cleaned publication
+  aliases, and copy-on-migrate from JSON v2. This source/test foundation is not yet
+  composed into the desktop `StateStore` or `RunManager`.
 - Multi-session `node-pty` terminals with a session selector, native exact-launch
   confirmation, opaque sender-bound attachments, detach/reattach, restart, and
   termination.
@@ -83,17 +124,26 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
   shipped-content SBOM coverage, and deterministic release checksums.
 - Native-runner packaged startup and runtime smokes: a private
   main/preload/document readiness handshake plus packaged identity, encrypted-vault
-  round trip, fail-closed native approval dialog, PTY, Git, one deterministic
-  credential-free OpenAI-compatible readiness and first-turn path, local stdio MCP,
-  and descendant-cleanup probes. Distributable smoke extracts the macOS ZIP,
-  temporarily installs/uninstalls Windows NSIS, or extracts the Linux AppImage,
-  then binds runtime-evidence records to the exact artifact and architecture.
+  round trip, fail-closed native approval dialog, PTY, Git, deterministic
+  OpenAI-compatible and first-class OpenAI Responses readiness/first-turn paths,
+  expected typed `connection-refused` and `protocol-shape` readiness failures, a
+  recognized Codex-dialect child with successful non-fatal warning persistence,
+  local stdio MCP, and descendant-cleanup probes. Distributable smoke extracts
+  the macOS ZIP, temporarily installs/uninstalls Windows NSIS, or extracts the
+  Linux AppImage, then binds runtime-evidence records to the exact artifact and
+  architecture.
 - A four-target packaging-evidence contract for macOS arm64, macOS x64, Windows
   x64, and Linux x64, with release-time evidence inventory, SHA-256 verification,
-  and mandatory packaged-provider-turn evidence.
+  independently mandatory provider success/failure and recognized-CLI evidence,
+  and an exact binding between the CLI fixture interpreter and its outer smoke
+  harness.
 
 ### Changed
 
+- Raise the minimum supported Node 22 source-development runtime from 22.12 to
+  22.16, the first Node 22 release that provides the SQLite backup API used by the
+  event-store foundation. Supported runtimes are Node 22.16+ within 22.x or Node
+  24+; CI and release verification remain pinned to Node.js 24.18.0.
 - Recognized CLI runtimes now use mode-specific permission arguments, normalize
   activity and usage, capture native session IDs, and resume compatible sessions.
 - Enabled MCP startup now runs remote connections concurrently, serializes local
@@ -105,10 +155,12 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
 - Model-visible tool paths are workspace-relative and sensitive paths are filtered.
 - Active runs bind their provider, workspace, and mode for their lifetime; the UI
   blocks changing those execution inputs until the run stops.
-- Context selection keeps recent complete tool exchanges within a conservative,
-  model-profile-derived UTF-8-byte whole-request budget, preserves core coding
-  tools and a repository-guidance allowance, compacts definitions when necessary,
-  and reports every managed reduction.
+- Context selection reserves the latest user objective, then keeps recent complete
+  tool exchanges within a conservative, model-profile-derived UTF-8-byte
+  whole-request budget. A dominant objective can become a visibly marked bounded
+  head-and-tail form so newer evidence still fits; complete tool groups remain
+  atomic, core coding tools and repository guidance retain priority, and one
+  timeline activity updates as managed reductions change.
 - New tasks remember the most recently selected provider, while legacy state
   migrates deterministically to a valid default.
 - Recognized CLI runtime activities now upsert stable native lifecycle identities
@@ -120,15 +172,28 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
   behavior, responsive provider/MCP/task controls, accessible approval state, and
   reduced-motion/terminal accommodations.
 - Add a keyboard command palette, task-local process-memory composer drafts,
-  near-bottom-only timeline following, and bounded batched screen-reader
-  announcements for streamed assistant text.
-- Add a seven-scenario Playwright-over-Electron renderer interaction suite for
-  command-palette keyboard/focus behavior, accessible provider-form validation,
-  truthful local-provider refusal recovery into a detected CLI, task-local drafts,
-  deterministic send cancellation, archive/search, responsive settings,
-  reduced-motion CSS, and forced-color connection-path selection. It uses the
-  explicit browser-preview desktop mock and is not
-  production-main/native/provider certification.
+  near-bottom-only timeline following with an explicit return action, and bounded
+  batched screen-reader announcements for streamed assistant text.
+- Expand the Playwright-over-Electron renderer interaction suite to nineteen
+  scenarios covering command-palette and task-search keyboard/focus behavior,
+  accessible provider-form validation, truthful local-provider refusal recovery
+  into a detected CLI, task-local, active-run, and failed-run draft preparation,
+  Ask-to-Agent and reviewed-hunk prompt handoffs, paused-streaming jump recovery,
+  source-bound assistant-response and fenced-code clipboard copy, finished-run
+  Git refresh with review-position retention, failure/retry, and late-task
+  isolation, deterministic send cancellation, archive/search, responsive
+  settings and sidebar selection, reduced-motion CSS, and forced-color
+  connection-path selection. It uses the explicit browser-preview desktop mock
+  and is not production-main/native/provider certification.
+- Add a credential-free source-build Electron smoke for the production
+  assistant clipboard boundary. It loads the compiled main, renderer, and
+  sandboxed preload with isolated state; proves activated Web Clipboard denial,
+  inactive bridge refusal, and exact pointer/keyboard response and fenced-code
+  writes through trusted IPC and the native clipboard; restores supported prior
+  clipboard content; and runs in required macOS, Windows, and Linux/Xvfb CI.
+- Recover interrupted managed writes, commands, and MCP calls as explicit
+  outcome-unknown activity, without automatically replaying the side effect or
+  retaining continuation authority.
 - A dated credential-free CLI help/source-surface observation records the reviewed
   Codex, Claude Code, Gemini, and Antigravity versions without claiming live
   provider certification.
@@ -260,8 +325,8 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
 ### Verification boundary
 
 - Compatibility and application suites use deterministic local fixtures, mocked
-  transports/processes, a credential-free loopback SSE integration through the
-  production OpenAI-compatible adapter, and fixed runtime/native package probes.
+  transports/processes, token-bound loopback provider integrations, a smoke-owned
+  recognized-CLI child, and fixed runtime/native package probes.
 - No CI check makes a paid live-provider request or certifies an authenticated
   Codex, Claude, Gemini, Antigravity, or Generic CLI agent turn.
 - Unsigned preview packages and runtime-evidence records are not signing,

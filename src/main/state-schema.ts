@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { PROVIDER_FAILURE_KINDS } from '../shared/types'
 import type {
   AppSettings,
   McpServerProfile,
@@ -48,13 +49,22 @@ const identifier = z.string().min(1).max(200)
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/u)
 const portableJson = z.json()
 const portableJsonObject = z.record(z.string(), portableJson)
+const providerFailureKindSchema = z.enum(PROVIDER_FAILURE_KINDS)
 const providerVerificationSchema = z.discriminatedUnion('status', [
   z.object({ status: z.literal('unverified') }).strict(),
   z
     .object({
-      status: z.enum(['passed', 'failed']),
+      status: z.literal('passed'),
       scope: z.enum(['connection', 'configuration']),
       checkedAt: z.iso.datetime({ offset: true })
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal('failed'),
+      scope: z.enum(['connection', 'configuration']),
+      checkedAt: z.iso.datetime({ offset: true }),
+      failureKind: providerFailureKindSchema.optional()
     })
     .strict()
 ])
@@ -276,6 +286,7 @@ const activityItemSchema = z
     ]),
     title: z.string().max(500),
     detail: z.string().max(100_000).optional(),
+    failureKind: providerFailureKindSchema.optional(),
     status: z.enum(['pending', 'running', 'success', 'error', 'denied']),
     createdAt: timestamp,
     approvalId: identifier.optional(),
@@ -289,6 +300,17 @@ const activityItemSchema = z
     provider: providerAttributionSchema.optional()
   })
   .superRefine((item, context) => {
+    if (
+      item.failureKind &&
+      (item.activityType !== 'error' || item.status !== 'error')
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'Provider failure classification requires a failed error activity',
+        path: ['failureKind']
+      })
+    }
     const marker = item.managedExecution
     if (!marker) return
     if (marker.operationId !== item.id) {

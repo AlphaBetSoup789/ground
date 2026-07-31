@@ -55,6 +55,7 @@
     "smoke:package:launch": "node scripts/smoke-packaged-runtime.mjs launch",
     "smoke:package:native": "node scripts/smoke-packaged-runtime.mjs native",
     "smoke:package:distributable": "node scripts/smoke-distributable-runtime.mjs",
+    "smoke:clipboard:native": "npm run build && node scripts/smoke-native-assistant-clipboard.mjs",
     "verify:package:mac:unsigned": "node scripts/verify-unsigned-mac-preview.mjs",
     "smoke:package:mac": "node scripts/smoke-packaged-pty.mjs"
   },
@@ -71,6 +72,7 @@
     "ai": "^7.0.41",
     "diff": "^8.0.2",
     "lucide-react": "^1.27.0",
+    "mdast-util-from-markdown": "2.0.3",
     "node-pty": "^1.1.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
@@ -158,7 +160,7 @@
     }
   },
   "engines": {
-    "node": ">=22.12.0"
+    "node": "^22.16.0 || >=24.0.0"
   },
   "devEngines": {
     "runtime": {

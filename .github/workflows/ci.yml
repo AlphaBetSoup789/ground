@@ -78,6 +78,17 @@ jobs:
           --server-args="-screen 0 1440x960x24"
           npm run test:e2e:renderer
 
+      - name: Exercise the production native clipboard boundary
+        if: runner.os != 'Linux'
+        run: npm run smoke:clipboard:native
+
+      - name: Exercise the production native clipboard boundary under Xvfb
+        if: runner.os == 'Linux'
+        run: >-
+          xvfb-run --auto-servernum
+          --server-args="-screen 0 1440x960x24"
+          npm run smoke:clipboard:native
+
       - name: Verify adapter SDK package
         run: npm run adapter-sdk:pack-check
 

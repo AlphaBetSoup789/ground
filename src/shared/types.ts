@@ -11,14 +11,38 @@ export type CliAdapter =
   | 'antigravity'
 export type ReasoningEffort = 'low' | 'medium' | 'high'
 
+export const PROVIDER_FAILURE_KINDS = [
+  'connection-refused',
+  'dns',
+  'tls',
+  'authentication',
+  'rate-limit',
+  'timeout',
+  'protocol-shape',
+  'executable-not-found',
+  'external-runtime-startup'
+] as const
+
+export type ProviderFailureKind = (typeof PROVIDER_FAILURE_KINDS)[number]
+
 export type ProviderVerification =
   | {
       status: 'unverified'
     }
   | {
-      status: 'passed' | 'failed'
+      status: 'passed'
       scope: 'connection' | 'configuration'
       checkedAt: string
+    }
+  | {
+      status: 'failed'
+      scope: 'connection' | 'configuration'
+      checkedAt: string
+      /**
+       * A bounded main-process classification. Display diagnostics and
+       * provider response text are deliberately never persisted.
+       */
+      failureKind?: ProviderFailureKind
     }
 
 export interface BaseProvider {
@@ -323,14 +347,20 @@ export interface MessageItem {
   provider?: ProviderAttribution
 }
 
-export interface ActivityItem {
+type ActivityType =
+  | 'status'
+  | 'tool'
+  | 'command'
+  | 'approval'
+  | 'error'
+  | 'diagnostic'
+
+interface ActivityItemBase {
   id: string
   kind: 'activity'
   runId: string
-  activityType: 'status' | 'tool' | 'command' | 'approval' | 'error' | 'diagnostic'
   title: string
   detail?: string
-  status: ActivityStatus
   createdAt: string
   approvalId?: string
   toolName?: string
@@ -343,17 +373,59 @@ export interface ActivityItem {
   provider?: ProviderAttribution
 }
 
+export type ActivityItem =
+  | (ActivityItemBase & {
+      activityType: 'error'
+      status: 'error'
+      /**
+       * Main-process-derived provider failure classification. Raw provider
+       * codes, causes, response bodies, and credentials are never retained.
+       */
+      failureKind?: ProviderFailureKind
+    })
+  | (ActivityItemBase & {
+      activityType: 'error'
+      status: Exclude<ActivityStatus, 'error'>
+      failureKind?: never
+    })
+  | (ActivityItemBase & {
+      activityType: Exclude<ActivityType, 'error'>
+      status: ActivityStatus
+      failureKind?: never
+    })
+
 export type TaskItem = MessageItem | ActivityItem
 
 /**
  * Renderer-safe activity projection. Managed execution claims are owned by the
  * main process and are never exposed over IPC.
  */
-export type DesktopActivityItem = Omit<ActivityItem, 'managedExecution'> & {
-  managedExecution?: never
-}
+export type DesktopActivityItem = ActivityItem extends infer Item
+  ? Item extends ActivityItem
+    ? Omit<Item, 'managedExecution'> & { managedExecution?: never }
+    : never
+  : never
 
 export type DesktopTaskItem = MessageItem | DesktopActivityItem
+
+export type CopyAssistantOutputTarget =
+  | { kind: 'response' }
+  | {
+      kind: 'code'
+      startOffset: number
+      endOffset: number
+    }
+
+/**
+ * A source-bound clipboard request. The renderer cannot provide the bytes
+ * written to the clipboard independently of a retained assistant message.
+ */
+export interface CopyAssistantOutputInput {
+  taskId: string
+  messageId: string
+  expectedContent: string
+  target: CopyAssistantOutputTarget
+}
 
 export interface Task {
   id: string
@@ -572,6 +644,7 @@ export type RunEvent =
       taskId: string
       runId: string
       message: string
+      failureKind?: ProviderFailureKind
     }
 
 export interface RunEventEnvelope {
@@ -626,6 +699,7 @@ export type DesktopRunEvent =
       taskId: string
       runId: string
       message: string
+      failureKind?: ProviderFailureKind
     }
 
 export interface DesktopRunEventEnvelope {
@@ -643,16 +717,9 @@ export interface TaskPatch {
 
 export type TaskExportFormat = 'bundle' | 'markdown'
 
-export interface ProviderTestResult {
-  ok: boolean
+interface BaseProviderTestResult {
   title: string
   detail: string
-  /**
-   * A narrow, main-process-derived reason that may unlock specific corrective
-   * UI. Other failures stay uncategorized until Ground can distinguish them
-   * without guessing from display text.
-   */
-  failureKind?: 'connection-refused'
   models?: string[]
   /**
    * True only when this result was retained on an unchanged saved profile.
@@ -660,6 +727,19 @@ export interface ProviderTestResult {
    */
   persisted?: boolean
 }
+
+export type ProviderTestResult =
+  | (BaseProviderTestResult & {
+      ok: true
+    })
+  | (BaseProviderTestResult & {
+      ok: false
+      /**
+       * A bounded classification derived from structured main-process
+       * evidence. Display diagnostics remain presentation-only.
+       */
+      failureKind?: ProviderFailureKind
+    })
 
 export interface DetectedCli {
   id: 'codex' | 'claude' | 'gemini' | 'antigravity'
@@ -786,6 +866,7 @@ export interface GitCommitInput {
 
 export interface DesktopApi {
   getSnapshot: () => Promise<AppSnapshot>
+  copyAssistantOutput: (input: CopyAssistantOutputInput) => Promise<boolean>
   listStateSnapshots: () => Promise<LocalStateSnapshot[]>
   exportStateSnapshot: (snapshotId: string) => Promise<boolean>
   restoreStateSnapshot: (snapshotId: string) => Promise<boolean>

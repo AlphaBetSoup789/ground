@@ -115,6 +115,170 @@ describe('CLI adapter', () => {
     expect(output).toBe('Received: hello')
   })
 
+  it('rejects an NDJSON child that exits successfully with only malformed output', async () => {
+    await expect(
+      runCli(
+        provider({
+          args: [
+            '-e',
+            `process.stdout.write(${JSON.stringify('{not-json}\n')})`
+          ],
+          outputMode: 'ndjson'
+        }),
+        'hello',
+        process.cwd(),
+        new AbortController().signal,
+        {
+          onText: () => undefined,
+          onDiagnostic: () => undefined
+        },
+        runOptions(),
+        authorizeFixture
+      )
+    ).rejects.toMatchObject({
+      name: 'CliProtocolError',
+      message: expect.stringMatching(/malformed JSON.*valid runtime events/iu)
+    })
+  })
+
+  it('rejects an NDJSON child that exits successfully with only unrecognized structured records', async () => {
+    await expect(
+      runCli(
+        provider({
+          args: [
+            '-e',
+            `process.stdout.write(${JSON.stringify(
+              '{}\n[]\n{"type":"future-runtime-record"}\n'
+            )})`
+          ],
+          outputMode: 'ndjson'
+        }),
+        'hello',
+        process.cwd(),
+        new AbortController().signal,
+        {
+          onText: () => undefined,
+          onDiagnostic: () => undefined
+        },
+        runOptions(),
+        authorizeFixture
+      )
+    ).rejects.toMatchObject({
+      name: 'CliProtocolError',
+      message: expect.stringMatching(
+        /structured JSON.*recognized runtime events/iu
+      )
+    })
+  })
+
+  it('keeps unrecognized structured records nonfatal when a recognized event follows', async () => {
+    let output = ''
+    await runCli(
+      provider({
+        args: [
+          '-e',
+          `process.stdout.write(${JSON.stringify(
+            '{}\n["future-record"]\n{"type":"text","text":"Recovered"}\n'
+          )})`
+        ],
+        outputMode: 'ndjson'
+      }),
+      'hello',
+      process.cwd(),
+      new AbortController().signal,
+      {
+        onText: (delta) => {
+          output += delta
+        },
+        onDiagnostic: () => undefined
+      },
+      runOptions(),
+      authorizeFixture
+    )
+
+    expect(output).toBe('Recovered')
+  })
+
+  it('bounds unrecognized structured records even when they produce no runtime events', async () => {
+    await expect(
+      runCli(
+        provider({
+          args: [
+            '-e',
+            'for(let index=0;index<10001;index+=1)process.stdout.write("{}\\n")'
+          ],
+          outputMode: 'ndjson'
+        }),
+        'hello',
+        process.cwd(),
+        new AbortController().signal,
+        {
+          onText: () => undefined,
+          onDiagnostic: () => undefined
+        },
+        runOptions(),
+        authorizeFixture
+      )
+    ).rejects.toMatchObject({
+      name: 'CliProtocolError',
+      message: expect.stringMatching(/too many nonempty NDJSON records/iu)
+    })
+  })
+
+  it('bounds malformed records before attempting to parse more NDJSON', async () => {
+    await expect(
+      runCli(
+        provider({
+          args: [
+            '-e',
+            'for(let index=0;index<10001;index+=1)process.stdout.write("{not-json}\\n")'
+          ],
+          outputMode: 'ndjson'
+        }),
+        'hello',
+        process.cwd(),
+        new AbortController().signal,
+        {
+          onText: () => undefined,
+          onDiagnostic: () => undefined
+        },
+        runOptions(),
+        authorizeFixture
+      )
+    ).rejects.toMatchObject({
+      name: 'CliProtocolError',
+      message: expect.stringMatching(/too many nonempty NDJSON records/iu)
+    })
+  })
+
+  it('keeps malformed NDJSON diagnostic lines nonfatal when valid events follow', async () => {
+    let output = ''
+    await runCli(
+      provider({
+        args: [
+          '-e',
+          `process.stdout.write(${JSON.stringify(
+            'diagnostic banner\n{"type":"text","text":"Recovered"}\n'
+          )})`
+        ],
+        outputMode: 'ndjson'
+      }),
+      'hello',
+      process.cwd(),
+      new AbortController().signal,
+      {
+        onText: (delta) => {
+          output += delta
+        },
+        onDiagnostic: () => undefined
+      },
+      runOptions(),
+      authorizeFixture
+    )
+
+    expect(output).toBe('Recovered')
+  })
+
   it('preserves multibyte UTF-8 split across JSON Lines process chunks', async () => {
     const fixture = fileURLToPath(
       new URL('./fixtures/fake-agent.mjs', import.meta.url)
@@ -1485,30 +1649,32 @@ describe('CLI adapter', () => {
   it('redacts escaped diagnostics before applying their display bound', async () => {
     const secret = 'quoted"diagnostic\\secret'
     let diagnostic = ''
-    await runCli(
-      provider({
-        model: '',
-        args: [
-          '-e',
-          `process.stdout.write("not-json:"+JSON.stringify(process.env.ACME_AGENT_TOKEN)+"\\n")`
-        ],
-        outputMode: 'ndjson',
-        environmentVariables: ['ACME_AGENT_TOKEN'],
-        environmentFingerprint: 'd'.repeat(64)
-      }),
-      'hello',
-      process.cwd(),
-      new AbortController().signal,
-      {
-        onText: () => undefined,
-        onDiagnostic: (value) => {
-          diagnostic += value
-        }
-      },
-      runOptions(),
-      authorizeFixture,
-      { ACME_AGENT_TOKEN: secret }
-    )
+    await expect(
+      runCli(
+        provider({
+          model: '',
+          args: [
+            '-e',
+            `process.stdout.write("not-json:"+JSON.stringify(process.env.ACME_AGENT_TOKEN)+"\\n")`
+          ],
+          outputMode: 'ndjson',
+          environmentVariables: ['ACME_AGENT_TOKEN'],
+          environmentFingerprint: 'd'.repeat(64)
+        }),
+        'hello',
+        process.cwd(),
+        new AbortController().signal,
+        {
+          onText: () => undefined,
+          onDiagnostic: (value) => {
+            diagnostic += value
+          }
+        },
+        runOptions(),
+        authorizeFixture,
+        { ACME_AGENT_TOKEN: secret }
+      )
+    ).rejects.toMatchObject({ name: 'CliProtocolError' })
     expect(diagnostic.length).toBeLessThanOrEqual(500)
     expect(diagnostic).toContain(REDACTION_MARKER)
     expect(diagnostic).not.toContain(secret)

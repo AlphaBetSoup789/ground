@@ -1,10 +1,12 @@
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type {
   CliProvider,
   ModelApiProvider,
   ModelProviderKind,
+  ProviderFailureKind,
   ProviderProfile
 } from '../shared/types'
 import { cliEnvironmentSecretReference } from './cli-environment'
@@ -34,6 +36,8 @@ import { CliTrustRegistry } from './trust-boundary'
 const servers: Array<ReturnType<typeof createServer>> = []
 
 afterEach(async () => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
   await Promise.all(
     servers.splice(0).map(
       (server) =>
@@ -101,7 +105,8 @@ function createHarness(
   credentialLocation: 'scoped' | 'legacy' = 'scoped',
   isProviderActive: (providerId: string) => boolean = () => false,
   providerOperations?: ProviderOperationGate,
-  onPersistenceUncertain?: (error: Error) => void
+  onPersistenceUncertain?: (error: Error) => void,
+  configuredWorkspacePaths: () => readonly string[] = () => []
 ): {
   service: ProviderService
   vault: {
@@ -218,7 +223,7 @@ function createHarness(
       cliTrust,
       isProviderActive,
       providerOperations,
-      () => [],
+      configuredWorkspacePaths,
       onPersistenceUncertain
     ),
     vault,
@@ -1586,12 +1591,54 @@ describe('persisted provider readiness', () => {
     expect(result).toMatchObject({
       ok: false,
       title: 'Configuration check failed',
+      failureKind: 'executable-not-found',
       persisted: true
     })
     expect(harness.current().verification).toMatchObject({
       status: 'failed',
+      scope: 'configuration',
+      failureKind: 'executable-not-found'
+    })
+  })
+
+  it('keeps static executable-policy rejection distinct from runtime startup failure', async () => {
+    const existing: CliProvider = {
+      ...cliProvider(),
+      environmentVariables: undefined,
+      verification: { status: 'unverified' }
+    }
+    const harness = createHarness(
+      existing,
+      '',
+      'scoped',
+      () => false,
+      undefined,
+      undefined,
+      () => [path.dirname(process.execPath)]
+    )
+
+    const result = await harness.service.test({
+      id: existing.id,
+      name: existing.name,
+      kind: 'cli',
+      model: existing.model,
+      command: existing.command,
+      args: existing.args,
+      promptMode: existing.promptMode,
+      outputMode: existing.outputMode,
+      cliAdapter: existing.cliAdapter,
+      trustConfirmed: existing.trustConfirmed
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('Expected executable policy check to fail')
+    expect(result.detail).toMatch(/inside a Ground workspace/iu)
+    expect(result.failureKind).toBeUndefined()
+    expect(harness.current().verification).toMatchObject({
+      status: 'failed',
       scope: 'configuration'
     })
+    expect(harness.current().verification).not.toHaveProperty('failureKind')
   })
 
   it('requires an exact passed check before a provider can start a run', () => {
@@ -1625,6 +1672,301 @@ describe('persisted provider readiness', () => {
 })
 
 describe('provider model discovery', () => {
+  it.each<ModelProviderKind>(['openai', 'anthropic', 'google'])(
+    'rejects a malformed %s model-discovery shape',
+    async (kind) => {
+      const server = createServer((_request, response) => {
+        response.writeHead(200, { 'Content-Type': 'application/json' })
+        response.end('{}')
+      })
+      const endpoint = await providerEndpointFor(server)
+      const existing: ModelApiProvider = {
+        ...apiProvider(endpoint, kind),
+        verification: { status: 'unverified' }
+      }
+      const harness = createHarness(existing, 'draft-secret')
+
+      const result = await harness.service.test({
+        id: existing.id,
+        name: existing.name,
+        kind,
+        baseUrl: endpoint,
+        model: existing.model,
+        supportsTools: existing.supportsTools
+      })
+
+      expect(result).toMatchObject({
+        ok: false,
+        failureKind: 'protocol-shape',
+        persisted: true
+      })
+      expect(harness.current().verification).toMatchObject({
+        status: 'failed',
+        failureKind: 'protocol-shape'
+      })
+    }
+  )
+
+  it.each<{
+    code: string
+    failureKind: ProviderFailureKind
+  }>([
+    { code: 'ENOTFOUND', failureKind: 'dns' },
+    { code: 'EAI_AGAIN', failureKind: 'dns' },
+    { code: 'CERT_HAS_EXPIRED', failureKind: 'tls' },
+    {
+      code: 'ERR_TLS_CERT_ALTNAME_INVALID',
+      failureKind: 'tls'
+    },
+    { code: 'ETIMEDOUT', failureKind: 'timeout' },
+    { code: 'UND_ERR_CONNECT_TIMEOUT', failureKind: 'timeout' }
+  ])(
+    'classifies structured $code network evidence as $failureKind',
+    async ({ code, failureKind }) => {
+      const cause = Object.assign(new Error('opaque transport failure'), {
+        code
+      })
+      vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+        new TypeError('fetch failed', {
+          cause: new AggregateError([cause])
+        })
+      )
+      const harness = createHarness(
+        apiProvider('https://provider.invalid/v1', 'openai')
+      )
+
+      const result = await harness.service.test({
+        name: 'Structured network failure',
+        kind: 'openai',
+        baseUrl: 'https://provider.invalid/v1',
+        model: 'model-one',
+        apiKey: 'draft-secret'
+      })
+
+      expect(result).toMatchObject({
+        ok: false,
+        failureKind
+      })
+    }
+  )
+
+  it('bounds AggregateError cause inspection before classifying network evidence', async () => {
+    const sparseErrors = new Array<unknown>(1_000_000)
+    sparseErrors[0] = Object.assign(new Error('opaque DNS failure'), {
+      code: 'ENOTFOUND'
+    })
+    const aggregate = new AggregateError([])
+    Object.defineProperty(aggregate, 'errors', {
+      configurable: true,
+      value: sparseErrors
+    })
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+      new TypeError('fetch failed', { cause: aggregate })
+    )
+    const harness = createHarness(
+      apiProvider('https://provider.invalid/v1', 'openai')
+    )
+
+    const result = await harness.service.test({
+      name: 'Bounded cause graph',
+      kind: 'openai',
+      baseUrl: 'https://provider.invalid/v1',
+      model: 'model-one',
+      apiKey: 'draft-secret'
+    })
+
+    expect(result).toMatchObject({
+      ok: false,
+      failureKind: 'dns'
+    })
+  })
+
+  it.each<{
+    status: number
+    headers?: Record<string, string>
+    failureKind: ProviderFailureKind
+  }>([
+    { status: 401, failureKind: 'authentication' },
+    { status: 403, failureKind: 'authentication' },
+    { status: 408, failureKind: 'timeout' },
+    { status: 429, failureKind: 'rate-limit' },
+    { status: 504, failureKind: 'timeout' },
+    {
+      status: 403,
+      headers: { 'X-RateLimit-Remaining': '0' },
+      failureKind: 'rate-limit'
+    }
+  ])(
+    'classifies HTTP $status response evidence as $failureKind',
+    async ({ status, headers, failureKind }) => {
+      const secret = 'credential-never-show'
+      const server = createServer((_request, response) => {
+        response.writeHead(status, {
+          'Content-Type': 'text/plain',
+          ...headers
+        })
+        response.end(`Provider rejected ${secret}`)
+      })
+      const endpoint = await providerEndpointFor(server)
+      const harness = createHarness(apiProvider(endpoint, 'openai'))
+
+      const result = await harness.service.test({
+        name: 'HTTP classification',
+        kind: 'openai',
+        baseUrl: endpoint,
+        model: 'model-one',
+        apiKey: secret
+      })
+
+      expect(result).toMatchObject({
+        ok: false,
+        failureKind
+      })
+      expect(result.detail).toContain('[redacted]')
+      expect(result.detail).not.toContain(secret)
+    }
+  )
+
+  it.each([
+    { status: 401, failureKind: 'authentication' },
+    { status: 429, failureKind: 'rate-limit' }
+  ] as const)(
+    'preserves structured HTTP $status classification when the error body is oversized',
+    async ({ status, failureKind }) => {
+      const server = createServer((_request, response) => {
+        response.writeHead(status, {
+          'Content-Type': 'text/plain',
+          'Content-Length': '3000000'
+        })
+        response.end('bounded body')
+      })
+      const endpoint = await providerEndpointFor(server)
+      const harness = createHarness(apiProvider(endpoint, 'openai'))
+
+      const result = await harness.service.test({
+        name: 'Oversized HTTP diagnostic',
+        kind: 'openai',
+        baseUrl: endpoint,
+        model: 'model-one',
+        apiKey: 'draft-secret'
+      })
+
+      expect(result).toMatchObject({
+        ok: false,
+        failureKind,
+        detail: expect.stringMatching(
+          /response diagnostic unavailable.*size limit/iu
+        )
+      })
+    }
+  )
+
+  it('classifies only Ground-owned probe aborts as timeouts', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal
+          if (!signal) {
+            reject(new Error('Expected a Ground-owned abort signal'))
+            return
+          }
+          const rejectForAbort = () =>
+            reject(new DOMException('Ground probe expired', 'AbortError'))
+          if (signal.aborted) rejectForAbort()
+          else signal.addEventListener('abort', rejectForAbort, { once: true })
+        })
+    )
+    const harness = createHarness(
+      apiProvider('https://provider.invalid/v1', 'openai')
+    )
+
+    const testing = harness.service.test({
+      name: 'Timed provider',
+      kind: 'openai',
+      baseUrl: 'https://provider.invalid/v1',
+      model: 'model-one',
+      apiKey: 'draft-secret'
+    })
+    await vi.advanceTimersByTimeAsync(10_000)
+    const result = await testing
+
+    expect(result).toMatchObject({
+      ok: false,
+      failureKind: 'timeout',
+      detail: expect.stringContaining('timed out after 10 seconds')
+    })
+  })
+
+  it('does not infer a failure kind from display prose', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+      new Error(
+        'ENOTFOUND CERT_HAS_EXPIRED 401 429 timed out invalid JSON'
+      )
+    )
+    const harness = createHarness(
+      apiProvider('https://provider.invalid/v1', 'openai')
+    )
+
+    const result = await harness.service.test({
+      name: 'Unstructured failure',
+      kind: 'openai',
+      baseUrl: 'https://provider.invalid/v1',
+      model: 'model-one',
+      apiKey: 'draft-secret'
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('Expected provider test to fail')
+    expect(result.failureKind).toBeUndefined()
+  })
+
+  it('persists only a safe failure kind while redacting credential-bearing diagnostics', async () => {
+    const secret = 'exact-secret'
+    const networkCause = Object.assign(
+      new Error(`DNS rejected ${secret}`),
+      { code: 'ENOTFOUND' }
+    )
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+      new Error(`Request using ${secret} failed`, {
+        cause: networkCause
+      })
+    )
+    const existing: ModelApiProvider = {
+      ...apiProvider('https://provider.invalid/v1', 'openai'),
+      verification: { status: 'unverified' }
+    }
+    const harness = createHarness(existing, secret)
+
+    const result = await harness.service.test({
+      id: existing.id,
+      name: existing.name,
+      kind: existing.kind,
+      baseUrl: existing.baseUrl,
+      model: existing.model,
+      supportsTools: existing.supportsTools
+    })
+
+    expect(result).toMatchObject({
+      ok: false,
+      failureKind: 'dns',
+      persisted: true
+    })
+    expect(result.detail).toContain('[redacted]')
+    expect(result.detail).not.toContain(secret)
+    expect(harness.current().verification).toMatchObject({
+      status: 'failed',
+      scope: 'connection',
+      failureKind: 'dns'
+    })
+    const persistedVerification = JSON.stringify(
+      harness.current().verification
+    )
+    expect(persistedVerification).not.toContain(secret)
+    expect(persistedVerification).not.toContain('detail')
+    expect(persistedVerification).not.toContain('DNS rejected')
+  })
+
   it.each([
     ['openai-compatible' as const, ''],
     ['openai' as const, 'draft-secret']
@@ -1974,11 +2316,11 @@ describe('provider model discovery', () => {
 
     expect(result).toMatchObject({
       ok: false,
+      failureKind: 'protocol-shape',
       detail: expect.stringMatching(
         /generation probe failed:.*invalid assistant message/iu
       )
     })
-    expect(result.failureKind).toBeUndefined()
   })
 
   it('keeps fallback verification unpersisted for unsaved and modified drafts', async () => {
@@ -2066,8 +2408,73 @@ describe('provider model discovery', () => {
     })
 
     expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('Expected provider test to fail')
+    expect(result.failureKind).toBe('authentication')
     expect(result.detail).toContain('[redacted]')
     expect(result.detail).not.toContain('draft-secret')
+  })
+
+  it('redacts a JSON-escaped API key before bounding an endpoint diagnostic', async () => {
+    const secret = 'sensitive-prefix-"quoted"\\tail-end'
+    const escapedSecret = JSON.stringify(secret).slice(1, -1)
+    const server = createServer((_request, response) => {
+      response.writeHead(401, { 'Content-Type': 'application/json' })
+      response.end(
+        JSON.stringify({
+          error: `${'x'.repeat(700)}${secret}${'y'.repeat(500)}`
+        })
+      )
+    })
+    servers.push(server)
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address() as AddressInfo
+    const endpoint = `http://127.0.0.1:${address.port}/v1`
+    const harness = createHarness(apiProvider(endpoint, 'openai'))
+
+    const result = await harness.service.test({
+      name: 'Escaped diagnostic provider',
+      kind: 'openai',
+      baseUrl: endpoint,
+      model: 'model-one',
+      apiKey: secret
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('Expected provider test to fail')
+    expect(result.failureKind).toBe('authentication')
+    expect(result.detail).toContain('[redacted]')
+    expect(result.detail).toHaveLength(800)
+    expect(result.detail).toMatch(/\.\.\.$/u)
+    expect(result.detail).not.toContain(secret)
+    expect(result.detail).not.toContain(escapedSecret)
+    expect(result.detail).not.toContain('sensitive-prefix-')
+  })
+
+  it('selects a replacement marker that cannot contain the API key', async () => {
+    const secret = 'redacted'
+    const server = createServer((_request, response) => {
+      response.writeHead(401, { 'Content-Type': 'text/plain' })
+      response.end(`The rejected credential was ${secret}`)
+    })
+    servers.push(server)
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address() as AddressInfo
+    const endpoint = `http://127.0.0.1:${address.port}/v1`
+    const harness = createHarness(apiProvider(endpoint))
+
+    const result = await harness.service.test({
+      name: 'Marker-safe provider',
+      kind: 'openai-compatible',
+      baseUrl: endpoint,
+      model: 'model-one',
+      apiKey: secret
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('Expected provider test to fail')
+    expect(result.failureKind).toBe('authentication')
+    expect(result.detail).toContain('[credential removed]')
+    expect(result.detail).not.toContain(secret)
   })
 
   it('rejects a model-discovery response whose declared body is too large', async () => {

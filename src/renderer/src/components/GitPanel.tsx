@@ -29,20 +29,24 @@ import {
 } from 'lucide-react'
 import type {
   DesktopTask,
-  GitDiffResult,
   GitLogEntry,
   GitOverview,
   GitRecoverySummary,
   GitStatusSummary,
-  GitWorktreeSummary
+  GitWorktreeSummary,
+  RunStatus
 } from '../../../shared/types'
 import { desktop } from '../lib/desktop'
+import { shouldRefreshGitOverviewAfterRun } from '../lib/git-refresh'
+import { DiffReview } from './DiffReview'
 
 type GitPanelTab = 'changes' | 'history' | 'worktrees'
 
 interface GitPanelProps {
   taskId: string
+  runStatus: RunStatus
   workspaceReady: boolean
+  onAddHunkToPrompt: (taskId: string, block: string) => void
   onTaskCreated: (task: DesktopTask) => void
   onWorkspaceTasksChanged: () => void
   onError: (error: unknown) => void
@@ -73,7 +77,11 @@ const TABS: ReadonlyArray<{
 
 export function GitPanel(props: GitPanelProps): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<GitPanelTab>('changes')
-  const [overview, setOverview] = useState<GitOverview>()
+  const [loadedOverview, setLoadedOverview] = useState<{
+    taskId: string
+    overview: GitOverview
+  }>()
+  const overview = gitOverviewForTask(loadedOverview, props.taskId)
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<LoadError>()
   const [branch, setBranch] = useState('')
@@ -93,6 +101,7 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
   const [undoingRecovery, setUndoingRecovery] = useState<string>()
   const [choosingGit, setChoosingGit] = useState(false)
   const requestVersion = useRef(0)
+  const previousRunStatus = useRef(props.runStatus)
   const tabButtons = useRef<Array<HTMLButtonElement | null>>([])
   const idPrefix = useId()
 
@@ -100,25 +109,40 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
     async (clearCurrent = false): Promise<void> => {
       const request = ++requestVersion.current
       if (!props.workspaceReady) {
-        setOverview(undefined)
+        setLoadedOverview(undefined)
         setLoadError(undefined)
         setLoading(false)
         return
       }
-      if (clearCurrent) setOverview(undefined)
+      if (clearCurrent) setLoadedOverview(undefined)
       setLoading(true)
       setLoadError(undefined)
       try {
         const nextOverview = await desktop.getGitOverview(props.taskId)
         if (request === requestVersion.current) {
-          setOverview(nextOverview)
+          setLoadedOverview({
+            taskId: props.taskId,
+            overview: nextOverview
+          })
           setAuthorName((current) => current || nextOverview.identity?.name || '')
           setAuthorEmail((current) => current || nextOverview.identity?.email || '')
-          const eligibleRestorePaths = new Set(
-            eligibleGitRestorePaths(nextOverview.status)
+          const eligibleStagePaths = eligibleGitStagePaths(
+            nextOverview.status
+          )
+          const eligibleUnstagePaths = eligibleGitUnstagePaths(
+            nextOverview.status
+          )
+          const eligibleRestorePaths = eligibleGitRestorePaths(
+            nextOverview.status
+          )
+          setSelectedStagePaths((current) =>
+            retainEligibleGitPaths(current, eligibleStagePaths)
+          )
+          setSelectedUnstagePaths((current) =>
+            retainEligibleGitPaths(current, eligibleUnstagePaths)
           )
           setSelectedRestorePaths((current) =>
-            current.filter((candidate) => eligibleRestorePaths.has(candidate))
+            retainEligibleGitPaths(current, eligibleRestorePaths)
           )
         }
       } catch (error) {
@@ -153,6 +177,16 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
       requestVersion.current += 1
     }
   }, [loadOverview])
+
+  useEffect(() => {
+    const previous = previousRunStatus.current
+    previousRunStatus.current = props.runStatus
+    if (
+      shouldRefreshGitOverviewAfterRun(previous, props.runStatus)
+    ) {
+      void loadOverview()
+    }
+  }, [loadOverview, props.runStatus])
 
   const changedFileCount = useMemo(() => {
     const status = overview?.status
@@ -602,6 +636,9 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
                 onRestore={(paths) => void restorePaths(paths)}
                 onUndoRecovery={(recoveryId) => void undoRecovery(recoveryId)}
                 onCommit={commitChanges}
+                onAddHunkToPrompt={(block) =>
+                  props.onAddHunkToPrompt(props.taskId, block)
+                }
               />
             )}
           </div>
@@ -648,6 +685,18 @@ export function GitPanel(props: GitPanelProps): React.JSX.Element {
       ) : null}
     </section>
   )
+}
+
+export function gitOverviewForTask(
+  loaded:
+    | Readonly<{
+        taskId: string
+        overview: GitOverview
+      }>
+    | undefined,
+  taskId: string
+): GitOverview | undefined {
+  return loaded?.taskId === taskId ? loaded.overview : undefined
 }
 
 function RepositorySummary(props: {
@@ -698,6 +747,36 @@ export function eligibleGitRestorePaths(
     .sort((left, right) => left.localeCompare(right))
 }
 
+export function eligibleGitStagePaths(
+  status: GitStatusSummary | undefined
+): string[] {
+  if (!status) return []
+  const conflicts = new Set(status.conflicted)
+  return [
+    ...new Set([
+      ...status.conflicted,
+      ...status.unstaged.filter((filePath) => !conflicts.has(filePath)),
+      ...status.untracked
+    ])
+  ]
+}
+
+export function eligibleGitUnstagePaths(
+  status: GitStatusSummary | undefined
+): string[] {
+  if (!status) return []
+  const conflicts = new Set(status.conflicted)
+  return status.staged.filter((filePath) => !conflicts.has(filePath))
+}
+
+export function retainEligibleGitPaths(
+  selected: readonly string[],
+  eligible: readonly string[]
+): string[] {
+  const eligiblePaths = new Set(eligible)
+  return selected.filter((candidate) => eligiblePaths.has(candidate))
+}
+
 export function RecoveryRequiredNotice(props: {
   recoveries: GitRecoverySummary[]
 }): React.JSX.Element {
@@ -744,6 +823,7 @@ function ChangesView(props: {
   onRestore: (paths: string[]) => void
   onUndoRecovery: (recoveryId: string) => void
   onCommit: (event: React.FormEvent<HTMLFormElement>) => Promise<void>
+  onAddHunkToPrompt: (block: string) => void
 }): React.JSX.Element {
   const { overview } = props
   const status = overview.status
@@ -756,7 +836,7 @@ function ChangesView(props: {
   )
   const hasDiff = Boolean(overview.stagedDiff?.text || overview.unstagedDiff?.text)
   const conflicts = new Set(status?.conflicted ?? [])
-  const stagedPaths = status?.staged.filter((filePath) => !conflicts.has(filePath)) ?? []
+  const stagedPaths = eligibleGitUnstagePaths(status)
   const modifiedPaths =
     status?.unstaged.filter((filePath) => !conflicts.has(filePath)) ?? []
   const restorePaths = eligibleGitRestorePaths(status)
@@ -909,10 +989,20 @@ function ChangesView(props: {
 
       <div className="git-diff-stack">
         {overview.stagedDiff?.text && (
-          <DiffBlock title="Staged diff" diff={overview.stagedDiff} />
+          <DiffReview
+            title="Staged diff"
+            diff={overview.stagedDiff}
+            source="staged"
+            onAddHunkToPrompt={props.onAddHunkToPrompt}
+          />
         )}
         {overview.unstagedDiff?.text && (
-          <DiffBlock title="Working tree diff" diff={overview.unstagedDiff} />
+          <DiffReview
+            title="Working tree diff"
+            diff={overview.unstagedDiff}
+            source="working"
+            onAddHunkToPrompt={props.onAddHunkToPrompt}
+          />
         )}
         {!hasDiff && status?.untracked.length ? (
           <p className="git-diff-note">
@@ -1179,29 +1269,6 @@ function FileGroup(props: {
   )
 }
 
-function DiffBlock(props: {
-  title: string
-  diff: GitDiffResult
-}): React.JSX.Element {
-  return (
-    <section className="git-diff-block">
-      <div className="git-diff-header">
-        <h3>{props.title}</h3>
-        <span>{formatBytes(props.diff.bytes)}</span>
-      </div>
-      <pre className="git-unified-diff" tabIndex={0} aria-label={props.title}>
-        <code>{props.diff.text}</code>
-      </pre>
-      {props.diff.truncated && (
-        <p className="git-diff-truncated" role="note">
-          <AlertCircle size={12} aria-hidden="true" />
-          Diff stopped at Ground’s output safety limit.
-        </p>
-      )}
-    </section>
-  )
-}
-
 function HistoryView(props: {
   commits: GitLogEntry[]
   truncated: boolean
@@ -1448,12 +1515,6 @@ function errorMessage(error: unknown, fallback: string): string {
     return error.message
   }
   return fallback
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1_000) return `${bytes} B`
-  if (bytes < 1_000_000) return `${(bytes / 1_000).toFixed(1)} KB`
-  return `${(bytes / 1_000_000).toFixed(1)} MB`
 }
 
 function formatCommitDate(value: string): string {

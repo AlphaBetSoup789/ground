@@ -117,16 +117,83 @@ repository before mutation, and exposes undo only while affected paths still mat
 That protects against accidental loss in the reviewed file set; it is not a general
 repository backup or rollback mechanism.
 
+The structured diff's reviewed-hunk-to-prompt action remains entirely in the
+renderer and cannot mutate Git. It accepts only one complete, non-truncated,
+bounded active hunk, marks the captured workspace text as untrusted and
+potentially stale, visibly escapes presentation controls, and appends it to the
+exact source task's unsent local draft. A task-selection epoch and composer task
+identity prevent delayed focus from targeting a different task. Workspace text
+can still contain secrets or semantic prompt injection; the user must review the
+editable draft and explicitly Send before the existing provider-egress boundary
+is crossed.
+
+Task search consumes only the bounded renderer-safe task projection. Keyboard
+activation takes the opaque task ID from the exact current committed filtered
+order; display titles, workspace labels, and earlier result lists are not
+authorities. The renderer rechecks that ID against its latest snapshot, applies
+selection functionally without replacing concurrent task/run state, and delegates
+to main, where a missing task is refused. A rejected current selection refreshes
+authoritative state, while every refresh preserves a selection begun after its
+captured request boundary. Post-selection focus is bound to the initiating
+request, task, and user-interaction context, so a stale completion cannot retarget
+focus. These controls affect renderer navigation only and grant no provider, run,
+tool, approval, Git, credential, or workspace authority.
+
+Active-run draft preparation is renderer-local text editing, not a second run or
+continuation command. While a task is running or awaiting approval, Ground keeps
+Stop as the only run action and does not dispatch `Ctrl/⌘ + Enter`. The draft is
+keyed to the exact task, does not steer the active provider/runtime request, and
+crosses the ordinary provider-egress boundary only after the current run ends and
+the user explicitly sends it. A failed start restores submitted text only if no
+newer draft occupies that exact task.
+
+Failed-run retry preparation requires the current retained `Run failed` activity
+to belong to the latest retained non-imported run, then selects only that run's
+latest non-imported user message. It revalidates that exact source occurrence on
+activation and writes only to an empty draft keyed by the source task. It excludes
+outcome-unknown interrupted work, performs no IPC or automatic replay, and still
+requires explicit Send.
+
+Timeline jump recovery keeps only task-tagged renderer presentation state. It
+does not read new content, cross IPC, persist a position, or alter a run. A stale
+task cannot present or activate another task’s control, and activation affects
+only the current timeline viewport and follow flag.
+
+Assistant-output copy is a dedicated source-bound, write-only IPC operation
+approved in
+[#42](https://github.com/AlphaBetSoup789/ground/issues/42). The preload requires
+active user activation and carries one bounded task/message/content identity plus
+either a response target or fenced-node offsets. Main applies trusted-sender
+validation, re-resolves the canonical retained assistant source, rejects changed
+or latest-active output, and writes only the resolved plain text. No clipboard
+read, arbitrary-text write, rich HTML, draft mutation, provider contact, or run
+action is exposed. Fixed task- and request-bound status never includes copied
+content or claims that the clipboard destination is trusted.
+
 ## Implemented controls
 
 - Packaged renderer content is local; development origins are loopback-only.
 - Context isolation, restricted navigation, a narrow preload bridge, and strict IPC
   caller validation reduce renderer authority.
-- A six-scenario Playwright-over-Electron suite drives the real built renderer’s
-  keyboard/focus, form validation, task-local drafts, cancellation, archive/search,
-  responsive layout, and reduced-motion behavior. It deliberately uses the
-  browser-preview desktop mock, so it is not evidence for production main/preload
-  authority or native approvals.
+- A 19-scenario Playwright-over-Electron suite drives the real built renderer’s
+  command and task-search keyboard/focus behavior, including narrow-sidebar focus,
+  form validation, task-local, active-run, and failed-run draft preparation,
+  reviewed handoffs, paused-streaming jump recovery, source-bound
+  assistant-response and fenced-code clipboard copy, structured Git review and
+  request-bound finished-run refresh, cancellation, archive/search, responsive
+  layout, forced colors, and reduced-motion behavior. It deliberately uses the
+  browser-preview desktop mock, so it is not evidence for production
+  main/preload authority, native approvals, or complete screen-reader
+  accessibility.
+- A separate credential-free native clipboard smoke loads the compiled
+  production main, renderer, and sandboxed preload with isolated state. It
+  verifies activated renderer Web Clipboard denial, inactive source-bound
+  bridge refusal, and exact pointer/keyboard writes through trusted IPC and the
+  main-process clipboard on macOS, Windows, and Linux/Xvfb CI. It preflights
+  restorable clipboard formats, checks ownership before each planned mutation,
+  refuses restoration over detected newer content, and treats cleanup failure
+  as test failure; it is not an atomic clipboard lease, packaged-installer, or
+  screen-reader certification.
 - Workspace grants and CLI authorization are created in the main process.
   Renderer task DTOs contain only fresh process-scoped grant IDs and sanitized
   path-free labels; canonical paths, runtime sessions, and model continuation
@@ -146,6 +213,12 @@ repository backup or rollback mechanism.
   OpenAI-compatible testing prefers bounded `/models` discovery and falls back to
   a separate non-streaming four-token generation probe only when listing cannot
   prove success.
+- Specialized provider recovery is authorized only by a bounded main-process
+  category derived from structured evidence. Persisted readiness and error
+  activities can retain that category. Readiness retains no diagnostic text; error
+  history keeps its existing bounded, credential-redacted detail but adds no cause
+  graph, response-body field, or raw structured provider-code field.
+  Renderer-visible prose is not classification input.
 - Run startup reserves the exact task revision, provider revision/fingerprint, and
   credential boundary before CLI authorization or workspace resolution. Provider
   saves, deletes, and verification writes cannot cross a starting or active run,
@@ -199,6 +272,20 @@ repository backup or rollback mechanism.
   launch; other batch and PowerShell launchers are rejected.
 - API Ask mode advertises only bounded list/read/search tools. Writes, commands, and
   MCP are Agent-only, and an unadvertised call is rejected.
+- Managed API context planning anchors the latest user-message occurrence before
+  selecting recent complete exchanges, uses serialized UTF-8 byte accounting, and
+  never splits a selected tool-call/result group. A marked objective that still
+  cannot fit fails before adapter egress. Timeline projection excludes
+  non-projectable and already represented session entries from its omission count;
+  the local management activity is updated when later rounds change the exact
+  reduction.
+- Ask-to-Agent handoff is bound to the exact task, provider, and non-imported
+  assistant response. It changes the persisted mode and prepares an unsent
+  task-local draft only; it does not start a run, reuse an Ask-mode provider
+  session with Agent authority, or carry an approval forward.
+- Drafting during an active run or approval wait changes only renderer-local
+  task-keyed text. It neither queues another run nor sends input to the current
+  provider/runtime, and failed-start recovery cannot overwrite a newer draft.
 - Provider, workspace, and mode are captured for an active run. Assistant/activity
   items retain per-run provider attribution, and provider switching rebuilds
   normalized tool-call/tool-result context without replaying foreign opaque state.
@@ -339,11 +426,16 @@ repository backup or rollback mechanism.
   canonical conversation after explicit opt-in.
 - Native package evidence is fixed and token-bound. It checks packaged identity, an
   OS-encrypted vault round trip, a production approval dialog’s fail-closed Cancel
-  result, PTY, Git, exact local MCP launch/call, and process cleanup, then repeats
-  that scope against an extracted macOS ZIP, temporarily installed Windows NSIS
-  package, or extracted Linux AppImage. Release aggregation requires
-  artifact-hash-bound records for macOS arm64/x64, Windows x64, and Linux x64.
-  The harness accepts no caller-selected executable or arbitrary MCP server.
+  result, PTY, Git, deterministic provider successes and expected failures, a
+  smoke-owned recognized Codex-dialect child, exact local MCP launch/call, and
+  process cleanup, then repeats that scope against an extracted macOS ZIP,
+  temporarily installed Windows NSIS package, or extracted Linux AppImage. The
+  positive CLI fixture uses a smoke-only authority restricted to its exact hashed
+  runner/script and two launch envelopes; normal application composition retains
+  native configuration and invocation dialogs. Release aggregation requires
+  artifact-hash-bound records for macOS arm64/x64, Windows x64, and Linux x64. The
+  harness accepts no caller-selected executable, arbitrary CLI child, or arbitrary
+  MCP server.
 
 ## Remaining release controls
 
@@ -351,10 +443,12 @@ repository backup or rollback mechanism.
   platform-specific file and executable authority.
 - Persist executable trust by code signature or equivalent platform identity and
   run external runtimes in a dedicated constrained helper where practical.
-- Replace JSON snapshots with a transactional, sequenced event log and define a
-  reviewed import format if externally created state backups are ever accepted.
-  The current three-generation workflow is bounded local recovery, not durable
-  version history or sync.
+- Complete production composition of the audited SQLite event-store foundation and
+  expand it from bootstrap/settings facts to sequenced task, run, activity,
+  approval, managed-execution, provider, and recovery facts. The current desktop
+  still uses the three-generation JSON workflow, which is bounded local recovery,
+  not durable version history or sync. Define a separate reviewed import format if
+  externally created state backups are ever accepted.
 - Add securely stored MCP remote authentication/OAuth and, only with explicit
   capability design, resources, prompts, Apps/UI, and elicitation.
 - Add stronger isolation options for external CLIs and local stdio servers. PTY

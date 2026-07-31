@@ -97,6 +97,13 @@ install or start a server or download a model. Only a main-process-confirmed
 refused literal-loopback connection unlocks the local startup/model/port recovery
 checklist. Passive CLI candidates are described as detected locally because a path
 match does not establish authentication, model access, or successful execution.
+Readiness and run failures can carry a bounded main-derived category for refused
+connections, DNS, TLS, authentication, rate limits, timeouts, protocol shape,
+missing executables, or an explicit CLI startup failure. Ground presents shared
+corrective guidance from that category and leaves unknown failures generic; it
+does not classify display prose. Readiness retains no diagnostic text. Error
+activities keep their existing bounded, credential-redacted detail but add no
+cause graph, response-body field, or raw structured provider-code field.
 
 Reviewed downstream builds can statically register another `ModelAdapter` or
 `AgentRuntimeAdapter` and map an existing profile envelope to it without replacing
@@ -142,8 +149,9 @@ built-in adapter currently emits one.
 | Local MCP | Resolved stdio executable and argv | Integrated | Native exact-invocation confirmation; current-user OS permissions; not sandboxed |
 | MCP tools | Namespaced canonical definitions | Integrated | Tools only; no resources, prompts, Apps/UI, or elicitation |
 | Task portability | Strict JSON bundle + Markdown transcript | Integrated | User must review exports; imported content is untrusted |
-| Task lifecycle | Safe fork, archive/restore, bounded active/archive search | Integrated | Imported history is excluded by default and requires an explicit per-task opt-in |
-| State recovery | Bounded atomic primary + three rotating validated snapshots | Integrated | Opaque in-app browser, credential-free export, and native-confirmed retained restore with a process-wide drain/seal; no arbitrary snapshot import or transactional event log |
+| Task lifecycle | Safe fork, archive/restore, bounded active/archive search, and current-result keyboard switching | Integrated | Search uses the exact displayed order and opaque task IDs; imported history is excluded by default and requires an explicit per-task opt-in |
+| State recovery | Bounded atomic primary + three rotating validated snapshots | Integrated | Desktop remains JSON-backed; opaque in-app browser, credential-free export, and native-confirmed retained restore with a process-wide drain/seal; no arbitrary snapshot import or production transactional event log |
+| SQLite event-store foundation | Node 22.16+ within 22.x, or Node 24+, using `node:sqlite` + an external head witness | Source/test only | Deterministic replay, coordinated publication, single-link protected-file checks, migration, backup, and crash tests are implemented; semantic coverage and desktop cutover remain incomplete |
 | Managed-action crash recovery | Durable started/completed claims for writes, commands, and MCP calls | Integrated | Reports an interrupted outcome as unknown; no automatic action/run resume |
 
 State and credential-vault readers use `O_NOFOLLOW` where the host exposes it.
@@ -285,19 +293,25 @@ configuration alone is not a passing result.
 
 The native scope verifies packaged identity, a real OS-encrypted `SecretVault`
 set/reload/get/delete round trip, a production approval dialog automatically
-aborted to Cancel, PTY, Git, a deterministic packaged OpenAI-compatible provider
-first turn, exact local stdio MCP launch/call, and process-tree cleanup.
+aborted to Cancel, PTY, Git, the complete M1.1 deterministic provider/runtime
+matrix, exact local stdio MCP launch/call, and process-tree cleanup.
 
-The provider check binds a credential-free fixture to literal loopback and a
-per-smoke token. Through the packaged main process it saves the profile, persists a
-successful readiness check after one model-discovery request, and streams one
-two-chunk completion through the production adapter registry and `RunManager`.
-After reloading state it requires a completed event, an idle task, the exact
-assistant marker, provider attribution, compatible-adapter continuation state, and
-no persisted failure. This proves only that deterministic OpenAI-compatible
-packaged path. It does not prove hosted credentials, internet reachability, an
-external vendor service, CLI agents, tools, or OpenAI Responses, Anthropic
-Messages, or Google Gemini behavior.
+The matrix separately requires:
+
+| Scenario | Packaged evidence | Explicit limit |
+| --- | --- | --- |
+| OpenAI-compatible success | Credential-free token-bound loopback discovery, two streamed chunks, durable output/attribution/session/idle state | Not Ollama, LM Studio, or external-server certification |
+| OpenAI Responses success | Synthetic versioned credential reused for exact Bearer discovery and `store: false` Responses streaming through `openai.responses` | Not live OpenAI auth, internet, DNS/TLS, rate-limit, reasoning, or tool evidence |
+| Unavailable loopback | Typed `connection-refused`, corrective local guidance, persisted failed readiness, and pre-dispatch block | Not DNS, TLS, auth, rate-limit, timeout, renderer-presentation, or exclusive released-port ownership coverage |
+| Malformed compatible response | Invalid discovery and assistant-message shapes classified as `protocol-shape`, with the bounded kind persisted before dispatch is blocked | Not every malformed or hostile-server shape |
+| Recognized Codex CLI | Smoke-owned seven-record child through `openai.codex-cli`, exact two-phase trust, native session, command, usage, durable assistant output, and one successful non-fatal warning | Not installed/authenticated Codex, vendor service/sandbox/tools, passive detection, other CLIs, human dialog acceptance, race-free script-argument binding against concurrent same-user replacement, or abnormal-exit cleanup of a hung/hostile external CLI |
+
+The outer harness prepends its own Node directory to a credential-scrubbed `PATH`.
+The packaged process hashes and revalidates that interpreter and the token-bound
+script at both trust phases; the outer verifier independently requires the
+interpreter hash to match its own Node executable. These controls make the fixture
+deterministic without turning its positive smoke-only authorization into a general
+CLI bypass.
 
 Distributable scope extracts a macOS ZIP or Linux AppImage, or temporarily installs
 NSIS and verifies its executable/install directory are removed, then runs native
@@ -319,27 +333,41 @@ Public-alpha preview artifacts are unsigned, macOS previews are unnotarized, and
 Windows/Linux signing policy remains undefined.
 
 For the current source, local macOS arm64 `npm run package:mac` and the unpacked
-`npm run smoke:package:native` passed, including the deterministic provider turn.
-A current-source distributable smoke and four-target aggregate have not been run.
-The older
+`npm run smoke:package:native` passed, including the complete deterministic M1.1
+provider/runtime matrix. A current-source distributable smoke and four-target
+aggregate have not been run. The older
 [four-target Package previews run](https://github.com/AlphaBetSoup789/ground/actions/runs/30473714099)
 completed the required macOS arm64, macOS x64, Windows x64, and Linux x64 jobs for
-source commit `a3073a8`, but predates the required packaged provider turn. Its
-artifact-bound records cover only the earlier smoke contract and cannot satisfy the
-current aggregate. They are not evidence for later source and do not certify
+source commit `a3073a8`, but predates the expanded provider/runtime matrix. Its
+artifact-bound records cover only the earlier smoke contract and cannot satisfy
+the current aggregate. They are not evidence for later source and do not certify
 signing, notarization, DMG/DEB installation, renderer accessibility, live
 providers/CLIs, or supported distribution.
 
-The seven-scenario renderer interaction suite runs the built browser-preview React
-renderer in Electron through Playwright Core. Its current local result is 7/7:
-command-palette filtering/keyboard/focus restore, provider labels and Chromium
-constraint validation, local-template/refused-connection recovery into a detected
-CLI, task-local drafts, deterministic send/cancel, archive and archived search, and
-680px responsive settings with reduced motion plus forced-color connection-path
-selection. CI is configured to run it directly on macOS/Windows and under Xvfb on
-Linux. Because it uses the explicit preview desktop mock, it is renderer
-evidence—not production-main/preload, native permission, provider, screen-reader,
-or packaged-app certification.
+The 19-scenario renderer interaction suite runs the built browser-preview React
+renderer in Electron through Playwright Core. Its current local result is 19/19:
+command-palette filtering/keyboard/focus restore, task-search shortcut focus and
+current-result keyboard activation, request-bound narrow-sidebar focus, provider
+labels and Chromium constraint validation, local-template/refused-connection
+recovery into a detected CLI, task-local, active-run, and failed-run draft
+preparation, Ask-to-Agent and reviewed-hunk handoffs, paused-streaming
+reading-position recovery across later sends and responsive reconciliation,
+assistant-response and fenced-code clipboard interaction, structured Git diff
+navigation with finished-run refresh, failure/retry, late-task isolation, and
+review-position retention, deterministic send/cancel, archive and archived
+search, and 680px responsive settings with reduced motion plus forced-color
+connection-path selection. CI is
+configured to run it directly on macOS/Windows and under Xvfb on Linux. Because
+it uses the explicit preview desktop mock, it is renderer evidence—not production
+main/preload, native permission, provider, screen-reader, or packaged-app
+certification. Production-bound unit evidence separately covers the source-bound
+main clipboard service and preload user-activation guard. A dedicated
+source-build Electron smoke additionally loads the compiled production
+main/preload/renderer with isolated state and verifies activated renderer
+permission denial, inactive bridge refusal, and exact pointer/keyboard writes
+through trusted IPC and the native clipboard. CI runs that smoke on macOS,
+Windows, and Linux/Xvfb; it is not installer-level or screen-reader
+certification.
 
 The pinned compatibility suite performs no authenticated request and launches no
 coding CLI. Its separate loopback SSE integration drives only Ground’s production
