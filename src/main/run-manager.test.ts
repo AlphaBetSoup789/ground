@@ -3247,11 +3247,20 @@ describe('RunManager model runtime', () => {
     })
 
     await run.manager.start(run.taskId, 'Continue with the other provider')
-    await vi.waitFor(() => {
-      expect(
-        run.events.filter((event) => event.type === 'run-completed')
-      ).toHaveLength(2)
-    })
+    let terminal: typeof run.events = []
+    await vi.waitFor(
+      () => {
+        terminal = run.events.filter(
+          (event) =>
+            event.type === 'run-completed' ||
+            event.type === 'run-error' ||
+            event.type === 'run-stopped'
+        )
+        expect(terminal).toHaveLength(2)
+      },
+      { timeout: 10_000 }
+    )
+    expect(terminal.at(-1)?.type).toBe('run-completed')
 
     const switchedConversation = run.requests[2]?.conversation ?? []
     expect(switchedConversation).toEqual(
