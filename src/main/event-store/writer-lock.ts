@@ -513,6 +513,11 @@ async function assertNoExistingPathAliases(
             'A reserved event-store path is symbolic or non-regular'
           )
         }
+        if (details.nlink !== 1n) {
+          throw new EventStoreCorruptionError(
+            'A reserved event-store path has multiple hard links through an external hard-link alias'
+          )
+        }
         return {
           entry,
           identity: `${details.dev}:${details.ino}`

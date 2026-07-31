@@ -9,6 +9,7 @@ import {
 } from 'node:fs'
 import {
   copyFile,
+  link,
   readFile,
   readdir,
   lstat,
@@ -194,7 +195,73 @@ describe('SQLite event store', () => {
     })
     expect(retried.getHead().sequence).toBe(1)
     expect(retried.getRecords()).toHaveLength(1)
+    expect((await lstat(databasePath)).nlink).toBe(1)
+    expect((await lstat(`${databasePath}.head.json`)).nlink).toBe(1)
     await retried.close()
+  })
+
+  it.each(['database', 'witness'] as const)(
+    'rejects an external hard link to the selected %s without changing ledger bytes',
+    async (target) => {
+      const directory = await temporaryDirectory()
+      const databasePath = path.join(directory, 'ground.sqlite')
+      const witnessPath = `${databasePath}.head.json`
+      const store = await SqliteEventStore.create({
+        databasePath,
+        bootstrap: bootstrap(),
+        dependencies: deterministicDependencies()
+      })
+      await store.close()
+
+      const protectedPath =
+        target === 'database' ? databasePath : witnessPath
+      const aliasPath = path.join(directory, `${target}-external-alias`)
+      await link(protectedPath, aliasPath)
+      const databaseBefore = await readFile(databasePath)
+      const witnessBefore = await readFile(witnessPath)
+
+      await expect(
+        SqliteEventStore.open({
+          databasePath,
+          witnessPath,
+          integrityCheck: 'full'
+        })
+      ).rejects.toBeInstanceOf(EventStoreCorruptionError)
+
+      expect(await readFile(databasePath)).toEqual(databaseBefore)
+      expect(await readFile(witnessPath)).toEqual(witnessBefore)
+      expect(await readFile(aliasPath)).toEqual(
+        target === 'database' ? databaseBefore : witnessBefore
+      )
+      expect((await lstat(protectedPath)).nlink).toBe(2)
+      expect((await lstat(aliasPath)).nlink).toBe(2)
+    }
+  )
+
+  it('classifies a missing selected witness as rollback before opening or changing the database', async () => {
+    const directory = await temporaryDirectory()
+    const databasePath = path.join(directory, 'ground.sqlite')
+    const witnessPath = `${databasePath}.head.json`
+    const store = await SqliteEventStore.create({
+      databasePath,
+      bootstrap: bootstrap(),
+      dependencies: deterministicDependencies()
+    })
+    await store.close()
+    await rm(witnessPath)
+    const databaseBefore = await readFile(databasePath)
+    const directoryBefore = (await readdir(directory)).sort()
+
+    await expect(
+      SqliteEventStore.open({
+        databasePath,
+        witnessPath,
+        integrityCheck: 'full'
+      })
+    ).rejects.toBeInstanceOf(EventStoreRollbackError)
+
+    expect(await readFile(databasePath)).toEqual(databaseBefore)
+    expect((await readdir(directory)).sort()).toEqual(directoryBefore)
   })
 
   it('reports uncertainty only after a fully verified database is selected by public create', async () => {
@@ -319,6 +386,115 @@ describe('SQLite event store', () => {
     ).toBe(encodeProjection(result.projection).stateJson)
     await reopened.close()
   })
+
+  it('rejects an append when an open selected database gains an external hard link before commit', async () => {
+    const directory = await temporaryDirectory()
+    const databasePath = path.join(directory, 'ground.sqlite')
+    const witnessPath = `${databasePath}.head.json`
+    const walPath = `${databasePath}-wal`
+    const aliasPath = path.join(directory, 'external-database-alias.sqlite')
+    const store = await SqliteEventStore.create({
+      databasePath,
+      bootstrap: bootstrap(),
+      dependencies: deterministicDependencies()
+    })
+    const headBefore = store.getHead()
+    const projectionBefore = store.getProjection()
+    const [databaseBefore, walBefore, witnessBefore] = await Promise.all([
+      readFile(databasePath),
+      readFile(walPath),
+      readFile(witnessPath)
+    ])
+    await link(databasePath, aliasPath)
+
+    await expect(
+      store.appendEventBatch({
+        expectedHead: headBefore,
+        transactionId: 'blocked-hard-linked-database',
+        events: [
+          {
+            kind: 'settings.sidebar-collapsed-set',
+            collapsed: true
+          }
+        ]
+      })
+    ).rejects.toBeInstanceOf(EventStoreCorruptionError)
+
+    expect(store.getHead()).toEqual(headBefore)
+    expect(store.getProjection()).toEqual(projectionBefore)
+    expect(store.getRecords()).toHaveLength(1)
+    expect(await readFile(databasePath)).toEqual(databaseBefore)
+    expect(await readFile(aliasPath)).toEqual(databaseBefore)
+    expect(await readFile(walPath)).toEqual(walBefore)
+    expect(await readFile(witnessPath)).toEqual(witnessBefore)
+
+    await rm(aliasPath)
+    await store.close()
+    const reopened = await SqliteEventStore.open({
+      databasePath,
+      integrityCheck: 'full'
+    })
+    expect(reopened.getHead()).toEqual(headBefore)
+    expect(reopened.getProjection()).toEqual(projectionBefore)
+    await reopened.close()
+  })
+
+  it.each(['writer coordinator', 'ledger WAL'] as const)(
+    'rejects an external hard link on the existing %s before changing ledger bytes',
+    async (target) => {
+      const directory = await temporaryDirectory()
+      const databasePath = path.join(directory, 'ground.sqlite')
+      const witnessPath = `${databasePath}.head.json`
+      const walPath = `${databasePath}-wal`
+      const coordinatorPath = `${databasePath}.writer-lock.sqlite`
+      const protectedPath =
+        target === 'writer coordinator' ? coordinatorPath : walPath
+      const aliasPath = path.join(
+        directory,
+        target === 'writer coordinator'
+          ? 'external-coordinator-alias.sqlite'
+          : 'external-wal-alias'
+      )
+      const store = await SqliteEventStore.create({
+        databasePath,
+        bootstrap: bootstrap(),
+        dependencies: deterministicDependencies()
+      })
+      const headBefore = store.getHead()
+      const [databaseBefore, walBefore, witnessBefore, protectedBefore] =
+        await Promise.all([
+          readFile(databasePath),
+          readFile(walPath),
+          readFile(witnessPath),
+          readFile(protectedPath)
+        ])
+      await link(protectedPath, aliasPath)
+
+      await expect(
+        store.appendEventBatch({
+          expectedHead: headBefore,
+          transactionId: `blocked-${target.replaceAll(' ', '-')}`,
+          events: [
+            {
+              kind: 'settings.sidebar-collapsed-set',
+              collapsed: true
+            }
+          ]
+        })
+      ).rejects.toBeInstanceOf(EventStoreCorruptionError)
+
+      expect(store.getHead()).toEqual(headBefore)
+      expect(store.getRecords()).toHaveLength(1)
+      expect(await readFile(databasePath)).toEqual(databaseBefore)
+      expect(await readFile(walPath)).toEqual(walBefore)
+      expect(await readFile(witnessPath)).toEqual(witnessBefore)
+      expect(await readFile(protectedPath)).toEqual(protectedBefore)
+      expect(await readFile(aliasPath)).toEqual(protectedBefore)
+
+      await rm(aliasPath)
+      await store.close()
+    }
+  )
 
   it('serializes independent writers through database commit and witness CAS', async () => {
     const directory = await temporaryDirectory()
@@ -1312,6 +1488,8 @@ describe('SQLite event store', () => {
       expect(databaseMode.mode & 0o777).toBe(0o600)
       expect(witnessMode.mode & 0o777).toBe(0o600)
     }
+    expect(databaseMode.nlink).toBe(1)
+    expect(witnessMode.nlink).toBe(1)
     const backup = await SqliteEventStore.open({
       databasePath: backupPath,
       integrityCheck: 'full'
@@ -1603,6 +1781,44 @@ describe('SQLite event store', () => {
       ).toBe(0o600)
     }
     await store.close()
+  })
+
+  it('refuses to replace a hard-linked witness and preserves every alias', async () => {
+    const directory = await temporaryDirectory()
+    const witnessPath = path.join(directory, 'ground.head.json')
+    const witnessAliasPath = path.join(directory, 'external-head-alias.json')
+    const initial: HeadWitness = {
+      witnessVersion: 1,
+      databaseId: 'hard-link-database',
+      recoveryEpoch: 'hard-link-epoch',
+      sequence: 1,
+      eventHash: sha256('hard-link-1'),
+      transactionId: 'hard-link-transaction-1',
+      publishedAt: '2026-07-30T20:00:00.000Z'
+    }
+    const candidate: HeadWitness = {
+      ...initial,
+      sequence: 2,
+      eventHash: sha256('hard-link-2'),
+      transactionId: 'hard-link-transaction-2',
+      publishedAt: '2026-07-30T20:01:00.000Z'
+    }
+    await fileHeadWitnessStore.publish(witnessPath, initial, {
+      expected: null
+    })
+    await link(witnessPath, witnessAliasPath)
+    const originalBytes = await readFile(witnessPath)
+
+    await expect(
+      fileHeadWitnessStore.publish(witnessPath, candidate, {
+        expected: initial
+      })
+    ).rejects.toBeInstanceOf(EventStoreCorruptionError)
+
+    expect(await readFile(witnessPath)).toEqual(originalBytes)
+    expect(await readFile(witnessAliasPath)).toEqual(originalBytes)
+    expect((await lstat(witnessPath)).nlink).toBe(2)
+    expect((await lstat(witnessAliasPath)).nlink).toBe(2)
   })
 
   it('conditionally publishes witnesses without replacing an interleaved advanced head', async () => {

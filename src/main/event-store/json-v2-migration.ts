@@ -85,6 +85,7 @@ export async function migrateJsonV2ToSqlite(
   const temporaryWitnessPath = defaultWitnessPath(temporaryDatabasePath)
   let databasePublished = false
   let finalWitnessPublished = false
+  let publishedHead: JsonV2MigrationResult['head'] | undefined
   let result: JsonV2MigrationResult | undefined
   const failures: unknown[] = []
 
@@ -113,6 +114,7 @@ export async function migrateJsonV2ToSqlite(
       integrityCheck: 'full'
     })
     const verifiedHead = verifiedTemporary.getHead()
+    publishedHead = verifiedHead
     const verifiedProjection = encodeProjection(
       verifiedTemporary.getProjection()
     )
@@ -165,36 +167,11 @@ export async function migrateJsonV2ToSqlite(
       await syncDirectory(path.dirname(input.databasePath))
       await assertPrivateRegularFile(
         input.databasePath,
-        MAX_DATABASE_BYTES
+        MAX_DATABASE_BYTES,
+        { expectedLinkCount: 2 }
       )
       input.fault?.('after-database-published')
     })
-
-    const selected = await SqliteEventStore.open({
-      databasePath: input.databasePath,
-      witnessPath,
-      dependencies: input.dependencies,
-      integrityCheck: 'full'
-    })
-    try {
-      const selectedHead = selected.getHead()
-      if (
-        selectedHead.sequence !== verifiedHead.sequence ||
-        selectedHead.eventHash !== verifiedHead.eventHash
-      ) {
-        throw new JsonV2MigrationError(
-          'Published SQLite head changed after verified migration'
-        )
-      }
-      result = {
-        sourceSha256: source.sourceSha256,
-        normalizedStateSha256: source.normalizedStateSha256,
-        sourceByteLength: source.sourceByteLength,
-        head: selectedHead
-      }
-    } finally {
-      await selected.close()
-    }
   } catch (error) {
     failures.push(error)
   }
@@ -218,6 +195,7 @@ export async function migrateJsonV2ToSqlite(
         failures.push(cleanupResult.reason)
       }
     }
+    await syncDirectory(path.dirname(temporaryDatabasePath))
   } catch (error) {
     failures.push(error)
   }
@@ -243,6 +221,60 @@ export async function migrateJsonV2ToSqlite(
         : 'SQLite JSON v2 migration failed before database selection',
       { cause: error }
     )
+  }
+  if (databasePublished && publishedHead) {
+    let selected: SqliteEventStore | undefined
+    const verificationFailures: unknown[] = []
+    try {
+      await assertPrivateRegularFile(
+        input.databasePath,
+        MAX_DATABASE_BYTES
+      )
+      selected = await SqliteEventStore.open({
+        databasePath: input.databasePath,
+        witnessPath,
+        dependencies: input.dependencies,
+        integrityCheck: 'full'
+      })
+      const selectedHead = selected.getHead()
+      if (
+        selectedHead.sequence !== publishedHead.sequence ||
+        selectedHead.eventHash !== publishedHead.eventHash
+      ) {
+        throw new JsonV2MigrationError(
+          'Published SQLite head changed after verified migration'
+        )
+      }
+      result = {
+        sourceSha256: source.sourceSha256,
+        normalizedStateSha256: source.normalizedStateSha256,
+        sourceByteLength: source.sourceByteLength,
+        head: selectedHead
+      }
+    } catch (error) {
+      verificationFailures.push(error)
+    }
+    if (selected) {
+      try {
+        await selected.close()
+      } catch (error) {
+        verificationFailures.push(error)
+      }
+    }
+    if (verificationFailures.length > 0) {
+      throw new EventStorePersistenceUncertainError(
+        'SQLite migration database was published but selected-engine verification failed',
+        {
+          cause:
+            verificationFailures.length === 1
+              ? verificationFailures[0]
+              : new AggregateError(
+                  verificationFailures,
+                  'SQLite migration verification and selected-store close both failed'
+                )
+        }
+      )
+    }
   }
   if (!result) {
     throw new JsonV2MigrationError(
@@ -309,6 +341,11 @@ async function readBoundedNoFollow(filePath: string): Promise<Buffer> {
       'Legacy JSON source is not a regular file'
     )
   }
+  if (pathDetails.nlink !== 1) {
+    throw new EventStoreCorruptionError(
+      'Legacy JSON source has multiple hard links'
+    )
+  }
   if (pathDetails.size > MAX_PROJECTION_BYTES) {
     throw new EventStoreCorruptionError(
       'Legacy JSON source exceeds its byte limit'
@@ -332,6 +369,11 @@ async function readBoundedNoFollow(filePath: string): Promise<Buffer> {
     ) {
       throw new EventStoreCorruptionError(
         'Legacy JSON source changed while it was being opened'
+      )
+    }
+    if (details.nlink !== 1) {
+      throw new EventStoreCorruptionError(
+        'Legacy JSON source has multiple hard links'
       )
     }
     if (details.size > MAX_PROJECTION_BYTES) {
@@ -360,6 +402,12 @@ async function readBoundedNoFollow(filePath: string): Promise<Buffer> {
     if (totalBytes > MAX_PROJECTION_BYTES) {
       throw new EventStoreCorruptionError(
         'Legacy JSON source exceeds its byte limit'
+      )
+    }
+    const completedDetails = await handle.stat()
+    if (completedDetails.nlink !== 1) {
+      throw new EventStoreCorruptionError(
+        'Legacy JSON source gained another hard link while it was read'
       )
     }
     return Buffer.concat(chunks, totalBytes)

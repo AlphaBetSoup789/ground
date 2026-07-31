@@ -189,7 +189,8 @@ export class SqliteEventStore {
         await syncDirectory(path.dirname(input.databasePath))
         await assertPrivateRegularFile(
           input.databasePath,
-          MAX_DATABASE_BYTES
+          MAX_DATABASE_BYTES,
+          { expectedLinkCount: 2 }
         )
         dependencies.fault?.('after-create-database-published')
       } catch (error) {
@@ -214,7 +215,8 @@ export class SqliteEventStore {
             () =>
               removeSqliteFileSet(
                 witnessPublicationLockPath(temporaryWitnessPath)
-              )
+              ),
+            () => syncDirectory(path.dirname(temporaryDatabasePath))
           ]
         )
       } catch (error) {
@@ -413,6 +415,14 @@ export class SqliteEventStore {
     integrityCheck: 'quick' | 'full'
   ): Promise<SqliteEventStore> {
     await tightenDatabaseFiles(databasePath)
+    const preflightWitness = await (
+      dependencies.witnessStore ?? fileHeadWitnessStore
+    ).read(witnessPath)
+    if (!preflightWitness) {
+      throw new EventStoreRollbackError(
+        'Selected SQLite ledger has no external head witness'
+      )
+    }
     const database = openDatabaseConnection(databasePath)
     try {
       configureExistingConnection(database)
@@ -476,6 +486,7 @@ export class SqliteEventStore {
     return this.enqueue(() =>
       withLedgerWriterLock(this.databasePath, async () => {
         this.assertWritable()
+        await tightenDatabaseFiles(this.databasePath)
         const durableHead = readHead(this.database)
         assertMatchingHead(this.head, durableHead, 'database')
         const currentWitness = await reconcileHeadWitness(
@@ -513,6 +524,7 @@ export class SqliteEventStore {
       return withLedgerWriterLocks(
         [this.databasePath, destinationDatabasePath],
         async () => {
+          await tightenDatabaseFiles(this.databasePath)
           const durableHead = readHead(this.database)
           assertMatchingHead(
             this.head,
@@ -542,6 +554,7 @@ export class SqliteEventStore {
           )
           let databasePublished = false
           let stagingIdentity: PathIdentity | undefined
+          let verifiedDatabaseIdentity: PathIdentity | undefined
           let failure: CapturedFailure | undefined
           try {
             stagingIdentity =
@@ -595,11 +608,10 @@ export class SqliteEventStore {
             } finally {
               await verified.close()
             }
-            const verifiedDatabaseIdentity =
-              await readPrivateFileIdentity(
-                temporaryDatabasePath,
-                MAX_DATABASE_BYTES
-              )
+            verifiedDatabaseIdentity = await readPrivateFileIdentity(
+              temporaryDatabasePath,
+              MAX_DATABASE_BYTES
+            )
 
             const destinationWitnessStore =
               this.dependencies.witnessStore ?? fileHeadWitnessStore
@@ -615,7 +627,7 @@ export class SqliteEventStore {
             this.dependencies.fault?.(
               'before-backup-database-link'
             )
-            if (!stagingIdentity) {
+            if (!stagingIdentity || !verifiedDatabaseIdentity) {
               throw new EventStoreCorruptionError(
                 'SQLite backup staging identity is unavailable'
               )
@@ -644,32 +656,18 @@ export class SqliteEventStore {
             await syncDirectory(path.dirname(destinationDatabasePath))
             await assertPrivateRegularFile(
               destinationDatabasePath,
-              MAX_DATABASE_BYTES
+              MAX_DATABASE_BYTES,
+              { expectedLinkCount: 2 }
             )
             assertSamePathIdentity(
               verifiedDatabaseIdentity,
               await readPrivateFileIdentity(
                 destinationDatabasePath,
-                MAX_DATABASE_BYTES
+                MAX_DATABASE_BYTES,
+                2
               ),
               'published SQLite backup'
             )
-            const selected =
-              await SqliteEventStore.openUnderHeldWriterLock(
-                destinationDatabasePath,
-                destinationWitnessPath,
-                this.dependencies,
-                'full'
-              )
-            try {
-              assertMatchingHead(
-                this.head,
-                selected.getHead(),
-                'published backup'
-              )
-            } finally {
-              await selected.close()
-            }
           } catch (error) {
             failure = captureFailure(
               failure,
@@ -695,8 +693,10 @@ export class SqliteEventStore {
                       temporaryWitnessPath
                     )
                   ),
+                () => syncDirectory(stagingDirectory),
                 () =>
-                  removePrivateTemporaryDirectory(stagingDirectory)
+                  removePrivateTemporaryDirectory(stagingDirectory),
+                () => syncDirectory(path.dirname(stagingDirectory))
               ]
             )
           } catch (error) {
@@ -715,6 +715,63 @@ export class SqliteEventStore {
               )
             }
             throw failure.error
+          }
+          if (!databasePublished || !verifiedDatabaseIdentity) {
+            throw new EventStoreCorruptionError(
+              'SQLite backup completed without a published database identity'
+            )
+          }
+
+          let selected: SqliteEventStore | undefined
+          let verificationFailure: CapturedFailure | undefined
+          try {
+            await assertPrivateRegularFile(
+              destinationDatabasePath,
+              MAX_DATABASE_BYTES
+            )
+            assertSamePathIdentity(
+              verifiedDatabaseIdentity,
+              await readPrivateFileIdentity(
+                destinationDatabasePath,
+                MAX_DATABASE_BYTES
+              ),
+              'published SQLite backup'
+            )
+            selected =
+              await SqliteEventStore.openUnderHeldWriterLock(
+                destinationDatabasePath,
+                destinationWitnessPath,
+                this.dependencies,
+                'full'
+              )
+            assertMatchingHead(
+              this.head,
+              selected.getHead(),
+              'published backup'
+            )
+          } catch (error) {
+            verificationFailure = captureFailure(
+              verificationFailure,
+              error,
+              'SQLite backup post-cleanup verification failed'
+            )
+          }
+          if (selected) {
+            try {
+              await selected.close()
+            } catch (error) {
+              verificationFailure = captureFailure(
+                verificationFailure,
+                error,
+                'SQLite backup verification and selected-store close both failed'
+              )
+            }
+          }
+          if (verificationFailure) {
+            throw new EventStorePersistenceUncertainError(
+              'SQLite backup was selected but post-cleanup verification failed',
+              { cause: verificationFailure.error }
+            )
           }
         }
       )
@@ -2155,7 +2212,7 @@ async function assertPathAbsent(filePath: string): Promise<void> {
 
 async function tightenDatabaseFiles(databasePath: string): Promise<void> {
   await assertPrivateRegularFile(databasePath, MAX_DATABASE_BYTES)
-  for (const suffix of ['-wal', '-shm']) {
+  for (const suffix of ['-journal', '-wal', '-shm']) {
     const sidecarPath = `${databasePath}${suffix}`
     try {
       await assertPrivateRegularFile(sidecarPath, MAX_DATABASE_BYTES)
@@ -2189,13 +2246,15 @@ async function readPrivateDirectoryIdentity(
 
 async function readPrivateFileIdentity(
   filePath: string,
-  maxBytes: number
+  maxBytes: number,
+  expectedLinkCount = 1
 ): Promise<PathIdentity> {
   const details = await lstat(filePath, { bigint: true })
   if (
     !details.isFile() ||
     details.isSymbolicLink() ||
     details.size > BigInt(maxBytes) ||
+    details.nlink !== BigInt(expectedLinkCount) ||
     (process.platform !== 'win32' &&
       (details.mode & 0o777n) !== 0o600n)
   ) {
@@ -2242,6 +2301,7 @@ function assertPrivateBackupFilesDuringProgress(
         !details.isFile() ||
         details.isSymbolicLink() ||
         details.size > MAX_DATABASE_BYTES ||
+        details.nlink !== 1 ||
         (process.platform !== 'win32' &&
           (details.mode & 0o777) !== 0o600)
       ) {

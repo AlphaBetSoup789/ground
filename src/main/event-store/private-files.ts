@@ -33,7 +33,10 @@ export async function createPrivateEmptyFile(filePath: string): Promise<void> {
 
 export async function assertPrivateRegularFile(
   filePath: string,
-  maxBytes: number
+  maxBytes: number,
+  options: {
+    readonly expectedLinkCount?: number
+  } = {}
 ): Promise<void> {
   const details = await lstat(filePath)
   if (!details.isFile() || details.isSymbolicLink()) {
@@ -44,6 +47,12 @@ export async function assertPrivateRegularFile(
   if (details.size > maxBytes) {
     throw new EventStoreCorruptionError(
       'Event-store file exceeds its byte limit'
+    )
+  }
+  const expectedLinkCount = options.expectedLinkCount ?? 1
+  if (details.nlink !== expectedLinkCount) {
+    throw new EventStoreCorruptionError(
+      'Event-store file has an unexpected hard-link count'
     )
   }
   if (process.platform !== 'win32' && (details.mode & 0o777) !== 0o600) {

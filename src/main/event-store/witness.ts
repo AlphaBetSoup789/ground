@@ -13,6 +13,7 @@ import {
   EventStoreVersionError
 } from './errors'
 import {
+  assertPrivateRegularFile,
   createPrivateTemporaryPath,
   ensureParentDirectory,
   isMissingFileError,
@@ -131,13 +132,19 @@ export class FileHeadWitnessStore implements HeadWitnessStore {
       await handle.sync()
       await handle.close()
       await withWitnessPublicationLock(filePath, async () => {
+        await assertSafeExistingWitnessPath(filePath)
         if (Object.hasOwn(options, 'expected')) {
           await assertExpectedWitness(filePath, options.expected)
         }
         await options.beforeRename?.()
+        await assertSafeExistingWitnessPath(filePath)
         if (Object.hasOwn(options, 'expected')) {
           await assertExpectedWitness(filePath, options.expected)
         }
+        await assertPrivateRegularFile(
+          temporaryPath,
+          MAX_WITNESS_BYTES
+        )
         await rename(temporaryPath, filePath)
         temporaryExists = false
         await options.afterRename?.()
@@ -151,6 +158,17 @@ export class FileHeadWitnessStore implements HeadWitnessStore {
 }
 
 export const fileHeadWitnessStore = new FileHeadWitnessStore()
+
+async function assertSafeExistingWitnessPath(
+  filePath: string
+): Promise<void> {
+  try {
+    await assertPrivateRegularFile(filePath, MAX_WITNESS_BYTES)
+  } catch (error) {
+    if (isMissingFileError(error)) return
+    throw error
+  }
+}
 
 async function assertExpectedWitness(
   filePath: string,
@@ -211,6 +229,11 @@ async function readBoundedPrivateFile(filePath: string): Promise<string> {
       'Head witness path is not a regular file'
     )
   }
+  if (pathDetails.nlink !== 1) {
+    throw new EventStoreCorruptionError(
+      'Head witness path has multiple hard links'
+    )
+  }
   if (pathDetails.size > MAX_WITNESS_BYTES) {
     throw new EventStoreCorruptionError(
       'Head witness exceeds its byte limit'
@@ -230,6 +253,11 @@ async function readBoundedPrivateFile(filePath: string): Promise<string> {
     if (!details.isFile()) {
       throw new EventStoreCorruptionError(
         'Head witness path is not a regular file'
+      )
+    }
+    if (details.nlink !== 1) {
+      throw new EventStoreCorruptionError(
+        'Head witness path has multiple hard links'
       )
     }
     if (details.dev !== pathDetails.dev || details.ino !== pathDetails.ino) {
@@ -266,6 +294,12 @@ async function readBoundedPrivateFile(filePath: string): Promise<string> {
     if (totalBytes > MAX_WITNESS_BYTES) {
       throw new EventStoreCorruptionError(
         'Head witness exceeds its byte limit'
+      )
+    }
+    const completedDetails = await handle.stat()
+    if (completedDetails.nlink !== 1) {
+      throw new EventStoreCorruptionError(
+        'Head witness path gained another hard link while it was read'
       )
     }
     return new TextDecoder('utf-8', { fatal: true }).decode(

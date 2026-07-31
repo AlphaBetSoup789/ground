@@ -99,7 +99,38 @@ describe('JSON v2 copy-on-migrate', () => {
         (await lstat(`${databasePath}.head.json`)).mode & 0o777
       ).toBe(0o600)
     }
+    expect((await lstat(databasePath)).nlink).toBe(1)
+    expect((await lstat(`${databasePath}.head.json`)).nlink).toBe(1)
     await store.close()
+  })
+
+  it('rejects an external hard link to the legacy JSON source without selecting or changing either name', async () => {
+    const directory = await temporaryDirectory()
+    const sourcePath = path.join(directory, 'state.json')
+    const sourceAliasPath = path.join(directory, 'external-state-alias.json')
+    const databasePath = path.join(directory, 'ground.sqlite')
+    const witnessPath = `${databasePath}.head.json`
+    const source = `${JSON.stringify(legacyState(), null, 2)}\n`
+    await writeFile(sourcePath, source, { encoding: 'utf8', mode: 0o600 })
+    await link(sourcePath, sourceAliasPath)
+
+    await expect(
+      migrateJsonV2ToSqlite({
+        sourceJsonPath: sourcePath,
+        databasePath
+      })
+    ).rejects.toThrow(/multiple hard links/)
+
+    expect(await readFile(sourcePath, 'utf8')).toBe(source)
+    expect(await readFile(sourceAliasPath, 'utf8')).toBe(source)
+    expect((await lstat(sourcePath)).nlink).toBe(2)
+    expect((await lstat(sourceAliasPath)).nlink).toBe(2)
+    await expect(lstat(databasePath)).rejects.toMatchObject({
+      code: 'ENOENT'
+    })
+    await expect(lstat(witnessPath)).rejects.toMatchObject({
+      code: 'ENOENT'
+    })
   })
 
   it('refuses to use a destination SQLite sidecar as the migration source and preserves it exactly', async () => {
