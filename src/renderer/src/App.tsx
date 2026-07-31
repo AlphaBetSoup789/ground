@@ -1077,6 +1077,7 @@ export default function App(): React.JSX.Element {
             onStartRun={startRun}
             onStopRun={stopRun}
             onResolveApproval={resolveApproval}
+            onCopyAssistantOutput={desktop.copyAssistantOutput}
             onOpenSettings={openSettings}
             onImportTask={() => void importTask()}
             onForkTask={() => void forkTask()}

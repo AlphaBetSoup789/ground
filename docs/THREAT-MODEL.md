@@ -159,10 +159,16 @@ does not read new content, cross IPC, persist a position, or alter a run. A stal
 task cannot present or activate another task’s control, and activation affects
 only the current timeline viewport and follow flag.
 
-Assistant-output copy is renderer-only clipboard presentation. It writes the
-exact stored markdown source for one visible message, announces local success or
-failure, and never crosses IPC, mutates drafts, starts runs, or claims that the
-clipboard destination is trusted.
+Assistant-output copy is a dedicated source-bound, write-only IPC operation
+approved in
+[#42](https://github.com/AlphaBetSoup789/ground/issues/42). The preload requires
+active user activation and carries one bounded task/message/content identity plus
+either a response target or fenced-node offsets. Main applies trusted-sender
+validation, re-resolves the canonical retained assistant source, rejects changed
+or latest-active output, and writes only the resolved plain text. No clipboard
+read, arbitrary-text write, rich HTML, draft mutation, provider contact, or run
+action is exposed. Fixed task- and request-bound status never includes copied
+content or claims that the clipboard destination is trusted.
 
 ## Implemented controls
 
@@ -172,12 +178,22 @@ clipboard destination is trusted.
 - A 19-scenario Playwright-over-Electron suite drives the real built renderer’s
   command and task-search keyboard/focus behavior, including narrow-sidebar focus,
   form validation, task-local, active-run, and failed-run draft preparation,
-  reviewed handoffs, paused-streaming jump recovery, exact assistant-output
-  clipboard copy, structured Git review and request-bound finished-run refresh,
-  cancellation, archive/search, responsive layout, forced colors, and
-  reduced-motion behavior. It deliberately uses the browser-preview
-  desktop mock, so it is not evidence for production main/preload authority,
-  native approvals, or complete screen-reader accessibility.
+  reviewed handoffs, paused-streaming jump recovery, source-bound
+  assistant-response and fenced-code clipboard copy, structured Git review and
+  request-bound finished-run refresh, cancellation, archive/search, responsive
+  layout, forced colors, and reduced-motion behavior. It deliberately uses the
+  browser-preview desktop mock, so it is not evidence for production
+  main/preload authority, native approvals, or complete screen-reader
+  accessibility.
+- A separate credential-free native clipboard smoke loads the compiled
+  production main, renderer, and sandboxed preload with isolated state. It
+  verifies activated renderer Web Clipboard denial, inactive source-bound
+  bridge refusal, and exact pointer/keyboard writes through trusted IPC and the
+  main-process clipboard on macOS, Windows, and Linux/Xvfb CI. It preflights
+  restorable clipboard formats, checks ownership before each planned mutation,
+  refuses restoration over detected newer content, and treats cleanup failure
+  as test failure; it is not an atomic clipboard lease, packaged-installer, or
+  screen-reader certification.
 - Workspace grants and CLI authorization are created in the main process.
   Renderer task DTOs contain only fresh process-scoped grant IDs and sanitized
   path-free labels; canonical paths, runtime sessions, and model continuation

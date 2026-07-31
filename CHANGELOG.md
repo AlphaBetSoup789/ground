@@ -86,9 +86,10 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
   appears only after the reader leaves the near-bottom follow threshold,
   preserves paused streaming position, resumes exact-bottom following on
   activation, and resets across task changes.
-- Exact **Copy** on assistant timeline messages that writes the stored markdown
-  source to the clipboard, announces local success or failure, and never starts a
-  run or crosses IPC.
+- Source-bound **Copy response** and fenced-block **Copy code** actions for stable
+  assistant output. A user-activation-gated preload request carries only the exact
+  source identity; main re-resolves canonical retained text before a plain-text
+  write and returns only bounded success or failure.
 - Three rotating validated state snapshots, automatic fallback from a corrupt or
   missing primary, unreadable-file quarantine, an in-app recovery browser,
   credential-free native export, and native-confirmed retained-snapshot restore.
@@ -168,13 +169,18 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
   accessible provider-form validation, truthful local-provider refusal recovery
   into a detected CLI, task-local, active-run, and failed-run draft preparation,
   Ask-to-Agent and reviewed-hunk prompt handoffs, paused-streaming jump recovery,
-  exact assistant-output clipboard copy, finished-run Git refresh with
-  review-position retention, failure/retry, and late-task isolation,
-  deterministic send cancellation, archive/search, responsive settings and
-  sidebar selection, reduced-motion CSS, and forced-color connection-path
-  selection. It uses the
-  explicit browser-preview desktop mock and is not
-  production-main/native/provider certification.
+  source-bound assistant-response and fenced-code clipboard copy, finished-run
+  Git refresh with review-position retention, failure/retry, and late-task
+  isolation, deterministic send cancellation, archive/search, responsive
+  settings and sidebar selection, reduced-motion CSS, and forced-color
+  connection-path selection. It uses the explicit browser-preview desktop mock
+  and is not production-main/native/provider certification.
+- Add a credential-free source-build Electron smoke for the production
+  assistant clipboard boundary. It loads the compiled main, renderer, and
+  sandboxed preload with isolated state; proves activated Web Clipboard denial,
+  inactive bridge refusal, and exact pointer/keyboard response and fenced-code
+  writes through trusted IPC and the native clipboard; restores supported prior
+  clipboard content; and runs in required macOS, Windows, and Linux/Xvfb CI.
 - Recover interrupted managed writes, commands, and MCP calls as explicit
   outcome-unknown activity, without automatically replaying the side effect or
   retaining continuation authority.

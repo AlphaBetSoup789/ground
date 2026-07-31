@@ -323,8 +323,8 @@ describe('timeline output following', () => {
     expect(markup).toContain('Ready to implement?')
     expect(markup).toContain('Continue in Agent')
     expect(markup).toContain('Nothing runs until you send it.')
-    expect(markup).toContain('aria-label="Copy assistant output"')
-    expect(markup).toContain('Copy')
+    expect(markup).toContain('aria-label="Copy assistant response"')
+    expect(markup).toContain('Copy response')
   })
 
   it('exposes exact-copy controls only when assistant content exists', () => {
@@ -379,10 +379,83 @@ describe('timeline output following', () => {
       })
     )
 
-    expect(emptyMarkup).not.toContain('aria-label="Copy assistant output"')
-    expect(populatedMarkup).toContain('aria-label="Copy assistant output"')
+    expect(emptyMarkup).not.toContain('aria-label="Copy assistant response"')
     expect(populatedMarkup).toContain(
-      'class="visually-hidden assistant-output-copy-status" role="status" aria-live="polite" aria-atomic="true"'
+      'aria-label="Copy assistant response"'
     )
+    expect(populatedMarkup).not.toContain(
+      'class="assistant-output-copy-feedback'
+    )
+    expect(populatedMarkup).toContain(
+      'class="visually-hidden assistant-output-copy-live-region" role="status" aria-live="polite" aria-atomic="true"'
+    )
+  })
+
+  it('adds exact-copy controls to fenced blocks but not inline or indented code', () => {
+    const fencedTask: DesktopTask = {
+      id: 'task',
+      title: 'Code',
+      providerId: 'provider',
+      mode: 'agent',
+      runStatus: 'idle',
+      createdAt: '2026-07-30T12:00:00.000Z',
+      updatedAt: '2026-07-30T12:01:00.000Z',
+      items: [
+        {
+          id: 'assistant',
+          kind: 'message',
+          role: 'assistant',
+          content:
+            'Use `inline()`.\n\n    indented()\n\n```ts\nconst exact = "🌱"\n\n```\n',
+          createdAt: '2026-07-30T12:01:00.000Z'
+        }
+      ]
+    }
+    const markup = renderToStaticMarkup(
+      createElement(Timeline, {
+        task: fencedTask,
+        suggestions: [],
+        onSuggestion: () => undefined,
+        onResolveApproval: async () => undefined,
+        onSetImportedHistory: () => undefined
+      })
+    )
+
+    expect(markup).toContain('aria-label="Copy code block 1"')
+    expect(markup.match(/aria-label="Copy code block/g)).toHaveLength(1)
+    expect(markup).toContain('class="assistant-code-block"')
+  })
+
+  it('hides response and code-copy controls for the latest active assistant', () => {
+    const activeTask: DesktopTask = {
+      id: 'task',
+      title: 'Streaming code',
+      providerId: 'provider',
+      mode: 'agent',
+      runStatus: 'running',
+      createdAt: '2026-07-30T12:00:00.000Z',
+      updatedAt: '2026-07-30T12:01:00.000Z',
+      items: [
+        {
+          id: 'assistant',
+          kind: 'message',
+          role: 'assistant',
+          content: '```ts\npartial()\n```',
+          createdAt: '2026-07-30T12:01:00.000Z'
+        }
+      ]
+    }
+    const markup = renderToStaticMarkup(
+      createElement(Timeline, {
+        task: activeTask,
+        suggestions: [],
+        onSuggestion: () => undefined,
+        onResolveApproval: async () => undefined,
+        onSetImportedHistory: () => undefined
+      })
+    )
+
+    expect(markup).not.toContain('Copy assistant response')
+    expect(markup).not.toContain('Copy code block')
   })
 })

@@ -351,7 +351,7 @@ labels and Chromium constraint validation, local-template/refused-connection
 recovery into a detected CLI, task-local, active-run, and failed-run draft
 preparation, Ask-to-Agent and reviewed-hunk handoffs, paused-streaming
 reading-position recovery across later sends and responsive reconciliation,
-exact assistant-output clipboard copy of stored markdown, structured Git diff
+assistant-response and fenced-code clipboard interaction, structured Git diff
 navigation with finished-run refresh, failure/retry, late-task isolation, and
 review-position retention, deterministic send/cancel, archive and archived
 search, and 680px responsive settings with reduced motion plus forced-color
@@ -359,6 +359,13 @@ connection-path selection. CI is
 configured to run it directly on macOS/Windows and under Xvfb on Linux. Because
 it uses the explicit preview desktop mock, it is renderer evidence—not production
 main/preload, native permission, provider, screen-reader, or packaged-app
+certification. Production-bound unit evidence separately covers the source-bound
+main clipboard service and preload user-activation guard. A dedicated
+source-build Electron smoke additionally loads the compiled production
+main/preload/renderer with isolated state and verifies activated renderer
+permission denial, inactive bridge refusal, and exact pointer/keyboard writes
+through trusted IPC and the native clipboard. CI runs that smoke on macOS,
+Windows, and Linux/Xvfb; it is not installer-level or screen-reader
 certification.
 
 The pinned compatibility suite performs no authenticated request and launches no

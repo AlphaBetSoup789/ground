@@ -29,6 +29,24 @@ const composerSendShortcut =
 const previewGitReadControlEvent =
   'ground:preview-git-read-control'
 const previewGitReadEvent = 'ground:preview-git-read'
+const previewClipboardControlEvent =
+  'ground:preview-clipboard-control'
+
+async function controlPreviewClipboard(action) {
+  await page.evaluate(
+    ({ controlEvent, requestedAction }) => {
+      window.dispatchEvent(
+        new CustomEvent(controlEvent, {
+          detail: { action: requestedAction }
+        })
+      )
+    },
+    {
+      controlEvent: previewClipboardControlEvent,
+      requestedAction: action
+    }
+  )
+}
 
 async function resetRenderer() {
   await page.setViewportSize({ width: 1_280, height: 860 })
@@ -1436,32 +1454,234 @@ try {
     if (await stopRun.count()) await stopRun.click()
   })
 
-  await run('assistant messages expose an exact clipboard copy action', async () => {
+  await run('assistant response and fenced code copy stay exact, accessible, and task-bound', async () => {
     const exactAssistantOutput =
-      'I found the friction: the page offers three equal-weight actions before the user has any data. I’d make **Create your first project** the single primary path, keep import secondary, and move documentation into supporting copy.\n\nThe implementation is scoped to the empty-state component and its styles.'
-    const copy = page
+      'I found the friction: the page offers three equal-weight actions before the user has any data. I’d make **Create your first project** the single primary path, keep import secondary, and move documentation into supporting copy.\n\nThe implementation is scoped to the empty-state component and its styles.\n\n```ts\nconst greeting = "Hold your ground 🌱"\n\nconsole.log(greeting)\n```\n'
+    const exactCode =
+      'const greeting = "Hold your ground 🌱"\n\nconsole.log(greeting)\n'
+    const copyResponse = page
       .getByRole('article')
       .filter({ hasText: 'Create your first project' })
-      .getByRole('button', { name: 'Copy assistant output' })
+      .getByRole('button', { name: 'Copy assistant response' })
+    const copyCode = page
+      .getByRole('article')
+      .filter({ hasText: 'Create your first project' })
+      .getByRole('button', { name: 'Copy code block 1' })
+    const feedback = page.locator('.assistant-output-copy-feedback')
+    const liveRegion = page.locator(
+      '.assistant-output-copy-live-region'
+    )
 
-    await copy.waitFor()
+    await copyResponse.waitFor()
+    await copyCode.waitFor()
+    assert.equal(
+      await liveRegion.count(),
+      1,
+      'the empty polite copy region must be mounted before its first update'
+    )
     await page.evaluate(async () => {
       await navigator.clipboard.writeText('stale-preview-clipboard')
     })
-    await copy.click()
+    await copyResponse.click()
     await waitForValue(
-      () =>
-        page
-          .locator('.assistant-output-copy-status')
-          .filter({ hasText: 'Assistant output copied.' })
-          .count(),
-      1,
-      'copying assistant output should announce success'
+      () => feedback.textContent(),
+      'Assistant response copied.',
+      'copying an assistant response should show and announce success'
     )
     assert.equal(
       await page.evaluate(() => navigator.clipboard.readText()),
       exactAssistantOutput,
       'copy must write the exact stored assistant markdown, not rendered HTML'
+    )
+    assert.equal(
+      await copyResponse.evaluate(
+        (element) => element === document.activeElement
+      ),
+      true,
+      'pointer copy should keep focus on the invoking response control'
+    )
+    assert.equal(
+      await feedback.evaluate(
+        (element) => element.closest('[role="log"]') === null
+      ),
+      true,
+      'copy feedback must remain outside the conversation live log'
+    )
+
+    await controlPreviewClipboard('hold')
+    await page.evaluate(() => {
+      window.__groundPreviewCopyAnnouncements = []
+      window.__groundPreviewCopyObserver?.disconnect()
+      const region = document.querySelector(
+        '.assistant-output-copy-live-region'
+      )
+      if (!region) throw new Error('Copy live region is missing')
+      window.__groundPreviewCopyObserver = new MutationObserver(() => {
+        window.__groundPreviewCopyAnnouncements.push(
+          region.textContent ?? ''
+        )
+      })
+      window.__groundPreviewCopyObserver.observe(region, {
+        childList: true,
+        characterData: true,
+        subtree: true
+      })
+    })
+    await copyResponse.click()
+    await waitForValue(
+      () => feedback.textContent(),
+      'Copying…',
+      'a repeated copy should publish a fresh pending status'
+    )
+    await controlPreviewClipboard('release')
+    await waitForValue(
+      () => feedback.textContent(),
+      'Assistant response copied.',
+      'a repeated copy should publish the same success status again'
+    )
+    await page.waitForTimeout(25)
+    const repeatedAnnouncements = await page.evaluate(() => {
+      window.__groundPreviewCopyObserver?.disconnect()
+      return structuredClone(
+        window.__groundPreviewCopyAnnouncements ?? []
+      )
+    })
+    assert.ok(
+      repeatedAnnouncements.includes('Copying…') &&
+        repeatedAnnouncements.includes('Assistant response copied.'),
+      'the mounted polite region must mutate for consecutive copies of the same response'
+    )
+
+    await copyCode.focus()
+    await page.keyboard.press('Enter')
+    await waitForValue(
+      () => feedback.textContent(),
+      'Code block copied.',
+      'keyboard code copy should show and announce target-specific success'
+    )
+    assert.equal(
+      await page.evaluate(() => navigator.clipboard.readText()),
+      exactCode,
+      'code copy must preserve represented Unicode, blank lines, and terminal newline'
+    )
+    assert.equal(
+      await copyCode.evaluate(
+        (element) => element === document.activeElement
+      ),
+      true,
+      'keyboard code copy should retain focus'
+    )
+
+    await controlPreviewClipboard('reject')
+    await copyResponse.focus()
+    await page.keyboard.press('Enter')
+    await waitForValue(
+      () => feedback.textContent(),
+      'Copy was unavailable.',
+      'clipboard rejection should remain visible and truthful'
+    )
+    assert.equal(
+      await page.evaluate(() => navigator.clipboard.readText()),
+      exactCode,
+      'a rejected copy must not replace the prior clipboard value'
+    )
+    assert.equal(
+      await copyResponse.evaluate(
+        (element) => element === document.activeElement
+      ),
+      true,
+      'failure feedback should not move focus'
+    )
+
+    await controlPreviewClipboard('hold')
+    await copyCode.click()
+    await waitForValue(
+      () => feedback.textContent(),
+      'Copying…',
+      'a pending copy should replace stale result feedback'
+    )
+    await page
+      .getByRole('button', { name: /Explain the auth flow/ })
+      .click()
+    await waitForValue(
+      () => page.getByLabel('Task title').inputValue(),
+      'Explain the auth flow',
+      'task switching should replace the copy source task'
+    )
+    await controlPreviewClipboard('release')
+    await page.waitForTimeout(100)
+    assert.equal(
+      await page.locator('.assistant-output-copy-feedback').count(),
+      0,
+      'a late copy result must not announce in another task'
+    )
+
+    await page
+      .getByRole('button', { name: /Refine the project dashboard/ })
+      .click()
+    await waitForValue(
+      () => page.getByLabel('Task title').inputValue(),
+      'Refine the project dashboard',
+      'the source task should remain selectable'
+    )
+    await page.setViewportSize({ width: 480, height: 720 })
+    await page.emulateMedia({
+      reducedMotion: 'reduce',
+      forcedColors: 'active'
+    })
+    await page
+      .getByRole('complementary', { name: 'Task navigation' })
+      .getByRole('button', { name: 'Close sidebar' })
+      .click()
+    await waitForValue(
+      () =>
+        page
+          .locator('.main-surface')
+          .evaluate((element) => element.inert),
+      false,
+      'closing the narrow navigation should make copy controls operable'
+    )
+    const narrowCodeCopy = page.getByRole('button', {
+      name: 'Copy code block 1'
+    })
+    await narrowCodeCopy.waitFor()
+    await page.keyboard.press('Tab')
+    await narrowCodeCopy.focus()
+    const presentation = await narrowCodeCopy.evaluate((element) => {
+      const rect = element.getBoundingClientRect()
+      const style = getComputedStyle(element)
+      return {
+        left: rect.left,
+        right: rect.right,
+        viewportWidth: window.innerWidth,
+        outlineWidth: Number.parseFloat(style.outlineWidth),
+        outlineStyle: style.outlineStyle,
+        transitionDurationsMs: style.transitionDuration
+          .split(',')
+          .map((duration) => {
+            const value = Number.parseFloat(duration)
+            return duration.trim().endsWith('ms')
+              ? value
+              : value * 1_000
+          })
+      }
+    })
+    assert.ok(
+      presentation.left >= 0 &&
+        presentation.right <= presentation.viewportWidth,
+      'copy code must remain operable without horizontal clipping at narrow width'
+    )
+    assert.ok(
+      presentation.outlineStyle !== 'none' &&
+        presentation.outlineWidth > 0,
+      'copy code must retain a visible forced-color focus outline'
+    )
+    assert.equal(
+      presentation.transitionDurationsMs.every(
+        (duration) => duration <= 0.01
+      ),
+      true,
+      `copy controls must honor reduced motion; received ${presentation.transitionDurationsMs.join(', ')}ms`
     )
   })
 

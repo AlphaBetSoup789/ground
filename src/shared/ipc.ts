@@ -1,5 +1,6 @@
 export const IPC = {
   getSnapshot: 'app:get-snapshot',
+  copyAssistantOutput: 'clipboard:copy-assistant-output',
   listStateSnapshots: 'state:list-snapshots',
   exportStateSnapshot: 'state:export-snapshot',
   restoreStateSnapshot: 'state:restore-snapshot',

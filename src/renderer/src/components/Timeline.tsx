@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useId,
@@ -27,7 +28,12 @@ import {
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import {
+  fencedAssistantCodeBlocks,
+  type FencedAssistantCodeBlock
+} from '../../../shared/assistant-output-clipboard'
 import type {
+  CopyAssistantOutputInput,
   DesktopActivityItem,
   DesktopTask,
   ProviderProfile,
@@ -45,10 +51,14 @@ import {
   takeAssistantAnnouncementBatch
 } from '../lib/assistant-announcements'
 import {
-  ASSISTANT_OUTPUT_COPY_LABEL,
+  ASSISTANT_CODE_COPY_LABEL,
+  ASSISTANT_RESPONSE_COPY_LABEL,
+  type AssistantOutputCopyPhase,
+  type AssistantOutputCopyRequest,
   assistantOutputCopyStatus,
-  assistantOutputCopyText,
-  canCopyAssistantOutput
+  canCopyAssistantOutput,
+  deriveAssistantOutputCopyEligibility,
+  shouldApplyAssistantOutputCopyResult
 } from '../lib/copy-assistant-output'
 
 interface TimelineProps {
@@ -63,6 +73,9 @@ interface TimelineProps {
   onSetImportedHistory: (include: boolean) => void
   onContinueInAgent?: (
     source: AskToAgentHandoffSource
+  ) => Promise<boolean>
+  onCopyAssistantOutput?: (
+    input: CopyAssistantOutputInput
   ) => Promise<boolean>
 }
 
@@ -127,6 +140,12 @@ interface TimelineJumpState {
   taskId: string
   visible: boolean
   announcement: string
+  revision: number
+}
+
+interface AssistantOutputCopyFeedback {
+  request: AssistantOutputCopyRequest
+  phase: AssistantOutputCopyPhase
   revision: number
 }
 
@@ -266,10 +285,14 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   const jumpButtonRef = useRef<HTMLButtonElement>(null)
   const followOutputRef = useRef(true)
   const taskIdRef = useRef(props.task.id)
+  const copyTaskRef = useRef(props.task)
+  const copyRequestIdRef = useRef(0)
   const handoffButtonRef = useRef<HTMLButtonElement>(null)
   const [visibleCount, setVisibleCount] = useState(TIMELINE_PAGE_SIZE)
   const [handoffPending, setHandoffPending] = useState<string>()
   const [handoffStatus, setHandoffStatus] = useState('')
+  const [copyFeedback, setCopyFeedback] =
+    useState<AssistantOutputCopyFeedback>()
   const [jumpState, setJumpState] = useState<TimelineJumpState>(() =>
     initialTimelineJumpState(props.task.id)
   )
@@ -277,6 +300,10 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   const handoffDescriptionId = useId()
   const assistantAnnouncement = useAssistantRunAnnouncement(props.task)
   const lastItem = props.task.items.at(-1)
+  const copyEligibility = useMemo(
+    () => deriveAssistantOutputCopyEligibility(props.task),
+    [props.task.id, props.task.items, props.task.runStatus]
+  )
   const lastAssistant = [...props.task.items]
     .reverse()
     .find((item) => item.kind === 'message' && item.role === 'assistant')
@@ -284,12 +311,22 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     ? askToAgentHandoffSource(props.task, props.provider)
     : undefined
   taskIdRef.current = props.task.id
+  copyTaskRef.current = props.task
   const jumpVisible =
     jumpState.taskId === props.task.id && jumpState.visible
   const jumpAnnouncement =
     jumpState.taskId === props.task.id
       ? jumpState.announcement
       : ''
+  const visibleCopyFeedback =
+    copyFeedback &&
+    shouldApplyAssistantOutputCopyResult({
+      request: copyFeedback.request,
+      currentRequestId: copyRequestIdRef.current,
+      currentTask: props.task
+    })
+      ? copyFeedback
+      : undefined
   const focusTimelineIfJumpFocused = useCallback(
     (timeline: HTMLElement): void => {
       if (jumpButtonRef.current === document.activeElement) {
@@ -426,6 +463,51 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     },
     [handoffPending, props.onContinueInAgent]
   )
+  const requestAssistantOutputCopy = useCallback(
+    (input: CopyAssistantOutputInput): void => {
+      const request: AssistantOutputCopyRequest = {
+        requestId: copyRequestIdRef.current + 1,
+        input
+      }
+      copyRequestIdRef.current = request.requestId
+      setCopyFeedback((current) => ({
+        request,
+        phase: 'pending',
+        revision: (current?.revision ?? 0) + 1
+      }))
+
+      void (async () => {
+        let copied = false
+        try {
+          copied =
+            (await props.onCopyAssistantOutput?.(input)) ?? false
+        } catch {
+          copied = false
+        }
+
+        if (
+          !shouldApplyAssistantOutputCopyResult({
+            request,
+            currentRequestId: copyRequestIdRef.current,
+            currentTask: copyTaskRef.current
+          })
+        ) {
+          return
+        }
+        setCopyFeedback((current) => {
+          if (current?.request.requestId !== request.requestId) {
+            return current
+          }
+          return {
+            request,
+            phase: copied ? 'copied' : 'failed',
+            revision: current.revision + 1
+          }
+        })
+      })()
+    },
+    [props.onCopyAssistantOutput]
+  )
   const contentKey = useMemo(
     () => `${props.task.id}:${props.task.items.length}:${
       lastItem?.kind === 'message'
@@ -436,12 +518,30 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   )
 
   useEffect(() => {
+    copyRequestIdRef.current += 1
     setVisibleCount(TIMELINE_PAGE_SIZE)
     setHandoffPending(undefined)
     setHandoffStatus('')
+    setCopyFeedback(undefined)
     setJumpState(initialTimelineJumpState(props.task.id))
     followOutputRef.current = true
   }, [props.task.id])
+
+  useEffect(() => {
+    setCopyFeedback((current) => {
+      if (
+        !current ||
+        shouldApplyAssistantOutputCopyResult({
+          request: current.request,
+          currentRequestId: copyRequestIdRef.current,
+          currentTask: props.task
+        })
+      ) {
+        return current
+      }
+      return undefined
+    })
+  }, [props.task])
 
   useEffect(() => {
     const timeline = timelineRef.current
@@ -642,6 +742,14 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
               item.role === 'assistant' &&
               item.id === lastAssistant?.id &&
               props.task.runStatus === 'running'
+            const copyEnabled =
+              item.kind === 'message' &&
+              item.role === 'assistant' &&
+              canCopyAssistantOutput(
+                copyEligibility,
+                item.id,
+                item.content
+              )
 
             return item.kind === 'message' ? (
               <article
@@ -669,26 +777,38 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
                           {item.provider?.name ?? props.provider?.name}
                         </span>
                       </div>
-                      {canCopyAssistantOutput(item.content) && (
+                      {copyEnabled && (
                         <AssistantOutputCopyControl
+                          taskId={props.task.id}
                           messageId={item.id}
                           content={item.content}
+                          onCopy={requestAssistantOutputCopy}
                         />
                       )}
                     </div>
                   )}
                   {item.content ? (
                     <div className="markdown">
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        components={{
-                          a: ({ children }) => (
-                            <span className="markdown-link">{children}</span>
-                          )
-                        }}
-                      >
-                        {item.content}
-                      </ReactMarkdown>
+                      {item.role === 'assistant' ? (
+                        <AssistantMarkdown
+                          taskId={props.task.id}
+                          messageId={item.id}
+                          content={item.content}
+                          copyEnabled={copyEnabled}
+                          onCopy={requestAssistantOutputCopy}
+                        />
+                      ) : (
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          components={{
+                            a: ({ children }) => (
+                              <span className="markdown-link">{children}</span>
+                            )
+                          }}
+                        >
+                          {item.content}
+                        </ReactMarkdown>
+                      )}
                       {item.id === lastAssistant?.id &&
                         props.task.runStatus === 'running' && (
                           <span className="stream-caret" />
@@ -753,6 +873,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
           onJump={jumpToLatest}
           buttonRef={jumpButtonRef}
         />
+        <AssistantOutputCopyStatus feedback={visibleCopyFeedback} />
       </div>
       <div
         className="visually-hidden"
@@ -802,52 +923,163 @@ export function TimelineJumpControl(props: {
 }
 
 export function AssistantOutputCopyControl(props: {
+  taskId: string
   messageId: string
   content: string
+  onCopy: (input: CopyAssistantOutputInput) => void
 }): React.JSX.Element {
-  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>(
-    'idle'
-  )
-  const statusId = useId()
-
-  useEffect(() => {
-    setCopyStatus('idle')
-  }, [props.messageId, props.content])
-
-  const copyExactOutput = async (): Promise<void> => {
-    const exact = assistantOutputCopyText(props.content)
-    try {
-      if (!navigator.clipboard) throw new Error('Clipboard unavailable')
-      await navigator.clipboard.writeText(exact)
-      setCopyStatus('copied')
-    } catch {
-      setCopyStatus('failed')
-    }
-  }
-
   return (
     <div className="assistant-output-copy">
       <button
         className="assistant-output-copy-button"
         type="button"
-        aria-label={ASSISTANT_OUTPUT_COPY_LABEL}
-        aria-describedby={statusId}
-        title={ASSISTANT_OUTPUT_COPY_LABEL}
-        onClick={() => void copyExactOutput()}
+        aria-label={ASSISTANT_RESPONSE_COPY_LABEL}
+        title={ASSISTANT_RESPONSE_COPY_LABEL}
+        onClick={() =>
+          props.onCopy({
+            taskId: props.taskId,
+            messageId: props.messageId,
+            expectedContent: props.content,
+            target: { kind: 'response' }
+          })
+        }
       >
         <Copy size={13} aria-hidden="true" />
-        Copy
+        Copy response
       </button>
-      <span
-        id={statusId}
-        className="visually-hidden assistant-output-copy-status"
+    </div>
+  )
+}
+
+const AssistantMarkdown = memo(function AssistantMarkdown(props: {
+  taskId: string
+  messageId: string
+  content: string
+  copyEnabled: boolean
+  onCopy: (input: CopyAssistantOutputInput) => void
+}): React.JSX.Element {
+  const blocks = props.copyEnabled
+    ? fencedAssistantCodeBlocks(props.content)
+    : []
+  const blockByOffsets = new Map(
+    blocks.map((block, index) => [
+      `${block.startOffset}:${block.endOffset}`,
+      { block, index }
+    ])
+  )
+
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        a: ({ children }) => (
+          <span className="markdown-link">{children}</span>
+        ),
+        pre: ({ node, children }) => {
+          const startOffset = node?.position?.start.offset
+          const endOffset = node?.position?.end.offset
+          const match =
+            typeof startOffset === 'number' &&
+            typeof endOffset === 'number'
+              ? blockByOffsets.get(`${startOffset}:${endOffset}`)
+              : undefined
+          if (!match) return <pre>{children}</pre>
+          return (
+            <AssistantCodeBlock
+              taskId={props.taskId}
+              messageId={props.messageId}
+              content={props.content}
+              block={match.block}
+              index={match.index}
+              onCopy={props.onCopy}
+            >
+              {children}
+            </AssistantCodeBlock>
+          )
+        }
+      }}
+    >
+      {props.content}
+    </ReactMarkdown>
+  )
+})
+
+function AssistantCodeBlock(props: {
+  taskId: string
+  messageId: string
+  content: string
+  block: FencedAssistantCodeBlock
+  index: number
+  onCopy: (input: CopyAssistantOutputInput) => void
+  children: React.ReactNode
+}): React.JSX.Element {
+  const label = `${ASSISTANT_CODE_COPY_LABEL} ${props.index + 1}`
+  return (
+    <div className="assistant-code-block">
+      <div className="assistant-code-block-toolbar">
+        <span>Code</span>
+        <button
+          type="button"
+          aria-label={label}
+          title={label}
+          onClick={() =>
+            props.onCopy({
+              taskId: props.taskId,
+              messageId: props.messageId,
+              expectedContent: props.content,
+              target: {
+                kind: 'code',
+                startOffset: props.block.startOffset,
+                endOffset: props.block.endOffset
+              }
+            })
+          }
+        >
+          <Copy size={12} aria-hidden="true" />
+          Copy code
+        </button>
+      </div>
+      <pre>{props.children}</pre>
+    </div>
+  )
+}
+
+function AssistantOutputCopyStatus(props: {
+  feedback: AssistantOutputCopyFeedback | undefined
+}): React.JSX.Element {
+  const feedback = props.feedback
+  const status = feedback
+    ? assistantOutputCopyStatus(
+        feedback.phase,
+        feedback.request.input.target
+      )
+    : ''
+  return (
+    <>
+      {feedback && (
+        <div
+          className={`assistant-output-copy-feedback ${feedback.phase}`}
+          aria-hidden="true"
+        >
+          {feedback.phase === 'copied' ? (
+            <Check size={13} aria-hidden="true" />
+          ) : feedback.phase === 'failed' ? (
+            <X size={13} aria-hidden="true" />
+          ) : (
+            <Copy size={13} aria-hidden="true" />
+          )}
+          <span>{status}</span>
+        </div>
+      )}
+      <div
+        className="visually-hidden assistant-output-copy-live-region"
         role="status"
         aria-live="polite"
         aria-atomic="true"
       >
-        {assistantOutputCopyStatus(copyStatus)}
-      </span>
-    </div>
+        <span key={feedback?.revision ?? 0}>{status}</span>
+      </div>
+    </>
   )
 }
 

@@ -408,6 +408,25 @@ export type DesktopActivityItem = ActivityItem extends infer Item
 
 export type DesktopTaskItem = MessageItem | DesktopActivityItem
 
+export type CopyAssistantOutputTarget =
+  | { kind: 'response' }
+  | {
+      kind: 'code'
+      startOffset: number
+      endOffset: number
+    }
+
+/**
+ * A source-bound clipboard request. The renderer cannot provide the bytes
+ * written to the clipboard independently of a retained assistant message.
+ */
+export interface CopyAssistantOutputInput {
+  taskId: string
+  messageId: string
+  expectedContent: string
+  target: CopyAssistantOutputTarget
+}
+
 export interface Task {
   id: string
   title: string
@@ -847,6 +866,7 @@ export interface GitCommitInput {
 
 export interface DesktopApi {
   getSnapshot: () => Promise<AppSnapshot>
+  copyAssistantOutput: (input: CopyAssistantOutputInput) => Promise<boolean>
   listStateSnapshots: () => Promise<LocalStateSnapshot[]>
   exportStateSnapshot: (snapshotId: string) => Promise<boolean>
   restoreStateSnapshot: (snapshotId: string) => Promise<boolean>

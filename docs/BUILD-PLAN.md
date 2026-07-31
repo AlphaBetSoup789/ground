@@ -328,9 +328,9 @@ Requirements: GR-3, GR-8.1
   task-local draft without implying automatic or side-effect-safe replay.
 - Preserve timeline reading position while follow mode is paused, then offer one
   keyboard-accessible, task-bound action that returns to exact current output.
-- Let a user copy the exact stored assistant markdown for a visible timeline
-  message to the clipboard without starting a run, mutating a draft, or crossing
-  IPC.
+- Let a user copy the exact stored assistant markdown or one represented fenced
+  code block through a source-bound, write-only clipboard bridge without starting
+  a run or mutating a draft.
 - Bind delayed selection, handoff, and focus work to the exact current task and
   source revision so stale renderer work cannot redirect a draft or selection.
 - Keep every prompt handoff visibly editable and require a separate explicit Send
@@ -352,9 +352,18 @@ Acceptance gate:
 - Streaming output cannot force a paused reader to the bottom; explicit
   jump-to-latest activation resumes follow mode, announces the change, and cannot
   carry stale control or scroll state into another task.
-- Assistant-output copy writes only the exact stored markdown for messages that
-  already have content, announces local success or failure, and never implies
-  trusted destination handling outside Ground.
+- Assistant-output copy is absent for the latest active assistant source, writes
+  only main-re-resolved exact Markdown or represented fenced-code text after user
+  activation, and never exposes clipboard reads, arbitrary-text writes, or trusted
+  destination handling.
+- Copy status is visible and politely announced without copied content; repeated
+  attempts reannounce, focus remains stable, and late completion cannot cross
+  task, message, content, or request ownership.
+- Required native Electron evidence loads the compiled production
+  main/preload/renderer with isolated state, proves deny-all renderer clipboard
+  permissions and inactive bridge refusal, and verifies exact pointer and
+  keyboard writes without provider credentials or unrecoverable clipboard
+  mutation.
 - Input-method composition, stale async completion, responsive layout changes,
   and modal focus changes have renderer interaction evidence.
 

@@ -115,8 +115,10 @@ conformance runner; npm publication remains a separate maintainer release step.
   common workspace and provider actions
 - Near-bottom-only streaming follow with a task-bound **Jump to latest** action
   that preserves reading position until the user deliberately resumes following
-- Exact **Copy** on assistant timeline messages that writes the stored markdown
-  source to the clipboard without starting a run or leaving the renderer
+- Source-bound **Copy response** and fenced-block **Copy code** actions on stable
+  assistant output. The main process re-resolves the exact retained source before
+  a user-activated plain-text clipboard write; copying never starts a run,
+  contacts a provider, or mutates a draft
 - Reviewable failed-run recovery that copies the exact retained request into an
   empty editable task-local draft without automatically retrying or replacing
   newer text
@@ -167,11 +169,15 @@ near the bottom. Scrolling away exposes **Jump to latest** without moving the
 viewport. Follow remains paused through later messages and responsive layout
 changes until keyboard or pointer activation returns to the exact current bottom,
 resumes following, and announces the change. The control and announcement state
-reset when the selected task changes. Completed and partially streamed assistant
-messages expose **Copy**, which writes the exact stored markdown source to the
-clipboard and announces success or failure without IPC, provider contact, or draft
-changes. Unsent composer text is kept separately for each task for the current app
-process; it is not written to durable task state.
+reset when the selected task changes. Stable assistant messages expose **Copy
+response**, and each represented fenced code block exposes **Copy code**. The
+preload requires active user activation and sends only a bounded source identity;
+the main process re-resolves the exact task, message, content, and code-node
+offsets before writing plain text. The renderer receives only success or failure,
+ignores late results from stale tasks or content, and announces repeatable visible
+and polite status without moving focus. The bridge has no clipboard-read, rich
+HTML, or arbitrary-text operation. Unsent composer text is kept separately for
+each task for the current app process; it is not written to durable task state.
 While a task is running or waiting for approval, its textarea remains editable so
 the next prompt can be prepared. That text is not queued, sent, or used to steer
 the active run; the Stop control remains the only run action and `Ctrl/⌘ + Enter`
@@ -710,6 +716,7 @@ and conformance suite.
 ```bash
 npm run verify
 npm run test:e2e:renderer
+npm run smoke:clipboard:native
 npm audit --audit-level=high
 ```
 
@@ -724,15 +731,30 @@ explicit browser-preview desktop mock and drives it through Playwright. It cover
 command-palette focus/navigation, keyboard-complete task search and narrow-sidebar
 focus, native HTML provider-form validation, task-local, active-run, and
 failed-run draft preparation, Ask-to-Agent and reviewed-hunk draft handoffs,
-paused-streaming reading-position recovery, exact assistant-output clipboard copy,
-structured Git diff navigation and
-finished-run refresh, mock send/cancel, archive/search, responsive settings,
-reduced-motion and forced-color styles, plus the
+paused-streaming reading-position recovery, source-bound assistant-response and
+fenced-code clipboard copy, structured Git diff navigation and finished-run
+refresh, mock send/cancel, archive/search, responsive settings, reduced-motion
+and forced-color styles, plus the
 local-template/refused-connection recovery path into a detected CLI. The current
 suite contains 19 scenarios. CI runs it on macOS, Windows, and Linux/Xvfb. It does
-not load the production preload/main process,
-invoke native permissions, use a real provider, or replace screen-reader/manual
-accessibility testing.
+not load the production preload/main process, invoke native permissions, use a
+real provider, or replace screen-reader/manual accessibility testing. Separate
+main-service and preload tests cover canonical source re-resolution, strict
+request bounds, write failure, and user-activation gating at the production
+bridge boundary.
+
+`smoke:clipboard:native` builds Ground, launches the compiled production main
+and sandboxed preload with an isolated deterministic task, and drives the native
+assistant clipboard boundary through Electron. It verifies deny-all renderer
+permissions, inactive user-activation refusal with no clipboard change, and exact
+pointer- and keyboard-activated response/code writes through trusted IPC and
+Electron's main-process clipboard. The smoke requires no provider credentials,
+refuses to mutate clipboard formats it cannot restore, restores prior common
+text/HTML/RTF/bookmark/image content on exit, checks ownership before each
+planned mutation, and refuses restoration over detected newer content. Because
+the OS clipboard has no atomic lease, do not use it during this short smoke.
+Cleanup failure fails the smoke. This is source-build production-boundary
+evidence rather than installer or screen-reader certification.
 
 The suite covers provider event normalization and output bounds, CLI argv/event
 parsing and cancellation, native session metadata, renderer/IPC trust checks,

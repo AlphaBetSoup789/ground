@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir } from 'node:fs/promises'
 import os from 'node:os'
@@ -17,6 +17,10 @@ import type {
   TerminalSessionInfo
 } from '../shared/types'
 import { ApplicationMutationGate } from './application-mutation-gate'
+import {
+  assistantOutputClipboardIpcOperation,
+  AssistantOutputClipboardService
+} from './assistant-output-clipboard'
 import {
   GitServiceError,
   GitWorkspaceService,
@@ -565,6 +569,12 @@ function registerIpc(
   mcp: McpManager,
   dataDirectory: string
 ): void {
+  const assistantOutputClipboard = new AssistantOutputClipboardService(
+    store,
+    clipboard
+  )
+  const assistantOutputClipboardIpc =
+    assistantOutputClipboardIpcOperation(assistantOutputClipboard)
   const terminalAccess = new TerminalAccessRegistry()
   const terminalSenderCleanupInstalled = new Set<number>()
   const gitServices = new Map<string, Promise<GitWorkspaceService>>()
@@ -820,6 +830,12 @@ function registerIpc(
       activeRunEvents: activeEvents
     }
   })
+
+  handleTrusted(
+    assistantOutputClipboardIpc.channel,
+    (_event, rawInput: unknown) =>
+      assistantOutputClipboardIpc.invoke(rawInput)
+  )
 
   handleTrusted(IPC.listStateSnapshots, () =>
     store.listLocalStateSnapshots()

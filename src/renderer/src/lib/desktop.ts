@@ -11,6 +11,10 @@ import type {
   TerminalEvent,
   TerminalSessionInfo
 } from '../../../shared/types'
+import {
+  parseCopyAssistantOutputInput,
+  resolveAssistantOutputCopyText
+} from '../../../shared/assistant-output-clipboard'
 import { resolveDesktopBridge } from './desktop-bridge'
 
 const previewBuild =
@@ -18,6 +22,8 @@ const previewBuild =
 const previewGitReadControlEvent =
   'ground:preview-git-read-control'
 const previewGitReadEvent = 'ground:preview-git-read'
+const previewClipboardControlEvent =
+  'ground:preview-clipboard-control'
 const previewFailedRunPrompt =
   'Trigger deterministic preview failure'
 const listeners = new Set<(event: DesktopRunEventEnvelope) => void>()
@@ -39,6 +45,8 @@ const pendingMockGitReads = new Map<
 >()
 let mockGitReadGateEnabled = false
 let mockGitReadRequestId = 0
+let mockClipboardBehavior: 'write' | 'reject' | 'hold' = 'write'
+const pendingMockClipboardWrites = new Set<() => void>()
 const timestamp = new Date().toISOString()
 const previewUnstagedDiff = `diff --git a/src/renderer/src/App.tsx b/src/renderer/src/App.tsx
 index 1234567..89abcde 100644
@@ -157,7 +165,7 @@ let mockSnapshot: AppSnapshot = {
           kind: 'message',
           role: 'assistant',
           content:
-            'I found the friction: the page offers three equal-weight actions before the user has any data. I’d make **Create your first project** the single primary path, keep import secondary, and move documentation into supporting copy.\n\nThe implementation is scoped to the empty-state component and its styles.',
+            'I found the friction: the page offers three equal-weight actions before the user has any data. I’d make **Create your first project** the single primary path, keep import secondary, and move documentation into supporting copy.\n\nThe implementation is scoped to the empty-state component and its styles.\n\n```ts\nconst greeting = \"Hold your ground 🌱\"\n\nconsole.log(greeting)\n```\n',
           createdAt: timestamp
         }
       ]
@@ -309,15 +317,75 @@ async function waitForPreviewGitRead(
   }
 }
 
+function handlePreviewClipboardControl(event: Event): void {
+  if (!(event instanceof CustomEvent)) return
+  const detail = event.detail as unknown
+  if (!detail || typeof detail !== 'object') return
+  const action = (detail as Record<string, unknown>).action
+  if (action === 'reject') {
+    mockClipboardBehavior = 'reject'
+    return
+  }
+  if (action === 'hold') {
+    mockClipboardBehavior = 'hold'
+    return
+  }
+  if (action === 'release' || action === 'reset') {
+    mockClipboardBehavior = 'write'
+    for (const release of pendingMockClipboardWrites) release()
+    pendingMockClipboardWrites.clear()
+  }
+}
+
 if (previewBuild) {
   window.addEventListener(
     previewGitReadControlEvent,
     handlePreviewGitReadControl
   )
+  window.addEventListener(
+    previewClipboardControlEvent,
+    handlePreviewClipboardControl
+  )
 }
 
 const mockApi: DesktopApi = {
   getSnapshot: async () => clone(mockSnapshot),
+  copyAssistantOutput: async (rawInput) => {
+    let input
+    try {
+      input = parseCopyAssistantOutputInput(rawInput)
+    } catch {
+      return false
+    }
+    const task = mockSnapshot.tasks.find(
+      (candidate) => candidate.id === input.taskId
+    )
+    if (!task) return false
+    let exact = resolveAssistantOutputCopyText(task, input)
+    if (exact === undefined) return false
+    if (mockClipboardBehavior === 'reject') return false
+    if (mockClipboardBehavior === 'hold') {
+      await new Promise<void>((resolve) => {
+        pendingMockClipboardWrites.add(resolve)
+      })
+      const currentTask = mockSnapshot.tasks.find(
+        (candidate) => candidate.id === input.taskId
+      )
+      if (!currentTask) return false
+      exact = resolveAssistantOutputCopyText(currentTask, input)
+      if (exact === undefined) return false
+    }
+
+    // Browser preview has no privileged preload/main process. This explicit
+    // fixture-only write lets Electron E2E assert exact OS clipboard bytes;
+    // production always uses the source-bound DesktopApi IPC operation.
+    try {
+      await navigator.clipboard.writeText(exact)
+      return true
+    } catch {
+      return false
+    }
+  },
   listStateSnapshots: async () => [
     {
       id: 'state_snapshot_00000000-0000-4000-8000-000000000001',

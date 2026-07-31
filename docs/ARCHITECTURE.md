@@ -620,9 +620,19 @@ control outside the live log. Paused follow remains sticky through later content
 and geometry changes. Activation moves the exact current task viewport to its
 current bottom, restores follow mode, transfers focus to the log, and emits a
 separate polite status; task identity gates presentation and activation.
-Assistant timeline messages with stored content expose a renderer-only **Copy**
-control that writes the exact markdown source to the clipboard and announces
-success or failure without IPC, provider contact, draft mutation, or run changes.
+Stable assistant timeline messages expose **Copy response**, and represented
+fenced code blocks expose **Copy code**. The renderer sends a bounded task,
+message, expected-content, and target-offset identity through a dedicated
+write-only preload method that requires active user activation. Main applies the
+normal trusted-sender check, re-reads the canonical task, rejects a changed,
+missing, or latest-active assistant source, resolves the selected response or
+fenced node with the pinned Markdown parser, and performs a synchronous plain-text
+clipboard write. The preload exposes no clipboard read, arbitrary-text write, or
+rich-HTML primitive. Renderer feedback is request-, task-, message-, and
+content-bound so late completion cannot announce in another task; the fixed
+success/failure status contains none of the copied text and does not move focus.
+This reviewed boundary is recorded in
+[#42](https://github.com/AlphaBetSoup789/ground/issues/42).
 Responsive styles, forced-color treatment, focus-visible states, and
 reduced-motion rules are part of the public-preview baseline; they are not a claim
 of complete cross-platform accessibility certification.
@@ -632,12 +642,20 @@ explicit browser-preview desktop mock. Its 19 scenarios cover palette and
 task-search keyboard/focus, including narrow-sidebar focus, provider-form labels
 and Chromium constraint validation, local-template/refused-connection recovery
 into a detected CLI, task-local, active-run, and failed-run draft preparation,
-Ask-to-Agent and reviewed-hunk handoffs, paused-streaming jump recovery, exact
-assistant-output clipboard copy, structured Git diff navigation and request-bound
-finished-run refresh including failure/retry and late-task isolation,
-deterministic send/cancel, archive/search, responsive settings, reduced-motion
-CSS, and forced-color connection-path selection. It does not load production
-main/preload authority or replace manual screen-reader/native review.
+Ask-to-Agent and reviewed-hunk handoffs, paused-streaming jump recovery,
+source-bound assistant-response and fenced-code clipboard copy, structured Git
+diff navigation and request-bound finished-run refresh including failure/retry
+and late-task isolation, deterministic send/cancel, archive/search, responsive
+settings, reduced-motion CSS, and forced-color connection-path selection. It
+does not load production main/preload authority or replace manual
+screen-reader/native review. Production main-service and preload unit tests
+separately exercise canonical-source resolution, failure, request bounds, and
+user-activation gating. A separate source-build native smoke loads the compiled
+production main, renderer, and sandboxed preload with a temporary state profile;
+it proves deny-all renderer clipboard permissions, inactive bridge refusal, and
+exact response/fenced-code writes through trusted IPC and Electron's
+main-process clipboard. That smoke runs in macOS, Windows, and Linux/Xvfb CI and
+does not claim packaged-installer or screen-reader certification.
 
 ## Current composition and migration
 

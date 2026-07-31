@@ -18,6 +18,7 @@ import {
   Trash2
 } from 'lucide-react'
 import type {
+  CopyAssistantOutputInput,
   DesktopActivityItem,
   DesktopTask,
   ProviderProfile,
@@ -59,6 +60,9 @@ interface TaskViewProps {
     item: DesktopActivityItem,
     approved: boolean
   ) => Promise<void>
+  onCopyAssistantOutput: (
+    input: CopyAssistantOutputInput
+  ) => Promise<boolean>
   onOpenSettings: (providerId?: string) => void
   onImportTask: () => void
   onForkTask: () => void
@@ -509,6 +513,7 @@ export function TaskView(props: TaskViewProps): React.JSX.Element {
           props.onUpdateTask({ includeImportedHistory: include })
         }
         onContinueInAgent={props.onContinueInAgent}
+        onCopyAssistantOutput={props.onCopyAssistantOutput}
       />
 
       <Composer

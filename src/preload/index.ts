@@ -9,9 +9,16 @@ import type {
   DesktopRunEventEnvelope,
   TerminalEvent
 } from '../shared/types'
+import { createCopyAssistantOutputInvoker } from './user-activation'
+
+const copyAssistantOutput = createCopyAssistantOutputInvoker({
+  currentUserActivation: () => navigator.userActivation,
+  invoke: (channel, input) => ipcRenderer.invoke(channel, input)
+})
 
 const api: DesktopApi = {
   getSnapshot: () => ipcRenderer.invoke(IPC.getSnapshot),
+  copyAssistantOutput,
   listStateSnapshots: () => ipcRenderer.invoke(IPC.listStateSnapshots),
   exportStateSnapshot: (snapshotId) =>
     ipcRenderer.invoke(IPC.exportStateSnapshot, snapshotId),
