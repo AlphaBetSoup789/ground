@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { realpathSync } from 'node:fs'
+import { realpathSync, statSync } from 'node:fs'
 import {
   lstat,
   mkdir,
@@ -154,10 +154,22 @@ function sameResolvedParent(
   candidate: string,
   expectedParent: string
 ): boolean {
+  const candidateParent = path.dirname(candidate)
   try {
+    const candidateDetails = statSync(candidateParent, { bigint: true })
+    const expectedDetails = statSync(expectedParent, { bigint: true })
+    if (
+      candidateDetails.isDirectory() &&
+      expectedDetails.isDirectory() &&
+      (candidateDetails.dev !== 0n || candidateDetails.ino !== 0n) &&
+      candidateDetails.dev === expectedDetails.dev &&
+      candidateDetails.ino === expectedDetails.ino
+    ) {
+      return true
+    }
     return samePath(
-      realpathSync(path.dirname(candidate)),
-      realpathSync(expectedParent)
+      realpathSync.native(candidateParent),
+      realpathSync.native(expectedParent)
     )
   } catch {
     return false
