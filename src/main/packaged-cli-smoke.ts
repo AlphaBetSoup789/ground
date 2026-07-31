@@ -135,7 +135,8 @@ function samePath(left: string, right: string): boolean {
   const resolvedLeft = path.resolve(left)
   const resolvedRight = path.resolve(right)
   return process.platform === 'win32'
-    ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase()
+    ? path.toNamespacedPath(resolvedLeft).toLowerCase() ===
+        path.toNamespacedPath(resolvedRight).toLowerCase()
     : resolvedLeft === resolvedRight
 }
 
@@ -153,7 +154,14 @@ function sameResolvedParent(
   candidate: string,
   expectedParent: string
 ): boolean {
-  return samePath(path.dirname(candidate), expectedParent)
+  try {
+    return samePath(
+      realpathSync(path.dirname(candidate)),
+      realpathSync(expectedParent)
+    )
+  } catch {
+    return false
+  }
 }
 
 function requireSmokeBoundary(config: PackagedSmokeConfig): void {
