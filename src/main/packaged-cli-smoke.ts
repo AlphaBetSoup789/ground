@@ -248,11 +248,17 @@ export class PackagedCliSmokeTrustAuthority {
       sameResolvedParent(
         spec.fixturePath,
         path.join(this.canonicalDirectory, 'recognized-cli')
-      ) &&
-        sameResolvedParent(spec.workspacePath, this.canonicalDirectory) &&
-        /^[a-f0-9]{64}$/u.test(spec.runnerSha256) &&
+      ),
+      'Packaged CLI smoke fixture escaped its canonical directory'
+    )
+    requireCondition(
+      sameResolvedParent(spec.workspacePath, this.canonicalDirectory),
+      'Packaged CLI smoke workspace escaped its canonical directory'
+    )
+    requireCondition(
+      /^[a-f0-9]{64}$/u.test(spec.runnerSha256) &&
         /^[a-f0-9]{64}$/u.test(spec.fixtureSha256),
-      'Packaged CLI smoke trust authority received an invalid fixture boundary'
+      'Packaged CLI smoke trust authority received invalid fixture hashes'
     )
     this.spec = {
       ...spec,
