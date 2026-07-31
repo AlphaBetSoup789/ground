@@ -677,12 +677,29 @@ An isolated `src/main/event-store` module now provides a transactional SQLite
 foundation: sequenced append-only events, a SHA-256 event chain, deterministic
 materialized projection replay, exact schema/version gates, coordinated writers,
 an external head witness, verified backups, single-link protected-file validation,
-durable publication-alias cleanup, and copy-on-migrate from JSON v2. It is not
-constructed by the production desktop, and its semantic event vocabulary is
-currently limited to `legacy-state.bootstrapped` and
-`settings.sidebar-collapsed-set`. Tasks, runs, activities, approvals, managed
-executions, provider revisions, recovery checkpoints, and their compaction policy
-therefore remain on the JSON `StateStore` until a later production cutover.
+durable publication-alias cleanup, and copy-on-migrate from JSON v2.
+
+Its semantic vocabulary now covers the durable domains the JSON `StateStore`
+owns: task lifecycle and timeline items, provider profiles and secret
+transitions, MCP profiles, settings, managed executions, and exact
+pending-secret-cleanup references. Every fact is a named event with a bounded,
+`strict` payload schema and an exact entity identifier. There is deliberately no
+generic state replacement, JSON-patch, or whole-snapshot mutation event, so a
+future capability must add a named fact rather than widen an escape hatch.
+
+Two properties hold across that vocabulary. Entity bodies are structurally
+screened for credential-bearing key names before encoding, because the
+projection schema's key-stripping happens after a payload would already be
+durable in an append-only ledger; and `parsePersistedState` remains the single
+authority on entity shape, so the ledger cannot drift from the state schema.
+Managed executions keep outcome-unknown evidence immutable: only an exact
+started claim can complete, completion must match the started action hash, and
+nothing can rewrite an interrupted operation into an outcome.
+
+The store is still not constructed by the production desktop. Tasks, runs,
+approvals, and provider revisions continue to be served from the JSON
+`StateStore` until every production mutation path has event coverage and the
+migration path is exercised end to end, so the cutover remains a later slice.
 
 Native package workflows target macOS arm64/x64, Windows x64, and Linux x64. A
 fixed packaged smoke verifies app identity, OS-encrypted vault round-trip, the
@@ -734,9 +751,9 @@ the current aggregate. Neither evidence set certifies signing, notarization,
 DMG/DEB installation, renderer accessibility, live providers/CLIs, or supported
 distribution.
 
-The next storage step is production composition and semantic task/run coverage on
-top of the audited SQLite foundation, followed by bounded compaction and recovery
-UI. Stronger OS-specific confinement, handle-based executable authority, durable
+The next storage step is production composition and migration on top of the
+audited SQLite foundation and its semantic vocabulary, followed by interrupted-run
+recovery classification and UI, then bounded compaction and checkpoints. Stronger OS-specific confinement, handle-based executable authority, durable
 terminal/background-process state, and authenticated MCP are still future
 execution boundaries.
 

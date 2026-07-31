@@ -15,6 +15,7 @@ import {
   EventStoreCorruptionError,
   EventStoreVersionError
 } from './errors'
+import { SEMANTIC_PAYLOAD_CODECS, toEventPayload } from './event-payloads'
 import {
   EVENT_SCHEMA_VERSION,
   MAX_EVENT_PAYLOAD_BYTES,
@@ -45,12 +46,6 @@ const bootstrapPayloadSchema = z
     ),
     normalizedStateSha256: sha256Schema,
     state: z.unknown()
-  })
-  .strict()
-
-const sidebarCollapsedPayloadSchema = z
-  .object({
-    collapsed: z.boolean()
   })
   .strict()
 
@@ -172,35 +167,28 @@ export function encodeLedgerEvent(event: GroundLedgerEvent): EncodedLedgerEvent 
         )
       }
     }
-    case 'settings.sidebar-collapsed-set': {
-      const parsed = sidebarCollapsedPayloadSchema.safeParse({
-        collapsed: event.collapsed
-      })
+    default: {
+      const codec = SEMANTIC_PAYLOAD_CODECS[event.kind]
+      if (!codec) {
+        throw new EventCodecError(
+          `Unsupported ledger event kind ${String(event.kind)}`
+        )
+      }
+      const parsed = codec.schema.safeParse(toEventPayload(event))
       if (!parsed.success) {
         throw new EventCodecError(
-          'Sidebar-collapse event failed schema validation',
+          `Ledger event ${event.kind} failed schema validation`,
           { cause: parsed.error }
         )
       }
       return {
-        event: {
-          kind: event.kind,
-          collapsed: parsed.data.collapsed
-        },
+        event: { kind: event.kind, ...parsed.data } as GroundLedgerEvent,
         kind: event.kind,
-        entityId: 'settings',
+        entityId: codec.entityId(parsed.data),
         payloadJson: encodeCanonicalJson(parsed.data, {
           maxBytes: MAX_EVENT_PAYLOAD_BYTES
         })
       }
-    }
-    default: {
-      const neverEvent: never = event
-      throw new EventCodecError(
-        `Unsupported ledger event kind ${String(
-          (neverEvent as { kind?: unknown }).kind
-        )}`
-      )
     }
   }
 }
@@ -237,26 +225,28 @@ export function decodeLedgerEvent(
       }
       return parseBootstrapEvent({ kind, ...(payload as object) })
     }
-    case 'settings.sidebar-collapsed-set': {
-      if (entityId !== 'settings') {
-        throw new EventStoreCorruptionError(
-          'Sidebar-collapse event has the wrong entity ID'
+    default: {
+      const codec = SEMANTIC_PAYLOAD_CODECS[kind as EventKind]
+      if (!codec) {
+        throw new EventStoreVersionError(
+          'event',
+          `Unsupported ledger event kind ${kind}`
         )
       }
-      const parsed = sidebarCollapsedPayloadSchema.safeParse(payload)
+      const parsed = codec.schema.safeParse(payload)
       if (!parsed.success) {
         throw new EventStoreCorruptionError(
-          'Sidebar-collapse event payload failed schema validation',
+          `Ledger event ${kind} payload failed schema validation`,
           { cause: parsed.error }
         )
       }
-      return { kind, collapsed: parsed.data.collapsed }
+      if (entityId !== codec.entityId(parsed.data)) {
+        throw new EventStoreCorruptionError(
+          `Ledger event ${kind} has the wrong entity ID`
+        )
+      }
+      return { kind, ...parsed.data } as GroundLedgerEvent
     }
-    default:
-      throw new EventStoreVersionError(
-        'event',
-        `Unsupported ledger event kind ${kind}`
-      )
   }
 }
 
