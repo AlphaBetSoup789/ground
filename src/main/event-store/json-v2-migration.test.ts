@@ -1,7 +1,9 @@
 import {
+  link,
   lstat,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   symlink,
   writeFile
@@ -100,6 +102,75 @@ describe('JSON v2 copy-on-migrate', () => {
     await store.close()
   })
 
+  it('refuses to use a destination SQLite sidecar as the migration source and preserves it exactly', async () => {
+    const directory = await temporaryDirectory()
+    const databasePath = path.join(directory, 'ground.sqlite')
+    const sourcePath = `${databasePath}-wal`
+    const source = `${JSON.stringify(legacyState(), null, 2)}\n`
+    await writeFile(sourcePath, source, { encoding: 'utf8', mode: 0o600 })
+
+    await expect(
+      migrateJsonV2ToSqlite({
+        sourceJsonPath: sourcePath,
+        databasePath
+      })
+    ).rejects.toBeInstanceOf(EventStoreConflictError)
+    expect(await readFile(sourcePath, 'utf8')).toBe(source)
+    await expect(lstat(databasePath)).rejects.toMatchObject({
+      code: 'ENOENT'
+    })
+  })
+
+  it('rejects a migration source hard-linked through the destination WAL namespace without changing either link', async () => {
+    const directory = await temporaryDirectory()
+    const databasePath = path.join(directory, 'ground.sqlite')
+    const sourcePath = path.join(directory, 'state.json')
+    const reservedWalPath = `${databasePath}-wal`
+    const source = `${JSON.stringify(legacyState(), null, 2)}\n`
+    await writeFile(sourcePath, source, { encoding: 'utf8', mode: 0o600 })
+    await link(sourcePath, reservedWalPath)
+
+    await expect(
+      migrateJsonV2ToSqlite({
+        sourceJsonPath: sourcePath,
+        databasePath
+      })
+    ).rejects.toThrow(/hard-link alias/)
+    expect(await readFile(sourcePath, 'utf8')).toBe(source)
+    expect(await readFile(reservedWalPath, 'utf8')).toBe(source)
+    await expect(lstat(databasePath)).rejects.toMatchObject({
+      code: 'ENOENT'
+    })
+  })
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a destination WAL symlink to the migration source before selection and preserves the source',
+    async () => {
+      const directory = await temporaryDirectory()
+      const databasePath = path.join(directory, 'ground.sqlite')
+      const sourcePath = path.join(directory, 'state.json')
+      const reservedWalPath = `${databasePath}-wal`
+      const source = `${JSON.stringify(legacyState(), null, 2)}\n`
+      await writeFile(sourcePath, source, {
+        encoding: 'utf8',
+        mode: 0o600
+      })
+      await symlink(sourcePath, reservedWalPath)
+
+      await expect(
+        migrateJsonV2ToSqlite({
+          sourceJsonPath: sourcePath,
+          databasePath
+        })
+      ).rejects.toThrow(/symbolic or non-regular/)
+      expect(await readFile(sourcePath, 'utf8')).toBe(source)
+      expect((await lstat(reservedWalPath)).isSymbolicLink()).toBe(true)
+      await expect(lstat(databasePath)).rejects.toMatchObject({
+        code: 'ENOENT'
+      })
+    }
+  )
+
   it('can retry after a pre-selection witness publication fault', async () => {
     const directory = await temporaryDirectory()
     const sourcePath = path.join(directory, 'state.json')
@@ -132,6 +203,29 @@ describe('JSON v2 copy-on-migrate', () => {
     expect(await readFile(sourcePath, 'utf8')).toBe(source)
   })
 
+  it('removes every temporary SQLite database, sidecar, and coordination file after a pre-publication failure', async () => {
+    const directory = await temporaryDirectory()
+    const sourcePath = path.join(directory, 'state.json')
+    const databasePath = path.join(directory, 'ground.sqlite')
+    await writeFile(sourcePath, JSON.stringify(legacyState()), {
+      encoding: 'utf8',
+      mode: 0o600
+    })
+
+    await expect(
+      migrateJsonV2ToSqlite({
+        sourceJsonPath: sourcePath,
+        databasePath,
+        fault: (point) => {
+          if (point === 'after-temporary-created') {
+            throw new Error('stop after temporary creation')
+          }
+        }
+      })
+    ).rejects.toBeInstanceOf(JsonV2MigrationError)
+    expect((await readdir(directory)).sort()).toEqual(['state.json'])
+  })
+
   it('leaves a published selected database fail-closed after a post-publication fault', async () => {
     const directory = await temporaryDirectory()
     const sourcePath = path.join(directory, 'state.json')
@@ -161,6 +255,42 @@ describe('JSON v2 copy-on-migrate', () => {
         databasePath
       })
     ).rejects.toBeInstanceOf(EventStoreConflictError)
+  })
+
+  it('reports a post-selection migration-cleanup failure as persistence uncertainty after still cleaning temporary files', async () => {
+    const directory = await temporaryDirectory()
+    const sourcePath = path.join(directory, 'state.json')
+    const databasePath = path.join(directory, 'ground.sqlite')
+    await writeFile(sourcePath, JSON.stringify(legacyState()), {
+      encoding: 'utf8',
+      mode: 0o600
+    })
+
+    await expect(
+      migrateJsonV2ToSqlite({
+        sourceJsonPath: sourcePath,
+        databasePath,
+        fault: (point) => {
+          if (point === 'before-migration-temporary-cleanup') {
+            throw new Error('injected migration cleanup failure')
+          }
+        }
+      })
+    ).rejects.toBeInstanceOf(EventStorePersistenceUncertainError)
+    expect(
+      (await readdir(directory)).filter(
+        (entry) =>
+          entry.startsWith('.ground.sqlite.') ||
+          entry.includes('.migration.sqlite')
+      )
+    ).toEqual([])
+
+    const selected = await SqliteEventStore.open({
+      databasePath,
+      integrityCheck: 'full'
+    })
+    expect(selected.getProjection()).toEqual(legacyState())
+    await selected.close()
   })
 
   it('fails closed on future, skipped, and malformed source versions', async () => {
@@ -202,6 +332,6 @@ describe('JSON v2 copy-on-migrate', () => {
         sourceJsonPath: linkedSource,
         databasePath
       })
-    ).rejects.toThrow(/not a regular file/)
+    ).rejects.toThrow(/symbolic or non-regular/)
   })
 })

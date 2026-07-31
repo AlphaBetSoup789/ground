@@ -112,12 +112,19 @@ export type EventStoreFaultPoint =
   | 'after-commit'
   | 'before-witness-publish'
   | 'after-witness-rename'
+  | 'after-create-witness-published'
+  | 'after-create-database-published'
+  | 'before-create-temporary-cleanup'
+  | 'before-backup-database-link'
+  | 'after-backup-database-published'
+  | 'before-backup-temporary-cleanup'
 
 export interface EventStoreDependencies {
   readonly now?: () => string
   readonly createId?: () => string
   readonly fault?: (point: EventStoreFaultPoint) => void
   readonly witnessStore?: HeadWitnessStore
+  readonly onBackupProgress?: (temporaryDatabasePath: string) => void
 }
 
 export interface HeadWitnessStore {
@@ -126,8 +133,13 @@ export interface HeadWitnessStore {
     filePath: string,
     witness: HeadWitness,
     options?: {
-      readonly beforeRename?: () => void
-      readonly afterRename?: () => void
+      readonly beforeRename?: () => void | Promise<void>
+      readonly afterRename?: () => void | Promise<void>
+      /**
+       * Omit for an unconditional forensic/test publication. `null` requires
+       * absence; a witness requires an exact current-value match.
+       */
+      readonly expected?: HeadWitness | null
     }
   ): Promise<void>
 }
@@ -160,6 +172,7 @@ export type JsonV2MigrationFaultPoint =
   | 'after-temporary-verified'
   | 'after-witness-published'
   | 'after-database-published'
+  | 'before-migration-temporary-cleanup'
 
 export interface JsonV2MigrationResult {
   readonly sourceSha256: string

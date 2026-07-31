@@ -5,6 +5,7 @@ import {
   lstat,
   mkdir,
   open,
+  rmdir,
   unlink
 } from 'node:fs/promises'
 import path from 'node:path'
@@ -61,10 +62,75 @@ export async function createPrivateTemporaryPath(
   )
 }
 
+export async function createPrivateTemporaryDirectory(
+  targetPath: string,
+  suffix: string
+): Promise<string> {
+  const parentDirectory = await ensureParentDirectory(targetPath)
+  const directory = path.join(
+    parentDirectory,
+    `.${path.basename(targetPath)}.${randomUUID()}.${suffix}`
+  )
+  await mkdir(directory, { mode: 0o700 })
+  try {
+    const details = await lstat(directory)
+    if (!details.isDirectory() || details.isSymbolicLink()) {
+      throw new EventStoreCorruptionError(
+        'Temporary event-store staging path is not a directory'
+      )
+    }
+    if (
+      process.platform !== 'win32' &&
+      (details.mode & 0o777) !== 0o700
+    ) {
+      await chmod(directory, 0o700)
+    }
+    return directory
+  } catch (error) {
+    try {
+      await rmdir(directory)
+    } catch (cleanupError) {
+      throw new EventStoreCorruptionError(
+        'Temporary event-store staging validation and cleanup both failed',
+        { cause: new AggregateError([error, cleanupError]) }
+      )
+    }
+    throw error
+  }
+}
+
+export async function removePrivateTemporaryDirectory(
+  directory: string
+): Promise<void> {
+  await rmdir(directory).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') throw error
+  })
+}
+
 export async function removeIfPresent(filePath: string): Promise<void> {
   await unlink(filePath).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== 'ENOENT') throw error
   })
+}
+
+export async function removeSqliteFileSet(
+  databasePath: string
+): Promise<void> {
+  const results = await Promise.allSettled(
+    ['', '-wal', '-shm', '-journal'].map((suffix) =>
+      removeIfPresent(`${databasePath}${suffix}`)
+    )
+  )
+  const failures = results.flatMap((result) =>
+    result.status === 'rejected' ? [result.reason] : []
+  )
+  if (failures.length === 1) throw failures[0]
+  if (failures.length > 1) {
+    throw new AggregateError(
+      failures,
+      'SQLite file-set cleanup failed'
+    )
+  }
 }
 
 export async function syncDirectory(directory: string): Promise<void> {

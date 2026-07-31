@@ -20,6 +20,7 @@ import {
   createPrivateTemporaryPath,
   isMissingFileError,
   removeIfPresent,
+  removeSqliteFileSet,
   syncDirectory
 } from './private-files'
 import { SqliteEventStore } from './sqlite-event-store'
@@ -34,6 +35,12 @@ import {
   defaultWitnessPath,
   fileHeadWitnessStore
 } from './witness'
+import {
+  assertCoordinationPathNamespace,
+  withLedgerWriterLock,
+  witnessPublicationLockPath,
+  writerLockPath
+} from './writer-lock'
 
 const READ_CHUNK_BYTES = 64 * 1024
 
@@ -61,6 +68,11 @@ export async function migrateJsonV2ToSqlite(
     input.databasePath,
     witnessPath
   )
+  await assertCoordinationPathNamespace(
+    [input.databasePath],
+    [witnessPath],
+    [input.sourceJsonPath]
+  )
   await assertDatabaseAbsent(input.databasePath)
 
   const source = await readJsonV2Source(input.sourceJsonPath)
@@ -73,6 +85,8 @@ export async function migrateJsonV2ToSqlite(
   const temporaryWitnessPath = defaultWitnessPath(temporaryDatabasePath)
   let databasePublished = false
   let finalWitnessPublished = false
+  let result: JsonV2MigrationResult | undefined
+  const failures: unknown[] = []
 
   try {
     const store = await SqliteEventStore.create({
@@ -112,18 +126,6 @@ export async function migrateJsonV2ToSqlite(
     }
     input.fault?.('after-temporary-verified')
 
-    const sourceBeforePublish = await readJsonV2Source(input.sourceJsonPath)
-    if (
-      sourceBeforePublish.sourceByteLength !== source.sourceByteLength ||
-      sourceBeforePublish.sourceSha256 !== source.sourceSha256 ||
-      sourceBeforePublish.normalizedStateSha256 !==
-        source.normalizedStateSha256
-    ) {
-      throw new JsonV2MigrationError(
-        'Legacy JSON state changed during migration; publication was refused'
-      )
-    }
-
     const witnessStore =
       input.dependencies?.witnessStore ?? fileHeadWitnessStore
     const temporaryWitness = await witnessStore.read(
@@ -135,15 +137,38 @@ export async function migrateJsonV2ToSqlite(
       )
     }
     assertWitnessMatchesHead(temporaryWitness, verifiedHead)
-    await witnessStore.publish(witnessPath, temporaryWitness)
-    finalWitnessPublished = true
-    input.fault?.('after-witness-published')
+    await withLedgerWriterLock(input.databasePath, async () => {
+      await assertDatabaseAbsent(input.databasePath)
+      const sourceBeforePublish = await readJsonV2Source(
+        input.sourceJsonPath
+      )
+      if (
+        sourceBeforePublish.sourceByteLength !== source.sourceByteLength ||
+        sourceBeforePublish.sourceSha256 !== source.sourceSha256 ||
+        sourceBeforePublish.normalizedStateSha256 !==
+          source.normalizedStateSha256
+      ) {
+        throw new JsonV2MigrationError(
+          'Legacy JSON state changed during migration; publication was refused'
+        )
+      }
 
-    await link(temporaryDatabasePath, input.databasePath)
-    databasePublished = true
-    await syncDirectory(path.dirname(input.databasePath))
-    await assertPrivateRegularFile(input.databasePath, MAX_DATABASE_BYTES)
-    input.fault?.('after-database-published')
+      const existingFinalWitness = await witnessStore.read(witnessPath)
+      await witnessStore.publish(witnessPath, temporaryWitness, {
+        expected: existingFinalWitness ?? null
+      })
+      finalWitnessPublished = true
+      input.fault?.('after-witness-published')
+
+      await link(temporaryDatabasePath, input.databasePath)
+      databasePublished = true
+      await syncDirectory(path.dirname(input.databasePath))
+      await assertPrivateRegularFile(
+        input.databasePath,
+        MAX_DATABASE_BYTES
+      )
+      input.fault?.('after-database-published')
+    })
 
     const selected = await SqliteEventStore.open({
       databasePath: input.databasePath,
@@ -161,7 +186,7 @@ export async function migrateJsonV2ToSqlite(
           'Published SQLite head changed after verified migration'
         )
       }
-      return {
+      result = {
         sourceSha256: source.sourceSha256,
         normalizedStateSha256: source.normalizedStateSha256,
         sourceByteLength: source.sourceByteLength,
@@ -171,6 +196,40 @@ export async function migrateJsonV2ToSqlite(
       await selected.close()
     }
   } catch (error) {
+    failures.push(error)
+  }
+
+  try {
+    input.fault?.('before-migration-temporary-cleanup')
+  } catch (error) {
+    failures.push(error)
+  }
+  try {
+    const cleanupResults = await Promise.allSettled([
+      removeSqliteFileSet(temporaryDatabasePath),
+      removeIfPresent(temporaryWitnessPath),
+      removeSqliteFileSet(writerLockPath(temporaryDatabasePath)),
+      removeSqliteFileSet(
+        witnessPublicationLockPath(temporaryWitnessPath)
+      )
+    ])
+    for (const cleanupResult of cleanupResults) {
+      if (cleanupResult.status === 'rejected') {
+        failures.push(cleanupResult.reason)
+      }
+    }
+  } catch (error) {
+    failures.push(error)
+  }
+
+  if (failures.length > 0) {
+    const error =
+      failures.length === 1
+        ? failures[0]
+        : new AggregateError(
+            failures,
+            'SQLite migration and its temporary cleanup both failed'
+          )
     if (databasePublished) {
       throw new EventStorePersistenceUncertainError(
         'SQLite migration database was published; selected-engine verification must succeed before retry',
@@ -184,10 +243,13 @@ export async function migrateJsonV2ToSqlite(
         : 'SQLite JSON v2 migration failed before database selection',
       { cause: error }
     )
-  } finally {
-    await removeIfPresent(temporaryDatabasePath)
-    await removeIfPresent(temporaryWitnessPath)
   }
+  if (!result) {
+    throw new JsonV2MigrationError(
+      'SQLite JSON v2 migration completed without a result'
+    )
+  }
+  return result
 }
 
 async function readJsonV2Source(
@@ -346,6 +408,11 @@ function assertDistinctMigrationPaths(
   if (distinct.size !== 3) {
     throw new JsonV2MigrationError(
       'Legacy JSON, SQLite database, and head witness require distinct paths'
+    )
+  }
+  if (path.resolve(witnessPath) === path.resolve(writerLockPath(databasePath))) {
+    throw new JsonV2MigrationError(
+      'Migration witness path is reserved for the ledger writer lock'
     )
   }
 }

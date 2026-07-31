@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { lstatSync } from 'node:fs'
 import { link, lstat } from 'node:fs/promises'
 import path from 'node:path'
 import {
@@ -7,12 +8,14 @@ import {
 } from 'node:sqlite'
 import { z } from 'zod'
 import type { PersistedStateData } from '../state-schema'
+import { encodeCanonicalJson } from './canonical-json'
 import {
   decodeProjection,
   encodeLedgerEvent,
   encodeProjection,
   hashLedgerEventRecord,
-  parseLedgerEventRecord
+  parseLedgerEventRecord,
+  sha256
 } from './codec'
 import {
   EventCodecError,
@@ -26,9 +29,12 @@ import {
 import {
   assertPrivateRegularFile,
   createPrivateEmptyFile,
+  createPrivateTemporaryDirectory,
   createPrivateTemporaryPath,
   isMissingFileError,
   removeIfPresent,
+  removePrivateTemporaryDirectory,
+  removeSqliteFileSet,
   syncDirectory
 } from './private-files'
 import {
@@ -65,10 +71,19 @@ import {
   defaultWitnessPath,
   fileHeadWitnessStore
 } from './witness'
+import {
+  assertCoordinationPathNamespace,
+  withLedgerWriterLock,
+  withLedgerWriterLocks,
+  witnessPublicationLockPath,
+  writerLockPath
+} from './writer-lock'
 
 const GROUND_SQLITE_APPLICATION_ID = 1_196_576_324
 const SQLITE_BUSY_TIMEOUT_MS = 5_000
 const SQLITE_WAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024
+const LEDGER_SCHEMA_SHA256 =
+  'e26a16144ba99e4a6190f4a719de9542b20fdd897c931c0817eba10251bf380c'
 
 const identifierSchema = z.string().min(1).max(200)
 const timestampSchema = z.iso.datetime({ offset: true })
@@ -90,6 +105,15 @@ interface ProjectionRow {
   readonly state_json: string
   readonly state_sha256: string
 }
+
+interface SchemaManifestRow {
+  readonly type: string
+  readonly name: string
+  readonly tableName: string
+  readonly sql: string | null
+}
+
+let expectedSchemaManifestJson: string | undefined
 
 export class SqliteEventStore {
   private sealed = false
@@ -115,7 +139,174 @@ export class SqliteEventStore {
     const witnessPath =
       input.witnessPath ?? defaultWitnessPath(input.databasePath)
     assertSeparatePaths(input.databasePath, witnessPath)
+    await assertCoordinationPathNamespace(
+      [input.databasePath],
+      [witnessPath]
+    )
     const dependencies = normalizeDependencies(input.dependencies)
+    const encodedBootstrap = encodeLedgerEvent(input.bootstrap)
+    if (encodedBootstrap.kind !== 'legacy-state.bootstrapped') {
+      throw new EventCodecError(
+        'A new SQLite ledger requires a semantic legacy-state bootstrap'
+      )
+    }
+
+    return withLedgerWriterLock(input.databasePath, async () => {
+      await assertPathAbsent(input.databasePath)
+      const temporaryDatabasePath =
+        await createPrivateTemporaryPath(
+          input.databasePath,
+          'create.sqlite'
+        )
+      const temporaryWitnessPath = defaultWitnessPath(
+        temporaryDatabasePath
+      )
+      let databasePublished = false
+      let built:
+        | {
+            readonly head: LedgerHead
+            readonly witness: HeadWitness
+          }
+        | undefined
+      let failure: CapturedFailure | undefined
+      try {
+        built = await SqliteEventStore.buildVerifiedTemporary(
+          temporaryDatabasePath,
+          temporaryWitnessPath,
+          input.bootstrap,
+          dependencies
+        )
+        const witnessStore =
+          dependencies.witnessStore ?? fileHeadWitnessStore
+        const existingFinalWitness = await witnessStore.read(witnessPath)
+        await witnessStore.publish(witnessPath, built.witness, {
+          expected: existingFinalWitness ?? null
+        })
+        dependencies.fault?.('after-create-witness-published')
+
+        await link(temporaryDatabasePath, input.databasePath)
+        databasePublished = true
+        await syncDirectory(path.dirname(input.databasePath))
+        await assertPrivateRegularFile(
+          input.databasePath,
+          MAX_DATABASE_BYTES
+        )
+        dependencies.fault?.('after-create-database-published')
+      } catch (error) {
+        failure = captureFailure(
+          failure,
+          error,
+          'Atomic create and publication both failed'
+        )
+      }
+
+      try {
+        await runCleanupTasks(
+          'Atomic-create temporary cleanup failed',
+          [
+            async () => {
+              dependencies.fault?.(
+                'before-create-temporary-cleanup'
+              )
+            },
+            () => removeSqliteFileSet(temporaryDatabasePath),
+            () => removeIfPresent(temporaryWitnessPath),
+            () =>
+              removeSqliteFileSet(
+                witnessPublicationLockPath(temporaryWitnessPath)
+              )
+          ]
+        )
+      } catch (error) {
+        failure = captureFailure(
+          failure,
+          error,
+          'Atomic create failed and its temporary cleanup also failed'
+        )
+      }
+
+      if (failure) {
+        if (databasePublished) {
+          throw new EventStorePersistenceUncertainError(
+            'SQLite ledger was selected but atomic-create verification did not complete',
+            { cause: failure.error }
+          )
+        }
+        throw failure.error
+      }
+      if (!built) {
+        throw new EventStoreCorruptionError(
+          'Atomic create completed without a verified temporary head'
+        )
+      }
+
+      let selected: SqliteEventStore | undefined
+      try {
+        selected = await SqliteEventStore.openUnderHeldWriterLock(
+          input.databasePath,
+          witnessPath,
+          dependencies,
+          'full'
+        )
+        assertMatchingHead(
+          built.head,
+          selected.getHead(),
+          'atomically created database'
+        )
+        return selected
+      } catch (error) {
+        let verificationFailure = captureFailure(
+          undefined,
+          error,
+          'Atomic-create verification failed'
+        )
+        if (selected) {
+          try {
+            await selected.close()
+          } catch (closeError) {
+            verificationFailure = captureFailure(
+              verificationFailure,
+              closeError,
+              'Atomic-create verification and selected-store close both failed'
+            )
+          }
+        }
+        throw new EventStorePersistenceUncertainError(
+          'SQLite ledger was selected but atomic-create verification did not complete',
+          { cause: verificationFailure.error }
+        )
+      }
+    })
+  }
+
+  static async open(input: OpenEventStoreInput): Promise<SqliteEventStore> {
+    const witnessPath =
+      input.witnessPath ?? defaultWitnessPath(input.databasePath)
+    assertSeparatePaths(input.databasePath, witnessPath)
+    await assertCoordinationPathNamespace(
+      [input.databasePath],
+      [witnessPath]
+    )
+    const dependencies = normalizeDependencies(input.dependencies)
+    return withLedgerWriterLock(input.databasePath, () =>
+      SqliteEventStore.openUnderHeldWriterLock(
+        input.databasePath,
+        witnessPath,
+        dependencies,
+        input.integrityCheck ?? 'quick'
+      )
+    )
+  }
+
+  private static async buildVerifiedTemporary(
+    databasePath: string,
+    witnessPath: string,
+    bootstrap: Extract<
+      GroundLedgerEvent,
+      { kind: 'legacy-state.bootstrapped' }
+    >,
+    dependencies: ReturnType<typeof normalizeDependencies>
+  ): Promise<{ readonly head: LedgerHead; readonly witness: HeadWitness }> {
     const createdAt = parseTimestamp(dependencies.now(), 'createdAt')
     const databaseId = parseIdentifier(
       dependencies.createId(),
@@ -130,124 +321,112 @@ export class SqliteEventStore {
         'Database ID and recovery epoch must be independently generated'
       )
     }
+    const metadata: LedgerMetadata = {
+      databaseFormatVersion: DATABASE_FORMAT_VERSION,
+      eventSchemaVersion: EVENT_SCHEMA_VERSION,
+      reducerVersion: REDUCER_VERSION,
+      projectionSchemaVersion: PROJECTION_SCHEMA_VERSION,
+      databaseId,
+      recoveryEpoch,
+      createdAt
+    }
+    const genesisHead: LedgerHead = {
+      sequence: 0,
+      eventHash: GENESIS_EVENT_HASH,
+      transactionId: GENESIS_TRANSACTION_ID,
+      updatedAt: createdAt
+    }
+    const provenance: MigrationProvenance = {
+      sourceFormat: bootstrap.sourceFormat,
+      sourceStateVersion: bootstrap.sourceStateVersion,
+      sourceSha256: bootstrap.sourceSha256,
+      sourceByteLength: bootstrap.sourceByteLength,
+      normalizedStateSha256: bootstrap.normalizedStateSha256,
+      migratedAt: createdAt
+    }
 
-    await createPrivateEmptyFile(input.databasePath)
+    await createPrivateEmptyFile(databasePath)
     let database: DatabaseSync | undefined
     try {
-      database = openDatabaseConnection(input.databasePath)
-      initializeDatabase(database, {
-        databaseFormatVersion: DATABASE_FORMAT_VERSION,
-        eventSchemaVersion: EVENT_SCHEMA_VERSION,
-        reducerVersion: REDUCER_VERSION,
-        projectionSchemaVersion: PROJECTION_SCHEMA_VERSION,
-        databaseId,
-        recoveryEpoch,
-        createdAt
-      })
-      await tightenDatabaseFiles(input.databasePath)
-
-      const genesisHead: LedgerHead = {
-        sequence: 0,
-        eventHash: GENESIS_EVENT_HASH,
-        transactionId: GENESIS_TRANSACTION_ID,
-        updatedAt: createdAt
-      }
-      const genesisWitness = toWitness(
-        {
-          databaseFormatVersion: DATABASE_FORMAT_VERSION,
-          eventSchemaVersion: EVENT_SCHEMA_VERSION,
-          reducerVersion: REDUCER_VERSION,
-          projectionSchemaVersion: PROJECTION_SCHEMA_VERSION,
-          databaseId,
-          recoveryEpoch,
-          createdAt
-        },
-        genesisHead,
-        createdAt
-      )
-      await (dependencies.witnessStore ?? fileHeadWitnessStore).publish(
-        witnessPath,
-        genesisWitness
-      )
-
-      const encodedBootstrap = encodeLedgerEvent(input.bootstrap)
-      if (encodedBootstrap.kind !== 'legacy-state.bootstrapped') {
-        throw new EventCodecError(
-          'A new SQLite ledger requires a semantic legacy-state bootstrap'
-        )
-      }
-      const initialProjection = input.bootstrap.state
-      const provenance: MigrationProvenance = {
-        sourceFormat: input.bootstrap.sourceFormat,
-        sourceStateVersion: input.bootstrap.sourceStateVersion,
-        sourceSha256: input.bootstrap.sourceSha256,
-        sourceByteLength: input.bootstrap.sourceByteLength,
-        normalizedStateSha256: input.bootstrap.normalizedStateSha256,
-        migratedAt: createdAt
-      }
-      const store = new SqliteEventStore(
-        input.databasePath,
+      database = openDatabaseConnection(databasePath)
+      initializeDatabase(database, metadata)
+      await tightenDatabaseFiles(databasePath)
+      const temporary = new SqliteEventStore(
+        databasePath,
         witnessPath,
         database,
         dependencies,
-        {
-          databaseFormatVersion: DATABASE_FORMAT_VERSION,
-          eventSchemaVersion: EVENT_SCHEMA_VERSION,
-          reducerVersion: REDUCER_VERSION,
-          projectionSchemaVersion: PROJECTION_SCHEMA_VERSION,
-          databaseId,
-          recoveryEpoch,
-          createdAt
-        },
+        metadata,
         genesisHead,
-        initialProjection,
+        bootstrap.state,
         [],
         provenance
       )
-      await store.appendInternal({
-        expectedHead: {
-          sequence: genesisHead.sequence,
-          eventHash: genesisHead.eventHash
+      await temporary.appendInternal(
+        {
+          expectedHead: {
+            sequence: genesisHead.sequence,
+            eventHash: genesisHead.eventHash
+          },
+          events: [bootstrap]
         },
-        events: [input.bootstrap]
-      })
-      return store
+        null
+      )
+      await temporary.close()
+      database = undefined
+
+      const verified = await SqliteEventStore.openUnderHeldWriterLock(
+        databasePath,
+        witnessPath,
+        dependencies,
+        'full'
+      )
+      try {
+        const witnessStore =
+          dependencies.witnessStore ?? fileHeadWitnessStore
+        const witness = await witnessStore.read(witnessPath)
+        if (!witness) {
+          throw new EventStoreCorruptionError(
+            'Verified temporary SQLite database has no witness'
+          )
+        }
+        return { head: verified.getHead(), witness }
+      } finally {
+        await verified.close()
+      }
     } catch (error) {
       if (database) {
         try {
           database.close()
         } catch {
-          // The original construction failure remains authoritative.
+          // Preserve the construction failure.
         }
       }
       throw error
     }
   }
 
-  static async open(input: OpenEventStoreInput): Promise<SqliteEventStore> {
-    const witnessPath =
-      input.witnessPath ?? defaultWitnessPath(input.databasePath)
-    assertSeparatePaths(input.databasePath, witnessPath)
-    const dependencies = normalizeDependencies(input.dependencies)
-    await tightenDatabaseFiles(input.databasePath)
-
-    const database = openDatabaseConnection(input.databasePath)
+  private static async openUnderHeldWriterLock(
+    databasePath: string,
+    witnessPath: string,
+    dependencies: ReturnType<typeof normalizeDependencies>,
+    integrityCheck: 'quick' | 'full'
+  ): Promise<SqliteEventStore> {
+    await tightenDatabaseFiles(databasePath)
+    const database = openDatabaseConnection(databasePath)
     try {
       configureExistingConnection(database)
-      const loaded = loadAndVerifyDatabase(
-        database,
-        input.integrityCheck ?? 'quick'
-      )
+      const loaded = loadAndVerifyDatabase(database, integrityCheck)
       await reconcileHeadWitness(
-        input.witnessPath ?? defaultWitnessPath(input.databasePath),
+        witnessPath,
         dependencies,
         loaded.metadata,
         loaded.head,
         loaded.records
       )
-      await tightenDatabaseFiles(input.databasePath)
+      await tightenDatabaseFiles(databasePath)
       return new SqliteEventStore(
-        input.databasePath,
+        databasePath,
         witnessPath,
         database,
         dependencies,
@@ -294,7 +473,21 @@ export class SqliteEventStore {
   appendEventBatch(
     input: AppendEventBatchInput
   ): Promise<AppendEventBatchResult> {
-    return this.enqueue(() => this.appendInternal(input))
+    return this.enqueue(() =>
+      withLedgerWriterLock(this.databasePath, async () => {
+        this.assertWritable()
+        const durableHead = readHead(this.database)
+        assertMatchingHead(this.head, durableHead, 'database')
+        const currentWitness = await reconcileHeadWitness(
+          this.witnessPath,
+          this.dependencies,
+          this.metadata,
+          this.head,
+          this.records
+        )
+        return this.appendInternal(input, currentWitness)
+      })
+    )
   }
 
   createVerifiedBackup(
@@ -303,69 +496,228 @@ export class SqliteEventStore {
   ): Promise<void> {
     return this.enqueue(async () => {
       this.assertWritable()
-      assertSeparatePaths(destinationDatabasePath, destinationWitnessPath)
+      assertSeparatePaths(
+        destinationDatabasePath,
+        destinationWitnessPath
+      )
       assertBackupPathsDoNotOverlapSource(
         this.databasePath,
         this.witnessPath,
         destinationDatabasePath,
         destinationWitnessPath
       )
-      await assertPathAbsent(destinationDatabasePath)
-
-      const temporaryDatabasePath = await createPrivateTemporaryPath(
-        destinationDatabasePath,
-        'backup.sqlite'
+      await assertCoordinationPathNamespace(
+        [this.databasePath, destinationDatabasePath],
+        [this.witnessPath, destinationWitnessPath]
       )
-      const temporaryWitnessPath = defaultWitnessPath(temporaryDatabasePath)
-      let publishedDatabase = false
-      try {
-        await sqliteBackup(this.database, temporaryDatabasePath, {
-          rate: 256
-        })
-        await assertPrivateRegularFile(
-          temporaryDatabasePath,
-          MAX_DATABASE_BYTES
-        )
-        const witness = toWitness(
-          this.metadata,
-          this.head,
-          parseTimestamp(this.dependencies.now(), 'backup witness timestamp')
-        )
-        await (this.dependencies.witnessStore ?? fileHeadWitnessStore).publish(
-          temporaryWitnessPath,
-          witness
-        )
-        const verified = await SqliteEventStore.open({
-          databasePath: temporaryDatabasePath,
-          witnessPath: temporaryWitnessPath,
-          dependencies: this.dependencies,
-          integrityCheck: 'full'
-        })
-        try {
-          assertMatchingHead(this.head, verified.getHead(), 'backup')
-        } finally {
-          await verified.close()
-        }
+      return withLedgerWriterLocks(
+        [this.databasePath, destinationDatabasePath],
+        async () => {
+          const durableHead = readHead(this.database)
+          assertMatchingHead(
+            this.head,
+            durableHead,
+            'backup source database'
+          )
+          await reconcileHeadWitness(
+            this.witnessPath,
+            this.dependencies,
+            this.metadata,
+            this.head,
+            this.records
+          )
+          await assertPathAbsent(destinationDatabasePath)
 
-        await (this.dependencies.witnessStore ?? fileHeadWitnessStore).publish(
-          destinationWitnessPath,
-          witness
-        )
-        await link(temporaryDatabasePath, destinationDatabasePath)
-        publishedDatabase = true
-        await syncDirectory(path.dirname(destinationDatabasePath))
-        await assertPrivateRegularFile(
-          destinationDatabasePath,
-          MAX_DATABASE_BYTES
-        )
-      } finally {
-        await removeIfPresent(temporaryDatabasePath)
-        await removeIfPresent(temporaryWitnessPath)
-        if (!publishedDatabase) {
-          // A witness without its database is inert because database presence
-          // selects the engine. It is deliberately left for forensic evidence.
+          const stagingDirectory =
+            await createPrivateTemporaryDirectory(
+              destinationDatabasePath,
+              'backup-stage'
+            )
+          const temporaryDatabasePath = path.join(
+            stagingDirectory,
+            'backup.sqlite'
+          )
+          const temporaryWitnessPath = defaultWitnessPath(
+            temporaryDatabasePath
+          )
+          let databasePublished = false
+          let stagingIdentity: PathIdentity | undefined
+          let failure: CapturedFailure | undefined
+          try {
+            stagingIdentity =
+              await readPrivateDirectoryIdentity(stagingDirectory)
+            await createPrivateEmptyFile(temporaryDatabasePath)
+            await assertPrivateRegularFile(
+              temporaryDatabasePath,
+              MAX_DATABASE_BYTES
+            )
+            await sqliteBackup(this.database, temporaryDatabasePath, {
+              rate: 256,
+              progress: () => {
+                assertPrivateBackupFilesDuringProgress(
+                  temporaryDatabasePath
+                )
+                this.dependencies.onBackupProgress?.(
+                  temporaryDatabasePath
+                )
+              }
+            })
+            await assertPrivateRegularFile(
+              temporaryDatabasePath,
+              MAX_DATABASE_BYTES
+            )
+            const witness = toWitness(
+              this.metadata,
+              this.head,
+              parseTimestamp(
+                this.dependencies.now(),
+                'backup witness timestamp'
+              )
+            )
+            await (
+              this.dependencies.witnessStore ?? fileHeadWitnessStore
+            ).publish(temporaryWitnessPath, witness, {
+              expected: null
+            })
+            const verified =
+              await SqliteEventStore.openUnderHeldWriterLock(
+                temporaryDatabasePath,
+                temporaryWitnessPath,
+                this.dependencies,
+                'full'
+              )
+            try {
+              assertMatchingHead(
+                this.head,
+                verified.getHead(),
+                'backup'
+              )
+            } finally {
+              await verified.close()
+            }
+            const verifiedDatabaseIdentity =
+              await readPrivateFileIdentity(
+                temporaryDatabasePath,
+                MAX_DATABASE_BYTES
+              )
+
+            const destinationWitnessStore =
+              this.dependencies.witnessStore ?? fileHeadWitnessStore
+            const existingDestinationWitness =
+              await destinationWitnessStore.read(
+                destinationWitnessPath
+              )
+            await destinationWitnessStore.publish(
+              destinationWitnessPath,
+              witness,
+              { expected: existingDestinationWitness ?? null }
+            )
+            this.dependencies.fault?.(
+              'before-backup-database-link'
+            )
+            if (!stagingIdentity) {
+              throw new EventStoreCorruptionError(
+                'SQLite backup staging identity is unavailable'
+              )
+            }
+            assertSamePathIdentity(
+              stagingIdentity,
+              await readPrivateDirectoryIdentity(stagingDirectory),
+              'SQLite backup staging directory'
+            )
+            assertSamePathIdentity(
+              verifiedDatabaseIdentity,
+              await readPrivateFileIdentity(
+                temporaryDatabasePath,
+                MAX_DATABASE_BYTES
+              ),
+              'verified SQLite backup'
+            )
+            await link(
+              temporaryDatabasePath,
+              destinationDatabasePath
+            )
+            databasePublished = true
+            this.dependencies.fault?.(
+              'after-backup-database-published'
+            )
+            await syncDirectory(path.dirname(destinationDatabasePath))
+            await assertPrivateRegularFile(
+              destinationDatabasePath,
+              MAX_DATABASE_BYTES
+            )
+            assertSamePathIdentity(
+              verifiedDatabaseIdentity,
+              await readPrivateFileIdentity(
+                destinationDatabasePath,
+                MAX_DATABASE_BYTES
+              ),
+              'published SQLite backup'
+            )
+            const selected =
+              await SqliteEventStore.openUnderHeldWriterLock(
+                destinationDatabasePath,
+                destinationWitnessPath,
+                this.dependencies,
+                'full'
+              )
+            try {
+              assertMatchingHead(
+                this.head,
+                selected.getHead(),
+                'published backup'
+              )
+            } finally {
+              await selected.close()
+            }
+          } catch (error) {
+            failure = captureFailure(
+              failure,
+              error,
+              'SQLite backup creation failed'
+            )
+          }
+
+          try {
+            await runCleanupTasks(
+              'SQLite backup temporary cleanup failed',
+              [
+                async () => {
+                  this.dependencies.fault?.(
+                    'before-backup-temporary-cleanup'
+                  )
+                },
+                () => removeSqliteFileSet(temporaryDatabasePath),
+                () => removeIfPresent(temporaryWitnessPath),
+                () =>
+                  removeSqliteFileSet(
+                    witnessPublicationLockPath(
+                      temporaryWitnessPath
+                    )
+                  ),
+                () =>
+                  removePrivateTemporaryDirectory(stagingDirectory)
+              ]
+            )
+          } catch (error) {
+            failure = captureFailure(
+              failure,
+              error,
+              'SQLite backup failed and its temporary cleanup also failed'
+            )
+          }
+
+          if (failure) {
+            if (databasePublished) {
+              throw new EventStorePersistenceUncertainError(
+                'SQLite backup was selected but final publication durability is uncertain',
+                { cause: failure.error }
+              )
+            }
+            throw failure.error
+          }
         }
-      }
+      )
     })
   }
 
@@ -392,7 +744,8 @@ export class SqliteEventStore {
   }
 
   private async appendInternal(
-    input: AppendEventBatchInput
+    input: AppendEventBatchInput,
+    expectedWitness: HeadWitness | null
   ): Promise<AppendEventBatchResult> {
     this.assertWritable()
     if (
@@ -588,6 +941,7 @@ export class SqliteEventStore {
         this.witnessPath,
         witness,
         {
+          expected: expectedWitness,
           afterRename: () =>
             this.dependencies.fault?.('after-witness-rename')
         }
@@ -1228,57 +1582,91 @@ function verifyPragmasAndIntegrity(
 }
 
 function verifyRequiredSchema(database: DatabaseSync): void {
-  const requiredTables = [
-    'checkpoints',
-    'events',
-    'ledger_head',
-    'ledger_metadata',
-    'materialized_state',
-    'migration_provenance'
-  ]
-  const tables = database
-    .prepare(`
-      SELECT name
-      FROM sqlite_schema
-      WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-      ORDER BY name
-    `)
-    .all()
-    .map((row) => String((row as { name?: unknown }).name))
-  if (
-    tables.length !== requiredTables.length ||
-    tables.some((table, index) => table !== requiredTables[index])
-  ) {
+  const actual = encodeSchemaManifest(readSchemaManifest(database))
+  const expected = getExpectedSchemaManifestJson()
+  if (actual !== expected) {
     throw new EventStoreCorruptionError(
-      'SQLite ledger schema tables are missing or unexpected'
+      `SQLite ledger schema fingerprint mismatch (expected ${sha256(
+        expected
+      )}, found ${sha256(actual)})`
     )
   }
+}
 
-  const requiredTriggers = [
-    'checkpoints_are_immutable_delete',
-    'checkpoints_are_immutable_update',
-    'events_are_append_only_delete',
-    'events_are_append_only_update',
-    'migration_provenance_is_immutable_delete',
-    'migration_provenance_is_immutable_update'
-  ]
-  const triggers = database
+function getExpectedSchemaManifestJson(): string {
+  if (expectedSchemaManifestJson) return expectedSchemaManifestJson
+  const reference = new DatabaseSync(':memory:', {
+    enableForeignKeyConstraints: true,
+    enableDoubleQuotedStringLiterals: false,
+    allowExtension: false,
+    timeout: 0,
+    readBigInts: false,
+    returnArrays: false,
+    allowBareNamedParameters: false,
+    allowUnknownNamedParameters: false,
+    defensive: true
+  })
+  try {
+    initializeDatabase(reference, {
+      databaseFormatVersion: DATABASE_FORMAT_VERSION,
+      eventSchemaVersion: EVENT_SCHEMA_VERSION,
+      reducerVersion: REDUCER_VERSION,
+      projectionSchemaVersion: PROJECTION_SCHEMA_VERSION,
+      databaseId: 'schema-reference-database',
+      recoveryEpoch: 'schema-reference-epoch',
+      createdAt: '2000-01-01T00:00:00.000Z'
+    })
+    const referenceManifestJson = encodeSchemaManifest(
+      readSchemaManifest(reference)
+    )
+    if (sha256(referenceManifestJson) !== LEDGER_SCHEMA_SHA256) {
+      throw new EventStoreCorruptionError(
+        'Compiled SQLite schema does not match the database-format fingerprint'
+      )
+    }
+    expectedSchemaManifestJson = referenceManifestJson
+    return expectedSchemaManifestJson
+  } finally {
+    reference.close()
+  }
+}
+
+function readSchemaManifest(
+  database: DatabaseSync
+): readonly SchemaManifestRow[] {
+  return database
     .prepare(`
-      SELECT name
+      SELECT type, name, tbl_name, sql
       FROM sqlite_schema
-      WHERE type = 'trigger'
-      ORDER BY name
+      ORDER BY type, name, tbl_name
     `)
     .all()
-    .map((row) => String((row as { name?: unknown }).name))
-  if (
-    triggers.length !== requiredTriggers.length ||
-    triggers.some((trigger, index) => trigger !== requiredTriggers[index])
-  ) {
-    throw new EventStoreCorruptionError(
-      'SQLite ledger immutability triggers are missing or unexpected'
-    )
-  }
+    .map((row) => {
+      const record = row as Record<string, unknown>
+      const sql =
+        record.sql === null
+          ? null
+          : requireString(record.sql, 'sqlite_schema SQL')
+      return {
+        type: requireString(record.type, 'sqlite_schema type'),
+        name: requireString(record.name, 'sqlite_schema name'),
+        tableName: requireString(
+          record.tbl_name,
+          'sqlite_schema table name'
+        ),
+        sql
+      }
+    })
+}
+
+function encodeSchemaManifest(
+  rows: readonly SchemaManifestRow[]
+): string {
+  return encodeCanonicalJson(rows, {
+    maxBytes: 256 * 1024,
+    maxDepth: 8,
+    maxNodes: 1_000
+  })
 }
 
 function readMetadata(database: DatabaseSync): LedgerMetadata {
@@ -1558,7 +1946,7 @@ async function reconcileHeadWitness(
   metadata: LedgerMetadata,
   head: LedgerHead,
   records: readonly DecodedLedgerRecord[]
-): Promise<void> {
+): Promise<HeadWitness> {
   const witnessStore = dependencies.witnessStore ?? fileHeadWitnessStore
   const witness = await witnessStore.read(witnessPath)
   if (!witness) {
@@ -1588,7 +1976,7 @@ async function reconcileHeadWitness(
         'Head witness and database disagree at the same sequence'
       )
     }
-    return
+    return witness
   }
 
   if (witness.sequence === 0) {
@@ -1615,14 +2003,17 @@ async function reconcileHeadWitness(
   }
 
   try {
+    const repaired = toWitness(
+      metadata,
+      head,
+      parseTimestamp(dependencies.now(), 'repaired witness timestamp')
+    )
     await witnessStore.publish(
       witnessPath,
-      toWitness(
-        metadata,
-        head,
-        parseTimestamp(dependencies.now(), 'repaired witness timestamp')
-      )
+      repaired,
+      { expected: witness }
     )
+    return repaired
   } catch (error) {
     throw new EventStorePersistenceUncertainError(
       'Database is ahead of its witness and witness repair failed',
@@ -1717,9 +2108,14 @@ function parseTimestamp(value: unknown, label: string): string {
 }
 
 function assertSeparatePaths(databasePath: string, witnessPath: string): void {
-  if (path.resolve(databasePath) === path.resolve(witnessPath)) {
+  const resolvedDatabasePath = path.resolve(databasePath)
+  const resolvedWitnessPath = path.resolve(witnessPath)
+  if (
+    resolvedDatabasePath === resolvedWitnessPath ||
+    path.resolve(writerLockPath(databasePath)) === resolvedWitnessPath
+  ) {
     throw new EventCodecError(
-      'SQLite database and head witness must use separate paths'
+      'SQLite database, head witness, and writer lock require separate paths'
     )
   }
 }
@@ -1767,4 +2163,134 @@ async function tightenDatabaseFiles(databasePath: string): Promise<void> {
       if (!isMissingFileError(error)) throw error
     }
   }
+}
+
+interface PathIdentity {
+  readonly device: bigint
+  readonly inode: bigint
+}
+
+async function readPrivateDirectoryIdentity(
+  directory: string
+): Promise<PathIdentity> {
+  const details = await lstat(directory, { bigint: true })
+  if (
+    !details.isDirectory() ||
+    details.isSymbolicLink() ||
+    (process.platform !== 'win32' &&
+      (details.mode & 0o777n) !== 0o700n)
+  ) {
+    throw new EventStoreCorruptionError(
+      'SQLite backup staging directory is not private'
+    )
+  }
+  return { device: details.dev, inode: details.ino }
+}
+
+async function readPrivateFileIdentity(
+  filePath: string,
+  maxBytes: number
+): Promise<PathIdentity> {
+  const details = await lstat(filePath, { bigint: true })
+  if (
+    !details.isFile() ||
+    details.isSymbolicLink() ||
+    details.size > BigInt(maxBytes) ||
+    (process.platform !== 'win32' &&
+      (details.mode & 0o777n) !== 0o600n)
+  ) {
+    throw new EventStoreCorruptionError(
+      'SQLite backup path is not a private bounded regular file'
+    )
+  }
+  return { device: details.dev, inode: details.ino }
+}
+
+function assertSamePathIdentity(
+  expected: PathIdentity,
+  actual: PathIdentity,
+  label: string
+): void {
+  if (
+    expected.device !== actual.device ||
+    expected.inode !== actual.inode
+  ) {
+    throw new EventStoreCorruptionError(
+      `${label} changed before publication completed`
+    )
+  }
+}
+
+function assertPrivateBackupFilesDuringProgress(
+  databasePath: string
+): void {
+  const stagingDirectory = lstatSync(path.dirname(databasePath))
+  if (
+    !stagingDirectory.isDirectory() ||
+    stagingDirectory.isSymbolicLink() ||
+    (process.platform !== 'win32' &&
+      (stagingDirectory.mode & 0o777) !== 0o700)
+  ) {
+    throw new EventStoreCorruptionError(
+      'SQLite backup staging directory was not private during backup'
+    )
+  }
+  for (const suffix of ['', '-journal', '-wal', '-shm']) {
+    try {
+      const details = lstatSync(`${databasePath}${suffix}`)
+      if (
+        !details.isFile() ||
+        details.isSymbolicLink() ||
+        details.size > MAX_DATABASE_BYTES ||
+        (process.platform !== 'win32' &&
+          (details.mode & 0o777) !== 0o600)
+      ) {
+        throw new EventStoreCorruptionError(
+          'SQLite backup file was not private during backup'
+        )
+      }
+    } catch (error) {
+      if (
+        suffix !== '' &&
+        (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
+      ) {
+        continue
+      }
+      throw error
+    }
+  }
+}
+
+interface CapturedFailure {
+  readonly error: unknown
+}
+
+function captureFailure(
+  current: CapturedFailure | undefined,
+  error: unknown,
+  aggregateMessage: string
+): CapturedFailure {
+  return {
+    error: current
+      ? new AggregateError(
+          [current.error, error],
+          aggregateMessage
+        )
+      : error
+  }
+}
+
+async function runCleanupTasks(
+  aggregateMessage: string,
+  tasks: readonly (() => Promise<void>)[]
+): Promise<void> {
+  let failure: CapturedFailure | undefined
+  for (const task of tasks) {
+    try {
+      await task()
+    } catch (error) {
+      failure = captureFailure(failure, error, aggregateMessage)
+    }
+  }
+  if (failure) throw failure.error
 }

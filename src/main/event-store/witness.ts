@@ -8,6 +8,7 @@ import {
   parseCanonicalJson
 } from './canonical-json'
 import {
+  EventStoreConflictError,
   EventStoreCorruptionError,
   EventStoreVersionError
 } from './errors'
@@ -23,6 +24,7 @@ import {
   type HeadWitness,
   type HeadWitnessStore
 } from './types'
+import { withWitnessPublicationLock } from './writer-lock'
 
 const MAX_WITNESS_BYTES = 16 * 1024
 const READ_CHUNK_BYTES = 4 * 1024
@@ -93,8 +95,9 @@ export class FileHeadWitnessStore implements HeadWitnessStore {
     filePath: string,
     witness: HeadWitness,
     options: {
-      readonly beforeRename?: () => void
-      readonly afterRename?: () => void
+      readonly beforeRename?: () => void | Promise<void>
+      readonly afterRename?: () => void | Promise<void>
+      readonly expected?: HeadWitness | null
     } = {}
   ): Promise<void> {
     const parsed = witnessSchema.safeParse(witness)
@@ -103,6 +106,9 @@ export class FileHeadWitnessStore implements HeadWitnessStore {
         'Refused to publish an invalid head witness',
         { cause: parsed.error }
       )
+    }
+    if (options.expected) {
+      assertMonotonicWitnessUpdate(options.expected, parsed.data)
     }
     const payload = encodeCanonicalJson(parsed.data, {
       maxBytes: MAX_WITNESS_BYTES,
@@ -124,11 +130,19 @@ export class FileHeadWitnessStore implements HeadWitnessStore {
       await handle.writeFile(payload, 'utf8')
       await handle.sync()
       await handle.close()
-      options.beforeRename?.()
-      await rename(temporaryPath, filePath)
-      temporaryExists = false
-      options.afterRename?.()
-      await syncDirectory(directory)
+      await withWitnessPublicationLock(filePath, async () => {
+        if (Object.hasOwn(options, 'expected')) {
+          await assertExpectedWitness(filePath, options.expected)
+        }
+        await options.beforeRename?.()
+        if (Object.hasOwn(options, 'expected')) {
+          await assertExpectedWitness(filePath, options.expected)
+        }
+        await rename(temporaryPath, filePath)
+        temporaryExists = false
+        await options.afterRename?.()
+        await syncDirectory(directory)
+      })
     } finally {
       await handle.close().catch(() => undefined)
       if (temporaryExists) await removeIfPresent(temporaryPath)
@@ -137,6 +151,58 @@ export class FileHeadWitnessStore implements HeadWitnessStore {
 }
 
 export const fileHeadWitnessStore = new FileHeadWitnessStore()
+
+async function assertExpectedWitness(
+  filePath: string,
+  expected: HeadWitness | null | undefined
+): Promise<void> {
+  const actual = await fileHeadWitnessStore.read(filePath)
+  if (expected === null) {
+    if (actual === undefined) return
+  } else if (expected && actual && witnessesEqual(expected, actual)) {
+    return
+  }
+  throw new EventStoreConflictError(
+    'Head witness changed before conditional publication'
+  )
+}
+
+function witnessesEqual(
+  left: HeadWitness,
+  right: HeadWitness
+): boolean {
+  return (
+    left.witnessVersion === right.witnessVersion &&
+    left.databaseId === right.databaseId &&
+    left.recoveryEpoch === right.recoveryEpoch &&
+    left.sequence === right.sequence &&
+    left.eventHash === right.eventHash &&
+    left.transactionId === right.transactionId &&
+    left.publishedAt === right.publishedAt
+  )
+}
+
+function assertMonotonicWitnessUpdate(
+  expected: HeadWitness,
+  candidate: HeadWitness
+): void {
+  if (
+    expected.databaseId !== candidate.databaseId ||
+    expected.recoveryEpoch !== candidate.recoveryEpoch
+  ) {
+    return
+  }
+  if (
+    candidate.sequence < expected.sequence ||
+    (candidate.sequence === expected.sequence &&
+      (candidate.eventHash !== expected.eventHash ||
+        candidate.transactionId !== expected.transactionId))
+  ) {
+    throw new EventStoreConflictError(
+      'Refusing to regress or replace an established witness head'
+    )
+  }
+}
 
 async function readBoundedPrivateFile(filePath: string): Promise<string> {
   const pathDetails = await lstat(filePath)
