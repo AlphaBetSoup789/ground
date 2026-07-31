@@ -363,10 +363,10 @@ certification. Production-bound unit evidence separately covers the source-bound
 main clipboard service and preload user-activation guard. A dedicated
 source-build Electron smoke additionally loads the compiled production
 main/preload/renderer with isolated state and verifies activated renderer
-permission denial, inactive bridge refusal, and exact pointer/keyboard writes
-through trusted IPC and the native clipboard. CI runs that smoke on macOS,
-Windows, and Linux/Xvfb; it is not installer-level or screen-reader
-certification.
+permission denial, inactive bridge refusal, exact source delivery to Electron,
+and pointer/keyboard readback through the native platform text representation
+(CRLF on Windows). CI runs that smoke on macOS, Windows, and Linux/Xvfb; it is
+not installer-level or screen-reader certification.
 
 The pinned compatibility suite performs no authenticated request and launches no
 coding CLI. Its separate loopback SSE integration drives only Ground’s production

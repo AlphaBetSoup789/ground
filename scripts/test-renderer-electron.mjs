@@ -32,6 +32,15 @@ const previewGitReadEvent = 'ground:preview-git-read'
 const previewClipboardControlEvent =
   'ground:preview-clipboard-control'
 
+function platformClipboardText(value) {
+  // Windows CF_UNICODETEXT exposes line endings as CRLF even when Electron
+  // receives an LF-only JavaScript string. Source-bound unit tests separately
+  // prove that Ground passes the exact retained string to clipboard.writeText.
+  return process.platform === 'win32'
+    ? value.replace(/(?<!\r)\n/gu, '\r\n')
+    : value
+}
+
 async function controlPreviewClipboard(action) {
   await page.evaluate(
     ({ controlEvent, requestedAction }) => {
@@ -1490,8 +1499,8 @@ try {
     )
     assert.equal(
       await page.evaluate(() => navigator.clipboard.readText()),
-      exactAssistantOutput,
-      'copy must write the exact stored assistant markdown, not rendered HTML'
+      platformClipboardText(exactAssistantOutput),
+      'copy must preserve the stored assistant markdown through the platform clipboard representation'
     )
     assert.equal(
       await copyResponse.evaluate(
@@ -1561,8 +1570,8 @@ try {
     )
     assert.equal(
       await page.evaluate(() => navigator.clipboard.readText()),
-      exactCode,
-      'code copy must preserve represented Unicode, blank lines, and terminal newline'
+      platformClipboardText(exactCode),
+      'code copy must preserve represented Unicode, blank lines, and the terminal newline through the platform clipboard representation'
     )
     assert.equal(
       await copyCode.evaluate(
@@ -1582,7 +1591,7 @@ try {
     )
     assert.equal(
       await page.evaluate(() => navigator.clipboard.readText()),
-      exactCode,
+      platformClipboardText(exactCode),
       'a rejected copy must not replace the prior clipboard value'
     )
     assert.equal(

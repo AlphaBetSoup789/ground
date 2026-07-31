@@ -178,9 +178,10 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
 - Add a credential-free source-build Electron smoke for the production
   assistant clipboard boundary. It loads the compiled main, renderer, and
   sandboxed preload with isolated state; proves activated Web Clipboard denial,
-  inactive bridge refusal, and exact pointer/keyboard response and fenced-code
-  writes through trusted IPC and the native clipboard; restores supported prior
-  clipboard content; and runs in required macOS, Windows, and Linux/Xvfb CI.
+  inactive bridge refusal, exact source delivery to Electron, and
+  pointer/keyboard response and fenced-code readback through the native platform
+  text representation (CRLF on Windows); restores supported prior clipboard
+  content; and runs in required macOS, Windows, and Linux/Xvfb CI.
 - Recover interrupted managed writes, commands, and MCP calls as explicit
   outcome-unknown activity, without automatically replaying the side effect or
   retaining continuation authority.

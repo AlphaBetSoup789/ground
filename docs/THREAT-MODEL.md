@@ -188,8 +188,9 @@ content or claims that the clipboard destination is trusted.
 - A separate credential-free native clipboard smoke loads the compiled
   production main, renderer, and sandboxed preload with isolated state. It
   verifies activated renderer Web Clipboard denial, inactive source-bound
-  bridge refusal, and exact pointer/keyboard writes through trusted IPC and the
-  main-process clipboard on macOS, Windows, and Linux/Xvfb CI. It preflights
+  bridge refusal, exact source delivery to Electron under unit evidence, and
+  pointer/keyboard native readback using the platform text representation (CRLF
+  on Windows) on macOS, Windows, and Linux/Xvfb CI. It preflights
   restorable clipboard formats, checks ownership before each planned mutation,
   refuses restoration over detected newer content, and treats cleanup failure
   as test failure; it is not an atomic clipboard lease, packaged-installer, or
