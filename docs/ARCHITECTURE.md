@@ -673,6 +673,17 @@ with system/user messages, tools, and streamed text. CI does not contact a real
 cloud, Ollama, or LM Studio deployment, make a paid request, or launch an
 authenticated native coding-agent session.
 
+An isolated `src/main/event-store` module now provides a transactional SQLite
+foundation: sequenced append-only events, a SHA-256 event chain, deterministic
+materialized projection replay, exact schema/version gates, coordinated writers,
+an external head witness, verified backups, single-link protected-file validation,
+durable publication-alias cleanup, and copy-on-migrate from JSON v2. It is not
+constructed by the production desktop, and its semantic event vocabulary is
+currently limited to `legacy-state.bootstrapped` and
+`settings.sidebar-collapsed-set`. Tasks, runs, activities, approvals, managed
+executions, provider revisions, recovery checkpoints, and their compaction policy
+therefore remain on the JSON `StateStore` until a later production cutover.
+
 Native package workflows target macOS arm64/x64, Windows x64, and Linux x64. A
 fixed packaged smoke verifies app identity, OS-encrypted vault round-trip, the
 fail-closed Cancel result of a real native approval dialog, PTY, Git, exact local
@@ -723,10 +734,11 @@ the current aggregate. Neither evidence set certifies signing, notarization,
 DMG/DEB installation, renderer accessibility, live providers/CLIs, or supported
 distribution.
 
-The next storage boundary is a transactional, append-only event store with schema
-migrations and materialized task views. Stronger OS-specific confinement,
-handle-based executable authority, durable terminal/background-process state, and
-authenticated MCP are still future execution boundaries.
+The next storage step is production composition and semantic task/run coverage on
+top of the audited SQLite foundation, followed by bounded compaction and recovery
+UI. Stronger OS-specific confinement, handle-based executable authority, durable
+terminal/background-process state, and authenticated MCP are still future
+execution boundaries.
 
 See [PROVIDER-SDK.md](PROVIDER-SDK.md) for adapter requirements and
 [THREAT-MODEL.md](THREAT-MODEL.md) for the security consequences of these ownership

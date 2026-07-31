@@ -150,7 +150,8 @@ built-in adapter currently emits one.
 | MCP tools | Namespaced canonical definitions | Integrated | Tools only; no resources, prompts, Apps/UI, or elicitation |
 | Task portability | Strict JSON bundle + Markdown transcript | Integrated | User must review exports; imported content is untrusted |
 | Task lifecycle | Safe fork, archive/restore, bounded active/archive search, and current-result keyboard switching | Integrated | Search uses the exact displayed order and opaque task IDs; imported history is excluded by default and requires an explicit per-task opt-in |
-| State recovery | Bounded atomic primary + three rotating validated snapshots | Integrated | Opaque in-app browser, credential-free export, and native-confirmed retained restore with a process-wide drain/seal; no arbitrary snapshot import or transactional event log |
+| State recovery | Bounded atomic primary + three rotating validated snapshots | Integrated | Desktop remains JSON-backed; opaque in-app browser, credential-free export, and native-confirmed retained restore with a process-wide drain/seal; no arbitrary snapshot import or production transactional event log |
+| SQLite event-store foundation | Node 22.16+ within 22.x, or Node 24+, using `node:sqlite` + an external head witness | Source/test only | Deterministic replay, coordinated publication, single-link protected-file checks, migration, backup, and crash tests are implemented; semantic coverage and desktop cutover remain incomplete |
 | Managed-action crash recovery | Durable started/completed claims for writes, commands, and MCP calls | Integrated | Reports an interrupted outcome as unknown; no automatic action/run resume |
 
 State and credential-vault readers use `O_NOFOLLOW` where the host exposes it.

@@ -94,6 +94,12 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
   missing primary, unreadable-file quarantine, an in-app recovery browser,
   credential-free native export, and native-confirmed retained-snapshot restore.
 - An explicit fail-closed persisted-state v1-to-v2 migration dispatcher.
+- An isolated transactional SQLite event-store foundation with an append-only
+  SHA-256 event chain, deterministic materialized projection replay, strict schema
+  and version gates, an external head witness, coordinated writers, verified
+  backups, fail-closed external hard-link checks, durably cleaned publication
+  aliases, and copy-on-migrate from JSON v2. This source/test foundation is not yet
+  composed into the desktop `StateStore` or `RunManager`.
 - Multi-session `node-pty` terminals with a session selector, native exact-launch
   confirmation, opaque sender-bound attachments, detach/reattach, restart, and
   termination.
@@ -134,6 +140,10 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
 
 ### Changed
 
+- Raise the minimum supported Node 22 source-development runtime from 22.12 to
+  22.16, the first Node 22 release that provides the SQLite backup API used by the
+  event-store foundation. Supported runtimes are Node 22.16+ within 22.x or Node
+  24+; CI and release verification remain pinned to Node.js 24.18.0.
 - Recognized CLI runtimes now use mode-specific permission arguments, normalize
   activity and usage, capture native session IDs, and resume compatible sessions.
 - Enabled MCP startup now runs remote connections concurrently, serializes local

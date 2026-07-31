@@ -517,10 +517,12 @@ security recipient, before the first supported release.
   path as ordinary task content. Ground-generated command activity replaces the
   canonical workspace prefix with `<workspace>` while retaining the full exact
   path only in the native approval envelope.
-- Task history uses a JSON snapshot rather than a transactional, append-only event
-  store and has a 128 MiB ceiling per generation. Three rotating retained
-  snapshots and their user-selectable recovery UI are bounded crash recovery, not
-  durable version history, sync, or an arbitrary snapshot-import system.
+- The production desktop stores task history in the bounded JSON snapshot engine
+  with a 128 MiB ceiling per generation. Three rotating retained snapshots and
+  their user-selectable recovery UI are bounded crash recovery, not durable version
+  history, sync, or an arbitrary snapshot-import system. The audited SQLite ledger
+  exists only as an uncomposed source/test foundation and does not yet provide
+  transactional task, run, approval, or recovery persistence.
 - No-follow file opens are used where the host exposes `O_NOFOLLOW`. Windows
   reparse-point handling does not yet provide an equivalent race-free guarantee
   against a hostile same-user process.

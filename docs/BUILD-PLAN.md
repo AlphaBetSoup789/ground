@@ -198,6 +198,15 @@ Requirements: GR-6
 - Design migration from current bounded JSON state with fail-closed rollback.
 - Keep export formats deliberately separate from the internal recovery log.
 
+Foundation status: the source/test layer now implements transactional append,
+deterministic replay, strict schema/version gates, external-head verification,
+coordinated publication, single-link protected-file validation, durable
+publication cleanup, copy-on-migrate from JSON v2, verified backups, and
+crash-prefix coverage. It is not production-composed. Completing M2.1 still
+requires semantic events for tasks, runs, activities, approvals, managed
+executions, provider revisions, and recovery checkpoints; bounded compaction; and
+desktop migration/cutover from the JSON `StateStore`.
+
 Acceptance gate:
 
 - Crash injection at every publish boundary recovers to a valid prefix.
@@ -584,9 +593,9 @@ explicit non-guarantees.
 
 ### More orchestration increases side-effect ambiguity
 
-Mitigation: finish the event store and interruption semantics before automatic
-parallel integration; isolate work in managed worktrees; require user-owned merge
-authority.
+Mitigation: complete production event-store composition, semantic coverage, and
+interruption semantics before automatic parallel integration; isolate work in
+managed worktrees; require user-owned merge authority.
 
 ### Indexing and attachments expand privacy exposure
 

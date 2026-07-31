@@ -97,8 +97,10 @@ restore a retained one after native confirmation. State exports do not include t
 separate credential-vault document or Git-executable preference. They can contain
 opaque `pendingSecretDeletes` reference strings because those are part of the
 selected state generation, but not their ciphertext or plaintext values. The field
-is excluded from ordinary renderer snapshots. Operational filesystem failures stop
-loading instead of moving valid data. The primary,
+is excluded from ordinary renderer snapshots. The production composition does not
+create or consult a SQLite task database; that module is currently a source/test
+foundation rather than a second live task-history copy. Operational filesystem
+failures stop loading instead of moving valid data. The primary,
 retained generations, quarantine files, and user-created exports are not encrypted
 at rest, so task history and other non-secret metadata have the same protection as
 the user’s local account and disk.

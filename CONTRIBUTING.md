@@ -19,12 +19,12 @@ changes before implementation.
 
 ## Development setup
 
-Ground supports Node.js 22.12 or newer. CI, packaging, and release verification use
-the exact toolchain in `.nvmrc` and `packageManager`: Node.js 24.18.0 and npm
-11.16.0. npm 11.16.0 is required for the install policy; supported newer Node.js
-versions may be used for ordinary development. Use Node.js 24.18.0 and
-`npm run toolchain:check` when reproducing CI or release results. Then use the
-committed npm lockfile:
+Ground supports Node.js 22.16+ within the 22.x LTS line, or Node.js 24+. CI,
+packaging, and release verification use the exact toolchain in `.nvmrc` and
+`packageManager`: Node.js 24.18.0 and npm 11.16.0. npm 11.16.0 is required for the
+install policy; supported newer Node.js versions may be used for ordinary
+development. Use Node.js 24.18.0 and `npm run toolchain:check` when reproducing CI
+or release results. Then use the committed npm lockfile:
 
 ```bash
 npm ci
@@ -98,6 +98,7 @@ not native IPC, screen-reader, provider, or packaged-app certification.
 | `src/preload/` | Narrow renderer-to-main bridge |
 | `src/main/` | Desktop composition, policy, storage, tools, secrets, and runtimes |
 | `src/main/agent/` | Canonical provider-neutral contracts, event reducers, registry, and adapters |
+| `src/main/event-store/` | Isolated SQLite ledger, witness, migration, and backup foundation; not yet production-composed |
 | `packages/adapter-sdk/` | Provisional publishable manifest, declarations build, and adapter SDK guide |
 | `examples/` | Small dependency-free connection examples for public integration contracts |
 | `src/main/providers/` | Current provider/runtime transport implementations |

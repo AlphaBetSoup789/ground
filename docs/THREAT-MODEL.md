@@ -443,10 +443,12 @@ content or claims that the clipboard destination is trusted.
   platform-specific file and executable authority.
 - Persist executable trust by code signature or equivalent platform identity and
   run external runtimes in a dedicated constrained helper where practical.
-- Replace JSON snapshots with a transactional, sequenced event log and define a
-  reviewed import format if externally created state backups are ever accepted.
-  The current three-generation workflow is bounded local recovery, not durable
-  version history or sync.
+- Complete production composition of the audited SQLite event-store foundation and
+  expand it from bootstrap/settings facts to sequenced task, run, activity,
+  approval, managed-execution, provider, and recovery facts. The current desktop
+  still uses the three-generation JSON workflow, which is bounded local recovery,
+  not durable version history or sync. Define a separate reviewed import format if
+  externally created state backups are ever accepted.
 - Add securely stored MCP remote authentication/OAuth and, only with explicit
   capability design, resources, prompts, Apps/UI, and elicitation.
 - Add stronger isolation options for external CLIs and local stdio servers. PTY

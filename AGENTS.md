@@ -78,8 +78,9 @@ These are summaries, not substitutes for the architecture and threat model:
 ## Development workflow
 
 Ground's reproducible toolchain is declared in `.nvmrc` and `package.json`:
-Node.js 24.18.0 and npm 11.16.0. Node.js 22.12 or newer is supported for ordinary
-development, but use the pinned versions when reproducing CI or release results.
+Node.js 24.18.0 and npm 11.16.0. Node.js 22.16+ within the 22.x LTS line, or
+Node.js 24+, is supported for ordinary development, but use the pinned versions
+when reproducing CI or release results.
 
 ```bash
 npm ci

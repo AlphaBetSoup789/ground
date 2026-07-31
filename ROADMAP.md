@@ -125,7 +125,12 @@ are not necessarily release-certified.
 
 ### Durable workspace
 
-- [ ] Replace JSON snapshots with a transactional, append-only event store
+- [x] Add an audited transactional SQLite event-store foundation with deterministic
+  replay, strict schema/version gates, external-head verification, coordinated
+  publication, copy-on-migrate, verified backups, and crash-prefix tests
+- [ ] Complete the production cutover from JSON snapshots to that foundation,
+  including semantic task, run, activity, approval, managed-execution, provider,
+  and recovery events plus bounded compaction
 - [x] Add legacy file migration, strict state-schema validation, three rotating
   retained snapshots, automatic corruption fallback, unreadable-file quarantine,
   and a recovery banner

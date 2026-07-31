@@ -132,10 +132,10 @@ conformance runner; npm publication remains a separate maintainer release step.
 
 ## Run Ground
 
-Ground supports Node.js 22.12 or newer. The reproducible CI and release toolchain
-uses Node.js 24.18.0 (from `.nvmrc`) and npm 11.16.0. Install that npm version
-with your toolchain manager before running project commands; use
-`npm run toolchain:check` when reproducing CI or a release.
+Ground supports Node.js 22.16+ within the 22.x LTS line, or Node.js 24+. The
+reproducible CI and release toolchain uses Node.js 24.18.0 (from `.nvmrc`) and npm
+11.16.0. Install that npm version with your toolchain manager before running
+project commands; use `npm run toolchain:check` when reproducing CI or a release.
 
 From a source checkout:
 
@@ -877,10 +877,13 @@ official artifact has been published or certified. Read
 - Saved providers must pass Test for their exact persisted revision before a run.
   A successful CLI configuration test proves resolution and argument construction,
   not authentication, provider availability, or a live agent turn.
-- Task persistence uses an atomic local JSON document plus three rotating validated
-  snapshots with a 128 MiB ceiling per generation. Settings can inspect and export
-  those generations and restore a retained one after native confirmation, but
-  Ground has no transactional event log or arbitrary state-snapshot import.
+- The desktop still persists tasks in an atomic local JSON document plus three
+  rotating validated snapshots with a 128 MiB ceiling per generation. Settings can
+  inspect and export those generations and restore a retained one after native
+  confirmation. The source tree now includes an audited transactional SQLite
+  event-store foundation and a copy-on-migrate path, but they are not wired into
+  production task, run, approval, or recovery flows; arbitrary state-snapshot
+  import also remains unsupported.
 - State and credential files use no-follow opens where the platform exposes them;
   Windows reparse points do not yet have an equivalent race-free same-user
   guarantee.
