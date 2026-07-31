@@ -175,12 +175,9 @@ preload requires active user activation and sends only a bounded source identity
 the main process re-resolves the exact task, message, content, and code-node
 offsets before writing plain text. The renderer receives only success or failure,
 ignores late results from stale tasks or content, and announces repeatable visible
-and polite status without moving focus. Ground passes the retained JavaScript
-string unchanged to Electron; the native text clipboard may expose the platform
-newline representation when read back (CRLF on Windows). The bridge has no
-clipboard-read, rich HTML, or arbitrary-text operation. Unsent composer text is
-kept separately for each task for the current app process; it is not written to
-durable task state.
+and polite status without moving focus. The bridge has no clipboard-read, rich
+HTML, or arbitrary-text operation. Unsent composer text is kept separately for
+each task for the current app process; it is not written to durable task state.
 While a task is running or waiting for approval, its textarea remains editable so
 the next prompt can be prepared. That text is not queued, sent, or used to steer
 the active run; the Stop control remains the only run action and `Ctrl/⌘ + Enter`

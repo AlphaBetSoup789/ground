@@ -45,20 +45,6 @@ const assistantResponse = [
 ].join('\n')
 const representedCode =
   "const owner = 'Ground 🛡️'\n\nconsole.log(owner)\n"
-
-function platformClipboardText(value) {
-  // Windows CF_UNICODETEXT exposes line endings as CRLF even when Electron
-  // receives an LF-only JavaScript string. The main-process unit boundary
-  // separately proves that Ground calls clipboard.writeText with the exact
-  // retained source string.
-  return process.platform === 'win32'
-    ? value.replace(/(?<!\r)\n/gu, '\r\n')
-    : value
-}
-
-const assistantClipboardText = platformClipboardText(assistantResponse)
-const representedCodeClipboardText =
-  platformClipboardText(representedCode)
 const deniedSentinel = 'ground-renderer-denied-sentinel'
 const rendererDeniedPayload = 'renderer-must-not-write-this'
 const inactiveSentinel = 'ground-inactive-preload-sentinel'
@@ -133,8 +119,8 @@ const ownedClipboardTexts = new Set([
   inactiveSentinel,
   pointerSentinel,
   keyboardSentinel,
-  assistantClipboardText,
-  representedCodeClipboardText
+  assistantResponse,
+  representedCode
 ])
 const launchEnvironment = { ...process.env }
 const blockedLaunchEnvironment = new Set([
@@ -527,8 +513,8 @@ try {
     .click()
   await waitForMainClipboard(
     page,
-    assistantClipboardText,
-    'pointer copy must preserve canonical assistant Markdown through the platform clipboard representation'
+    assistantResponse,
+    'pointer copy must write the exact canonical assistant Markdown'
   )
   await page
     .locator('.assistant-output-copy-feedback')
@@ -579,16 +565,14 @@ try {
   await page.keyboard.press('Enter')
   await waitForMainClipboard(
     page,
-    representedCodeClipboardText,
-    'keyboard copy must preserve represented fenced-code text through the platform clipboard representation'
+    representedCode,
+    'keyboard copy must write the exact represented fenced-code text'
   )
   await page
     .locator('.assistant-output-copy-feedback')
     .getByText('Code block copied.', { exact: true })
     .waitFor()
-  passed(
-    'keyboard activation preserves fenced-code text through native clipboard'
-  )
+  passed('keyboard activation writes exact fenced-code text')
 } catch (error) {
   primaryFailed = true
   primaryError = error

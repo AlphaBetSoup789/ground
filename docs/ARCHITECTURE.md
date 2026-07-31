@@ -650,14 +650,12 @@ settings, reduced-motion CSS, and forced-color connection-path selection. It
 does not load production main/preload authority or replace manual
 screen-reader/native review. Production main-service and preload unit tests
 separately exercise canonical-source resolution, failure, request bounds, and
-user-activation gating, including the exact string handed to Electron's clipboard
-API. A separate source-build native smoke loads the compiled production main,
-renderer, and sandboxed preload with a temporary state profile; it proves
-deny-all renderer clipboard permissions, inactive bridge refusal, and
-response/fenced-code writes through trusted IPC and Electron's main-process
-clipboard, comparing readback with the native platform representation (CRLF on
-Windows). That smoke runs in macOS, Windows, and Linux/Xvfb CI and does not claim
-packaged-installer or screen-reader certification.
+user-activation gating. A separate source-build native smoke loads the compiled
+production main, renderer, and sandboxed preload with a temporary state profile;
+it proves deny-all renderer clipboard permissions, inactive bridge refusal, and
+exact response/fenced-code writes through trusted IPC and Electron's
+main-process clipboard. That smoke runs in macOS, Windows, and Linux/Xvfb CI and
+does not claim packaged-installer or screen-reader certification.
 
 ## Current composition and migration
 

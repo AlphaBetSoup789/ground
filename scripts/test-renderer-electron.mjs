@@ -33,9 +33,9 @@ const previewClipboardControlEvent =
   'ground:preview-clipboard-control'
 
 function platformClipboardText(value) {
-  // Windows CF_UNICODETEXT exposes line endings as CRLF even when Electron
-  // receives an LF-only JavaScript string. Source-bound unit tests separately
-  // prove that Ground passes the exact retained string to clipboard.writeText.
+  // Chromium's Windows Web Clipboard preview exposes line endings as CRLF.
+  // Production uses Electron's main-process clipboard instead; the dedicated
+  // native smoke continues to require an exact LF-preserving round trip.
   return process.platform === 'win32'
     ? value.replace(/(?<!\r)\n/gu, '\r\n')
     : value

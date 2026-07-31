@@ -361,9 +361,9 @@ Acceptance gate:
   task, message, content, or request ownership.
 - Required native Electron evidence loads the compiled production
   main/preload/renderer with isolated state, proves deny-all renderer clipboard
-  permissions and inactive bridge refusal, and verifies exact source delivery
-  plus pointer and keyboard readback in the native platform text representation
-  without provider credentials or unrecoverable clipboard mutation.
+  permissions and inactive bridge refusal, and verifies exact pointer and
+  keyboard writes without provider credentials or unrecoverable clipboard
+  mutation.
 - Input-method composition, stale async completion, responsive layout changes,
   and modal focus changes have renderer interaction evidence.
 
