@@ -1,4 +1,12 @@
 import { z } from 'zod'
+import {
+  mcpServerSchema,
+  modelRuntimeSessionSchema,
+  providerSchema,
+  runtimeSessionSchema,
+  taskItemSchema,
+  taskSchema
+} from '../state-schema'
 import type { EventKind, GroundLedgerEvent } from './types'
 
 /**
@@ -10,82 +18,60 @@ import type { EventKind, GroundLedgerEvent } from './types'
  *
  * - Payload schemas are `strict`, so an unknown key fails closed rather than
  *   surviving a round trip as unvalidated authority.
- * - Entity bodies (`task`, `provider`, `server`, `session`, `item`) are bounded
- *   portable JSON at this layer. Their full shape is validated by
- *   `parsePersistedState` when the reducer folds them into the projection, so
- *   the ledger vocabulary cannot drift away from the state schema.
+ * - Entity bodies are normalized through the projection's own domain schemas
+ *   before encoding, so the ledger vocabulary cannot drift away from the state
+ *   schema and no unmodelled field becomes durable.
  */
 
 const identifier = z.string().min(1).max(200)
 const stateTimestamp = z.string().min(1).max(100)
 const exactTimestamp = z.iso.datetime({ offset: true })
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/u)
-const portableJson = z.json()
-
 /**
- * Key names that may never appear anywhere inside a ledger entity body.
+ * Entity bodies are normalized through the same domain schemas the projection
+ * uses, before canonical encoding.
  *
- * The projection schema already drops unknown keys, but a rejected key would
- * still have been durably written to the append-only ledger, where it can never
- * be edited out. Entity bodies are therefore screened structurally before the
- * event is encoded. This is a fail-closed guard against accidental capture, not
- * a claim that Ground can detect secret material by inspection.
+ * This matters because the ledger is append-only: a field the projection would
+ * later drop as unknown would nevertheless already be durable, and can never be
+ * edited out. Normalizing first means an unmodelled structural field — a stray
+ * credential, a renderer-supplied grant, anything the schema does not name —
+ * cannot reach the ledger at all.
+ *
+ * It is deliberately not a key-name denylist. Arbitrary user and tool content
+ * stays intact wherever the schema permits it (tool arguments, tool results,
+ * message text), so a legitimate `{"token": ...}` inside recorded tool input
+ * survives, while an unmodelled `apiKey` on a provider profile does not.
  */
-const FORBIDDEN_ENTITY_KEYS: ReadonlySet<string> = new Set([
-  'apikey',
-  'api_key',
-  'accesstoken',
-  'access_token',
-  'refreshtoken',
-  'refresh_token',
-  'authorization',
-  'bearer',
-  'cookie',
-  'credential',
-  'credentials',
-  'passphrase',
-  'password',
-  'privatekey',
-  'private_key',
-  'secret',
-  'secrets',
-  'sessiontoken',
-  'session_token',
-  'token'
-])
+const taskBody = normalizedEntity(taskSchema, 'task')
+const providerBody = normalizedEntity(providerSchema, 'provider')
+const mcpServerBody = normalizedEntity(mcpServerSchema, 'MCP server')
+const taskItemBody = normalizedEntity(taskItemSchema, 'timeline item')
+const runtimeSessionBody = normalizedEntity(
+  runtimeSessionSchema,
+  'runtime session'
+)
+const modelSessionBody = normalizedEntity(
+  modelRuntimeSessionSchema,
+  'model session'
+)
 
-const MAX_ENTITY_BODY_DEPTH = 64
-
-function findForbiddenKey(value: unknown, depth = 0): string | undefined {
-  if (depth > MAX_ENTITY_BODY_DEPTH || !value || typeof value !== 'object') {
-    return undefined
-  }
-  if (Array.isArray(value)) {
-    for (const entry of value) {
-      const found = findForbiddenKey(entry, depth + 1)
-      if (found) return found
-    }
-    return undefined
-  }
-  for (const [key, entry] of Object.entries(value)) {
-    if (FORBIDDEN_ENTITY_KEYS.has(key.toLowerCase())) return key
-    const found = findForbiddenKey(entry, depth + 1)
-    if (found) return found
-  }
-  return undefined
-}
-
-const entityBody = z
-  .record(z.string(), portableJson)
-  .superRefine((value, context) => {
-    const forbidden = findForbiddenKey(value)
-    if (forbidden) {
+function normalizedEntity<Schema extends z.ZodType>(
+  schema: Schema,
+  label: string
+): z.ZodType<Record<string, unknown>> {
+  return z.unknown().transform((value, context) => {
+    const parsed = schema.safeParse(value)
+    if (!parsed.success) {
       context.addIssue({
         code: 'custom',
-        message: `Ledger entity bodies cannot carry credential-bearing key "${forbidden}"`
+        message: `Ledger ${label} body failed domain validation`,
+        params: { issues: parsed.error.issues }
       })
+      return z.NEVER
     }
-  })
+    return parsed.data as Record<string, unknown>
+  }) as unknown as z.ZodType<Record<string, unknown>>
+}
 
 const settingsEntityId = 'settings'
 const secretCleanupEntityId = 'secret-cleanup'
@@ -108,13 +94,13 @@ const defaultProviderPayload = z
   .strict()
 
 const providerUpsertedPayload = z
-  .object({ providerId: identifier, provider: entityBody })
+  .object({ providerId: identifier, provider: providerBody })
   .strict()
 
 const providerSecretTransitionPayload = z
   .object({
     providerId: identifier,
-    provider: entityBody,
+    provider: providerBody,
     stagedReference: identifier.optional(),
     obsoleteReferences: z.array(identifier).max(5_000)
   })
@@ -136,7 +122,7 @@ const secretCleanupAcknowledgedPayload = z
   .strict()
 
 const mcpServerSavedPayload = z
-  .object({ serverId: identifier, server: entityBody })
+  .object({ serverId: identifier, server: mcpServerBody })
   .strict()
 
 const mcpServerDeletedPayload = z
@@ -144,19 +130,19 @@ const mcpServerDeletedPayload = z
   .strict()
 
 const taskCreatedPayload = z
-  .object({ taskId: identifier, task: entityBody })
+  .object({ taskId: identifier, task: taskBody })
   .strict()
 
 const taskForkedPayload = z
   .object({
     taskId: identifier,
     sourceTaskId: identifier,
-    task: entityBody
+    task: taskBody
   })
   .strict()
 
 const taskImportedPayload = z
-  .object({ taskId: identifier, task: entityBody })
+  .object({ taskId: identifier, task: taskBody })
   .strict()
 
 const taskDeletedPayload = z.object({ taskId: identifier }).strict()
@@ -205,7 +191,7 @@ const taskRuntimeSessionPayload = z
   .object({
     ...taskFieldUpdate,
     providerId: identifier,
-    session: entityBody.nullable()
+    session: runtimeSessionBody.nullable()
   })
   .strict()
 
@@ -213,7 +199,7 @@ const taskModelSessionPayload = z
   .object({
     ...taskFieldUpdate,
     providerId: identifier,
-    session: entityBody.nullable()
+    session: modelSessionBody.nullable()
   })
   .strict()
 
@@ -221,7 +207,7 @@ const taskItemAppendedPayload = z
   .object({
     ...taskFieldUpdate,
     itemId: identifier,
-    item: entityBody
+    item: taskItemBody
   })
   .strict()
 

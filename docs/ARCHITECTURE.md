@@ -687,14 +687,24 @@ pending-secret-cleanup references. Every fact is a named event with a bounded,
 generic state replacement, JSON-patch, or whole-snapshot mutation event, so a
 future capability must add a named fact rather than widen an escape hatch.
 
-Two properties hold across that vocabulary. Entity bodies are structurally
-screened for credential-bearing key names before encoding, because the
-projection schema's key-stripping happens after a payload would already be
-durable in an append-only ledger; and `parsePersistedState` remains the single
-authority on entity shape, so the ledger cannot drift from the state schema.
-Managed executions keep outcome-unknown evidence immutable: only an exact
-started claim can complete, completion must match the started action hash, and
-nothing can rewrite an interrupted operation into an outcome.
+Entity bodies are normalized through the projection's own domain schemas before
+canonical encoding. The ledger is append-only, so a field the projection would
+later drop as unknown would nevertheless already be durable and uneditable;
+normalizing first means an unmodelled structural field — a stray credential, a
+renderer-supplied grant — cannot reach the ledger at all, while arbitrary user
+and tool content stays intact wherever the schema permits it.
+`parsePersistedState` remains the single authority on entity shape, so the
+ledger cannot drift from the state schema.
+
+Reducers enforce the same authority the JSON `StateStore` does. Tasks reference
+an existing provider; forking, archiving, and deleting refuse an active task;
+session bindings require a known provider. Managed execution requires a task
+awaiting approval and an unconsumed, non-imported pending approval whose run,
+call, tool, and execution kind all match, with operations and approved run/call
+claims globally unique. Outcome-unknown evidence is immutable: only an exact
+started claim that is still running can complete, completion must match the
+started action hash, and nothing can rewrite an interrupted operation into an
+outcome.
 
 The store is still not constructed by the production desktop. Tasks, runs,
 approvals, and provider revisions continue to be served from the JSON

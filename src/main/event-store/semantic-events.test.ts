@@ -77,6 +77,66 @@ function taskBody(overrides: Record<string, unknown> = {}): Record<string, unkno
   }
 }
 
+function providerBody(
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return { ...initialState().providers[0], ...overrides }
+}
+
+function mcpServerBody(
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return {
+    id: 'server_1',
+    name: 'Docs',
+    namespace: 'docs',
+    enabled: true,
+    trustedFingerprints: {},
+    transport: 'stdio',
+    command: 'docs-server',
+    args: [],
+    createdAt: TIMESTAMP,
+    updatedAt: TIMESTAMP,
+    ...overrides
+  }
+}
+
+function messageBody(
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return {
+    id: 'message_1',
+    kind: 'message',
+    role: 'user',
+    content: 'hello',
+    createdAt: TIMESTAMP,
+    ...overrides
+  }
+}
+
+function runtimeSessionBody(): Record<string, unknown> {
+  return {
+    adapterId: 'cli.codex',
+    sessionCompatibilityId: 'codex',
+    sessionId: 'session_1',
+    providerRevision: TIMESTAMP,
+    workspacePath: '/tmp/workspace',
+    mode: 'agent',
+    updatedAt: TIMESTAMP
+  }
+}
+
+function modelSessionBody(): Record<string, unknown> {
+  return {
+    adapterId: 'model.openai-compatible',
+    providerRevision: TIMESTAMP,
+    model: 'test-model',
+    mode: 'agent',
+    conversation: [],
+    updatedAt: TIMESTAMP
+  }
+}
+
 function approvalActivity(
   overrides: Record<string, unknown> = {}
 ): Record<string, unknown> {
@@ -151,12 +211,12 @@ const SAMPLE_EVENTS: readonly GroundLedgerEvent[] = [
   {
     kind: 'provider.upserted',
     providerId: 'provider_local',
-    provider: { id: 'provider_local', name: 'Local' }
+    provider: providerBody()
   },
   {
     kind: 'provider.secret-transition-published',
     providerId: 'provider_local',
-    provider: { id: 'provider_local', name: 'Local' },
+    provider: providerBody(),
     stagedReference: 'vault:staged',
     obsoleteReferences: ['vault:old']
   },
@@ -167,11 +227,7 @@ const SAMPLE_EVENTS: readonly GroundLedgerEvent[] = [
   },
   { kind: 'secret-cleanup.queued', reference: 'vault:old' },
   { kind: 'secret-cleanup.acknowledged', references: ['vault:old'] },
-  {
-    kind: 'mcp-server.saved',
-    serverId: 'server_1',
-    server: { id: 'server_1', name: 'Docs' }
-  },
+  { kind: 'mcp-server.saved', serverId: 'server_1', server: mcpServerBody() },
   { kind: 'mcp-server.deleted', serverId: 'server_1' },
   { kind: 'task.created', taskId: 'task_1', task: taskBody() },
   {
@@ -223,7 +279,21 @@ const SAMPLE_EVENTS: readonly GroundLedgerEvent[] = [
     kind: 'task.runtime-session-set',
     taskId: 'task_1',
     providerId: 'provider_local',
+    session: runtimeSessionBody(),
+    updatedAt: TIMESTAMP
+  },
+  {
+    kind: 'task.runtime-session-set',
+    taskId: 'task_1',
+    providerId: 'provider_local',
     session: null,
+    updatedAt: TIMESTAMP
+  },
+  {
+    kind: 'task.model-session-set',
+    taskId: 'task_1',
+    providerId: 'provider_local',
+    session: modelSessionBody(),
     updatedAt: TIMESTAMP
   },
   {
@@ -237,7 +307,7 @@ const SAMPLE_EVENTS: readonly GroundLedgerEvent[] = [
     kind: 'task.item-appended',
     taskId: 'task_1',
     itemId: 'message_1',
-    item: { id: 'message_1', kind: 'message' },
+    item: messageBody(),
     updatedAt: TIMESTAMP
   },
   {
@@ -364,20 +434,28 @@ describe('semantic ledger event codec', () => {
     ).toThrow(EventCodecError)
   })
 
-  it('refuses credential-bearing keys anywhere in an entity body', () => {
-    for (const body of [
-      { id: 'provider_local', apiKey: 'sk-live-secret' },
-      { id: 'provider_local', nested: { authorization: 'Bearer token' } },
-      { id: 'provider_local', list: [{ password: 'hunter2' }] }
-    ]) {
-      expect(() =>
-        encodeLedgerEvent({
-          kind: 'provider.upserted',
-          providerId: 'provider_local',
-          provider: body
-        })
-      ).toThrow(EventCodecError)
-    }
+  it('refuses an entity body the domain schema rejects', () => {
+    expect(() =>
+      encodeLedgerEvent({
+        kind: 'provider.upserted',
+        providerId: 'provider_local',
+        provider: { id: 'provider_local', name: 'Local' }
+      })
+    ).toThrow(EventCodecError)
+    expect(() =>
+      encodeLedgerEvent({
+        kind: 'task.created',
+        taskId: 'task_1',
+        task: taskBody({ runStatus: 'exploded' })
+      })
+    ).toThrow(EventCodecError)
+    expect(() =>
+      encodeLedgerEvent({
+        kind: 'mcp-server.saved',
+        serverId: 'server_1',
+        server: mcpServerBody({ transport: 'carrier-pigeon' })
+      })
+    ).toThrow(EventCodecError)
   })
 })
 
@@ -481,26 +559,14 @@ describe('semantic ledger reducers', () => {
           kind: 'task.item-appended',
           taskId: 'task_1',
           itemId: 'message_1',
-          item: {
-            id: 'message_1',
-            kind: 'message',
-            role: 'user',
-            content: 'one',
-            createdAt: TIMESTAMP
-          },
+          item: messageBody({ content: 'one' }),
           updatedAt: TIMESTAMP
         },
         {
           kind: 'task.item-appended',
           taskId: 'task_1',
           itemId: 'message_1',
-          item: {
-            id: 'message_1',
-            kind: 'message',
-            role: 'user',
-            content: 'two',
-            createdAt: TIMESTAMP
-          },
+          item: messageBody({ content: 'two' }),
           updatedAt: TIMESTAMP
         }
       )
@@ -518,22 +584,15 @@ describe('semantic ledger reducers', () => {
   })
 
   it('reassigns tasks and the default provider when a provider is deleted', () => {
-    const second = {
-      id: 'provider_second',
-      name: 'Second',
-      kind: 'openai-compatible' as const,
-      baseUrl: 'http://127.0.0.1:1234/v1',
-      model: 'other-model',
-      hasApiKey: false,
-      supportsTools: true,
-      createdAt: TIMESTAMP,
-      updatedAt: TIMESTAMP
-    }
     const state = fold(
       {
         kind: 'provider.upserted',
         providerId: 'provider_second',
-        provider: { ...second }
+        provider: providerBody({
+          id: 'provider_second',
+          name: 'Second',
+          model: 'other-model'
+        })
       },
       { kind: 'task.created', taskId: 'task_1', task: taskBody() },
       {
@@ -582,12 +641,11 @@ describe('semantic ledger reducers', () => {
       {
         kind: 'provider.secret-transition-published',
         providerId: 'provider_local',
-        provider: {
-          ...initialState().providers[0],
+        provider: providerBody({
           hasApiKey: true,
           credentialRevision: 'revision_2',
           updatedAt: LATER
-        } as unknown as Record<string, unknown>,
+        }),
         stagedReference: 'vault:staged',
         obsoleteReferences: ['vault:previous']
       }
@@ -599,31 +657,62 @@ describe('semantic ledger reducers', () => {
     )
   })
 
-  it('strips unmodelled provider fields from the projection', () => {
-    const state = fold({
+  it('never lets an unmodelled field reach the ledger', () => {
+    // The projection strips unknown keys, but that is too late for an
+    // append-only ledger: normalization has to happen before encoding.
+    const encoded = encodeLedgerEvent({
       kind: 'provider.upserted',
       providerId: 'provider_local',
-      provider: {
-        ...initialState().providers[0],
+      provider: providerBody({
+        apiKey: 'sk-live-secret',
         rendererGrant: 'escalated'
-      } as unknown as Record<string, unknown>
+      })
     })
+    expect(encoded.payloadJson).not.toContain('sk-live-secret')
+    expect(encoded.payloadJson).not.toContain('rendererGrant')
+
+    const state = fold(
+      decodeLedgerEvent(encoded.kind, encoded.entityId, encoded.payloadJson)
+    )
+    expect(state.providers[0]).not.toHaveProperty('apiKey')
     expect(state.providers[0]).not.toHaveProperty('rendererGrant')
   })
 
-  it('saves and deletes MCP profiles', () => {
-    const server = {
-      id: 'server_1',
-      name: 'Docs',
-      namespace: 'docs',
-      enabled: true,
-      trustedFingerprints: {},
-      transport: 'stdio',
-      command: 'docs-server',
-      args: [],
-      createdAt: TIMESTAMP,
+  it('preserves permitted arbitrary content inside recorded tool input', () => {
+    // A user or tool payload may legitimately contain a field called "token".
+    // Only unmodelled *structural* fields are removed.
+    const encoded = encodeLedgerEvent({
+      kind: 'task.item-appended',
+      taskId: 'task_1',
+      itemId: 'activity_2',
+      item: {
+        id: 'activity_2',
+        kind: 'activity',
+        runId: 'run_1',
+        activityType: 'tool',
+        title: 'Call tool',
+        status: 'success',
+        createdAt: TIMESTAMP,
+        toolName: 'mcp__docs__search',
+        input: { token: 'user-supplied-value', nested: { password: 'literal' } }
+      },
       updatedAt: TIMESTAMP
-    }
+    })
+    expect(encoded.payloadJson).toContain('user-supplied-value')
+
+    const state = fold(
+      { kind: 'task.created', taskId: 'task_1', task: taskBody() },
+      decodeLedgerEvent(encoded.kind, encoded.entityId, encoded.payloadJson)
+    )
+    const item = state.tasks[0]?.items[0]
+    expect(item?.kind === 'activity' ? item.input : undefined).toEqual({
+      token: 'user-supplied-value',
+      nested: { password: 'literal' }
+    })
+  })
+
+  it('saves and deletes MCP profiles', () => {
+    const server = mcpServerBody()
     const saved = fold({
       kind: 'mcp-server.saved',
       serverId: 'server_1',
@@ -647,9 +736,158 @@ describe('semantic ledger reducers', () => {
       fold({
         kind: 'task.created',
         taskId: 'task_1',
-        task: taskBody({ runStatus: 'exploded' })
+        task: taskBody({ providerId: 'provider_missing' })
       })
     ).toThrow(EventStoreCorruptionError)
+  })
+})
+
+describe('task lifecycle invariants', () => {
+  const activeStatuses = ['running', 'awaiting-approval'] as const
+
+  function activeTask(): readonly GroundLedgerEvent[] {
+    return [
+      { kind: 'task.created', taskId: 'task_1', task: taskBody() },
+      {
+        kind: 'task.run-status-set',
+        taskId: 'task_1',
+        runStatus: 'running',
+        updatedAt: TIMESTAMP
+      }
+    ]
+  }
+
+  it('requires a created task to reference an existing provider', () => {
+    expect(() =>
+      fold({
+        kind: 'task.created',
+        taskId: 'task_1',
+        task: taskBody({ providerId: 'provider_missing' })
+      })
+    ).toThrow(EventStoreCorruptionError)
+  })
+
+  it('requires an imported task to reference an existing provider', () => {
+    expect(() =>
+      fold({
+        kind: 'task.imported',
+        taskId: 'task_1',
+        task: taskBody({ providerId: 'provider_missing' })
+      })
+    ).toThrow(EventStoreCorruptionError)
+  })
+
+  it('requires a forked task to reference an existing provider', () => {
+    expect(() =>
+      fold(
+        { kind: 'task.created', taskId: 'task_1', task: taskBody() },
+        {
+          kind: 'task.forked',
+          taskId: 'task_2',
+          sourceTaskId: 'task_1',
+          task: taskBody({ id: 'task_2', providerId: 'provider_missing' })
+        }
+      )
+    ).toThrow(EventStoreCorruptionError)
+  })
+
+  it('refuses to fork an active task', () => {
+    for (const runStatus of activeStatuses) {
+      expect(() =>
+        fold(
+          { kind: 'task.created', taskId: 'task_1', task: taskBody() },
+          {
+            kind: 'task.run-status-set',
+            taskId: 'task_1',
+            runStatus,
+            updatedAt: TIMESTAMP
+          },
+          {
+            kind: 'task.forked',
+            taskId: 'task_2',
+            sourceTaskId: 'task_1',
+            task: taskBody({ id: 'task_2' })
+          }
+        )
+      ).toThrow(EventStoreCorruptionError)
+    }
+  })
+
+  it('refuses to archive an active task', () => {
+    expect(() =>
+      fold(...activeTask(), {
+        kind: 'task.archived-set',
+        taskId: 'task_1',
+        archivedAt: LATER,
+        updatedAt: LATER
+      })
+    ).toThrow(EventStoreCorruptionError)
+  })
+
+  it('refuses to delete an active task', () => {
+    expect(() =>
+      fold(...activeTask(), { kind: 'task.deleted', taskId: 'task_1' })
+    ).toThrow(EventStoreCorruptionError)
+  })
+
+  it('requires session events to reference an existing provider', () => {
+    expect(() =>
+      fold(
+        { kind: 'task.created', taskId: 'task_1', task: taskBody() },
+        {
+          kind: 'task.runtime-session-set',
+          taskId: 'task_1',
+          providerId: 'provider_missing',
+          session: runtimeSessionBody(),
+          updatedAt: TIMESTAMP
+        }
+      )
+    ).toThrow(EventStoreCorruptionError)
+    expect(() =>
+      fold(
+        { kind: 'task.created', taskId: 'task_1', task: taskBody() },
+        {
+          kind: 'task.model-session-set',
+          taskId: 'task_1',
+          providerId: 'provider_missing',
+          session: modelSessionBody(),
+          updatedAt: TIMESTAMP
+        }
+      )
+    ).toThrow(EventStoreCorruptionError)
+  })
+
+  it('binds and forgets exactly one session at a time', () => {
+    const bound = fold(
+      { kind: 'task.created', taskId: 'task_1', task: taskBody() },
+      {
+        kind: 'task.model-session-set',
+        taskId: 'task_1',
+        providerId: 'provider_local',
+        session: modelSessionBody(),
+        updatedAt: TIMESTAMP
+      }
+    )
+    expect(bound.tasks[0]?.modelSessions).toHaveProperty('provider_local')
+
+    const forgotten = fold(
+      { kind: 'task.created', taskId: 'task_1', task: taskBody() },
+      {
+        kind: 'task.model-session-set',
+        taskId: 'task_1',
+        providerId: 'provider_local',
+        session: modelSessionBody(),
+        updatedAt: TIMESTAMP
+      },
+      {
+        kind: 'task.model-session-set',
+        taskId: 'task_1',
+        providerId: 'provider_local',
+        session: null,
+        updatedAt: LATER
+      }
+    )
+    expect(forgotten.tasks[0]?.modelSessions).toBeUndefined()
   })
 })
 
@@ -674,6 +912,113 @@ describe('managed execution facts', () => {
   it('refuses a second durable claim on one operation', () => {
     expect(() =>
       fold(...awaitingApproval(), startedExecution, startedExecution)
+    ).toThrow(EventStoreCorruptionError)
+  })
+
+  it('requires the task to be awaiting approval', () => {
+    expect(() =>
+      fold(
+        { kind: 'task.created', taskId: 'task_1', task: taskBody() },
+        {
+          kind: 'task.item-appended',
+          taskId: 'task_1',
+          itemId: 'activity_1',
+          item: approvalActivity(),
+          updatedAt: TIMESTAMP
+        },
+        startedExecution
+      )
+    ).toThrow(EventStoreCorruptionError)
+  })
+
+  it('requires an unconsumed pending approval activity', () => {
+    for (const overrides of [
+      { status: 'running' },
+      { activityType: 'status' },
+      { approvalId: undefined }
+    ] as const) {
+      expect(() =>
+        fold(
+          { kind: 'task.created', taskId: 'task_1', task: taskBody() },
+          {
+            kind: 'task.item-appended',
+            taskId: 'task_1',
+            itemId: 'activity_1',
+            item: approvalActivity(overrides),
+            updatedAt: TIMESTAMP
+          },
+          {
+            kind: 'task.run-status-set',
+            taskId: 'task_1',
+            runStatus: 'awaiting-approval',
+            updatedAt: TIMESTAMP
+          },
+          startedExecution
+        )
+      ).toThrow(EventStoreCorruptionError)
+    }
+  })
+
+  it('refuses imported history as an approval source', () => {
+    expect(() =>
+      fold(
+        { kind: 'task.created', taskId: 'task_1', task: taskBody() },
+        {
+          kind: 'task.item-appended',
+          taskId: 'task_1',
+          itemId: 'activity_1',
+          item: approvalActivity({ historyOnly: true }),
+          updatedAt: TIMESTAMP
+        },
+        {
+          kind: 'task.run-status-set',
+          taskId: 'task_1',
+          runStatus: 'awaiting-approval',
+          updatedAt: TIMESTAMP
+        },
+        startedExecution
+      )
+    ).toThrow(EventStoreCorruptionError)
+  })
+
+  it('refuses an execution kind that does not match its tool', () => {
+    expect(() =>
+      fold(...awaitingApproval(), {
+        ...startedExecution,
+        executionKind: 'workspace-write'
+      })
+    ).toThrow(EventStoreCorruptionError)
+  })
+
+  it('refuses a second claim on the same run and call in another task', () => {
+    expect(() =>
+      fold(
+        ...awaitingApproval(),
+        startedExecution,
+        {
+          kind: 'task.created',
+          taskId: 'task_2',
+          task: taskBody({ id: 'task_2' })
+        },
+        {
+          kind: 'task.item-appended',
+          taskId: 'task_2',
+          itemId: 'activity_2',
+          item: approvalActivity({ id: 'activity_2' }),
+          updatedAt: TIMESTAMP
+        },
+        {
+          kind: 'task.run-status-set',
+          taskId: 'task_2',
+          runStatus: 'awaiting-approval',
+          updatedAt: TIMESTAMP
+        },
+        {
+          ...startedExecution,
+          taskId: 'task_2',
+          itemId: 'activity_2'
+        }
+      )
     ).toThrow(EventStoreCorruptionError)
   })
 
@@ -718,6 +1063,32 @@ describe('managed execution facts', () => {
         completedAt: LATER,
         updatedAt: LATER
       })
+    ).toThrow(EventStoreCorruptionError)
+  })
+
+  it('refuses completion once the activity is no longer running', () => {
+    expect(() =>
+      fold(
+        ...awaitingApproval(),
+        startedExecution,
+        {
+          kind: 'task.activity-updated',
+          taskId: 'task_1',
+          itemId: 'activity_1',
+          status: 'denied',
+          updatedAt: LATER
+        },
+        {
+          kind: 'managed-execution.completed',
+          taskId: 'task_1',
+          itemId: 'activity_1',
+          operationId: 'activity_1',
+          actionSha256: ACTION_SHA,
+          status: 'success',
+          completedAt: LATER,
+          updatedAt: LATER
+        }
+      )
     ).toThrow(EventStoreCorruptionError)
   })
 

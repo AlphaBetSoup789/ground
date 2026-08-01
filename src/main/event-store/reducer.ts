@@ -8,7 +8,8 @@ import { EventStoreCorruptionError } from './errors'
 import type {
   GroundLedgerEvent,
   LedgerEntityBody,
-  LedgerEventRecord
+  LedgerEventRecord,
+  ManagedExecutionStartedEvent
 } from './types'
 
 export interface DecodedLedgerRecord {
@@ -184,6 +185,7 @@ function applyEvent(draft: StateDraft, event: GroundLedgerEvent): void {
     case 'task.created':
     case 'task.imported': {
       const task = insertTask(draft, event.taskId, event.task)
+      requireProvider(draft, task.providerId)
       draft.settings = {
         ...draft.settings,
         selectedTaskId: task.id,
@@ -195,14 +197,15 @@ function applyEvent(draft: StateDraft, event: GroundLedgerEvent): void {
     }
 
     case 'task.forked': {
-      requireTask(draft, event.sourceTaskId)
+      requireInactiveTask(draft, event.sourceTaskId, 'forking')
       const task = insertTask(draft, event.taskId, event.task)
+      requireProvider(draft, task.providerId)
       draft.settings = { ...draft.settings, selectedTaskId: task.id }
       return
     }
 
     case 'task.deleted': {
-      const task = requireTask(draft, event.taskId)
+      const task = requireInactiveTask(draft, event.taskId, 'deleting')
       draft.tasks = draft.tasks.filter((candidate) => candidate.id !== task.id)
       if (draft.settings.selectedTaskId === task.id) {
         const next =
@@ -217,6 +220,11 @@ function applyEvent(draft: StateDraft, event: GroundLedgerEvent): void {
     }
 
     case 'task.archived-set':
+      requireInactiveTask(
+        draft,
+        event.taskId,
+        event.archivedAt === null ? 'unarchiving' : 'archiving'
+      )
       return mutateTask(draft, event.taskId, event.updatedAt, (task) => {
         if (event.archivedAt === null) delete task.archivedAt
         else task.archivedAt = event.archivedAt
@@ -265,6 +273,7 @@ function applyEvent(draft: StateDraft, event: GroundLedgerEvent): void {
       })
 
     case 'task.runtime-session-set':
+      requireProvider(draft, event.providerId)
       return mutateTask(draft, event.taskId, event.updatedAt, (task) => {
         const sessions = { ...(task.runtimeSessions ?? {}) }
         if (event.session === null) delete sessions[event.providerId]
@@ -278,6 +287,7 @@ function applyEvent(draft: StateDraft, event: GroundLedgerEvent): void {
       })
 
     case 'task.model-session-set':
+      requireProvider(draft, event.providerId)
       return mutateTask(draft, event.taskId, event.updatedAt, (task) => {
         const sessions = { ...(task.modelSessions ?? {}) }
         if (event.session === null) delete sessions[event.providerId]
@@ -329,16 +339,32 @@ function applyEvent(draft: StateDraft, event: GroundLedgerEvent): void {
       })
 
     case 'managed-execution.started':
+      requireUnclaimedOperation(draft, event)
       return mutateTask(draft, event.taskId, event.updatedAt, (task) => {
         if (task.archivedAt) {
           throw new EventStoreCorruptionError(
             'Archived tasks cannot begin managed execution'
           )
         }
-        const activity = requireActivity(task, event.itemId)
-        if (activity.managedExecution) {
+        if (task.runStatus !== 'awaiting-approval') {
           throw new EventStoreCorruptionError(
-            `Managed execution ${event.itemId} already has a durable claim`
+            'Managed execution requires the task to be awaiting approval'
+          )
+        }
+        const activity = requireActivity(task, event.itemId)
+        if (
+          activity.status !== 'pending' ||
+          activity.activityType !== 'approval' ||
+          !activity.approvalId ||
+          activity.managedExecution
+        ) {
+          throw new EventStoreCorruptionError(
+            'Managed execution requires an unconsumed pending approval'
+          )
+        }
+        if (activity.historyOnly) {
+          throw new EventStoreCorruptionError(
+            'Imported history cannot begin managed execution'
           )
         }
         if (
@@ -348,6 +374,11 @@ function applyEvent(draft: StateDraft, event: GroundLedgerEvent): void {
         ) {
           throw new EventStoreCorruptionError(
             'Managed execution identity does not match its approval activity'
+          )
+        }
+        if (executionKindForTool(activity.toolName) !== event.executionKind) {
+          throw new EventStoreCorruptionError(
+            'Managed execution kind does not match its pending activity'
           )
         }
         activity.status = 'running'
@@ -378,7 +409,8 @@ function applyEvent(draft: StateDraft, event: GroundLedgerEvent): void {
           marker.operationId !== event.operationId ||
           marker.operationId !== activity.id ||
           marker.claim !== 'approved' ||
-          marker.phase !== 'started'
+          marker.phase !== 'started' ||
+          activity.status !== 'running'
         ) {
           throw new EventStoreCorruptionError(
             marker?.phase === 'uncertain'
@@ -489,6 +521,65 @@ function upsertProvider(
   if (index === -1) providers.push(provider as unknown as (typeof providers)[number])
   else providers[index] = provider as unknown as (typeof providers)[number]
   draft.providers = providers
+}
+
+/**
+ * Mirrors the store's `isTaskActive` guard: a running or approval-blocked task
+ * cannot be forked, archived, or deleted out from under its own run.
+ */
+function requireInactiveTask(
+  draft: StateDraft,
+  taskId: string,
+  action: string
+): Task {
+  const task = requireTask(draft, taskId)
+  if (task.runStatus === 'running' || task.runStatus === 'awaiting-approval') {
+    throw new EventStoreCorruptionError(
+      `Task ${taskId} must be stopped before ${action} it`
+    )
+  }
+  return task
+}
+
+/**
+ * Managed-execution operations and approved run/call claims are globally unique
+ * across every task, so one approval can never authorize a second side effect.
+ */
+function requireUnclaimedOperation(
+  draft: StateDraft,
+  event: ManagedExecutionStartedEvent
+): void {
+  for (const task of draft.tasks) {
+    for (const item of task.items) {
+      if (item.kind !== 'activity' || !item.managedExecution) continue
+      if (item.managedExecution.operationId === event.itemId) {
+        throw new EventStoreCorruptionError(
+          `Managed execution operation ${event.itemId} already exists`
+        )
+      }
+      if (
+        item.managedExecution.claim === 'approved' &&
+        item.runId === event.runId &&
+        item.callId === event.callId
+      ) {
+        throw new EventStoreCorruptionError(
+          'Managed execution call already has a durable claim'
+        )
+      }
+    }
+  }
+}
+
+/** The tool-to-execution-kind mapping the state schema enforces. */
+function executionKindForTool(
+  toolName: string | undefined
+): 'workspace-write' | 'command' | 'mcp' | undefined {
+  if (toolName === 'write_file' || toolName === 'edit_file') {
+    return 'workspace-write'
+  }
+  if (toolName === 'run_command') return 'command'
+  if (toolName?.startsWith('mcp__')) return 'mcp'
+  return undefined
 }
 
 function requireTask(draft: StateDraft, taskId: string): Task {
