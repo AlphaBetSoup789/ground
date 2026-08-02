@@ -42,10 +42,14 @@ import type { GroundLedgerEvent } from './types'
  *
  * ## Coverage
  *
- * Every `StateStore` mutation has a case here. The reverse is not true:
- * `settings.sidebar-collapsed-set` has a reducer and a payload codec but no
- * production writer, since `sidebarCollapsed` is only ever set by initial state.
- * It is intentionally absent below.
+ * Every `StateStore` mutation has a case here. The reverse is not true, by
+ * design: `settings.sidebar-collapsed-set` has a reducer and a payload codec but
+ * no case below, because nothing in production writes `sidebarCollapsed` — it is
+ * only ever set by initial state. The event kind stays in the vocabulary on
+ * purpose. It is a valid persisted setting, and being the simplest possible
+ * payload makes it the foundation's transaction and fault-injection event. The
+ * absent writer is a documented fact about the product, not a gap in this
+ * module.
  */
 
 export interface PlannedMutation {
@@ -390,7 +394,7 @@ export function planStateMutation(
         ]
       }
 
-    case 'update-activities':
+    case 'update-activities': {
       // An empty batch is a claim that the store changed nothing, and this
       // operation can never honestly make it: the store restamps `updatedAt`
       // for any commit it accepts. A caller with nothing to update should not
@@ -398,24 +402,39 @@ export function planStateMutation(
       if (!mutation.updates.length) {
         throw new Error('Activity update must change at least one activity')
       }
-      return {
-        name: 'update-activities',
-        events: mutation.updates.map((update) => ({
+
+      const events = mutation.updates.map((update) => {
+        const changes = definedFields({
+          status: update.status,
+          title: update.title,
+          detail: update.detail,
+          result: update.result,
+          durationMs: update.durationMs,
+          failureKind: update.failureKind,
+          approvalId: update.approvalId
+        })
+        // The payload schema refuses an update that names an activity without
+        // changing any of its fields. Catching it here rather than at encode
+        // time is what keeps the two stores in step: the JSON store has already
+        // committed its restamped `updatedAt` by the time a batch reaches the
+        // codec, so a codec rejection would leave the ledger permanently one
+        // commit behind with no way to catch up.
+        if (!Object.keys(changes).length) {
+          throw new Error(
+            `Activity update for ${update.itemId} must change at least one field`
+          )
+        }
+        return {
           kind: 'task.activity-updated',
           taskId: mutation.taskId,
           updatedAt: mutation.updatedAt,
           itemId: update.itemId,
-          ...definedFields({
-            status: update.status,
-            title: update.title,
-            detail: update.detail,
-            result: update.result,
-            durationMs: update.durationMs,
-            failureKind: update.failureKind,
-            approvalId: update.approvalId
-          })
-        })) as readonly GroundLedgerEvent[]
-      }
+          ...changes
+        }
+      }) as readonly GroundLedgerEvent[]
+
+      return { name: 'update-activities', events }
+    }
 
     case 'begin-managed-execution':
       return {

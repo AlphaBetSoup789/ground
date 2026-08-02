@@ -6,8 +6,8 @@ import type {
   Task
 } from '../../shared/types'
 import type { PersistedStateData } from '../state-schema'
+import type { GroundTaskImportTemplate } from '../task-portability'
 import { sha256 } from './index'
-import type { StateMutation } from './state-mutation-plan'
 import { StateParity, withStateParity } from './state-parity'
 
 /**
@@ -73,18 +73,36 @@ function initialState(
   } as PersistedStateData
 }
 
-/** Mirrors the shape `StateStore` records so the plan names the same facts. */
-function createTaskStep(): {
-  name: string
-  apply: (store: import('../store').StateStore) => Promise<StateMutation>
-} {
+/** A portable task whose provider hint matches nothing, so import falls back. */
+function importTemplate(): GroundTaskImportTemplate {
   return {
-    name: 'create-task',
-    apply: async (store) => {
-      const task = await store.createTask()
-      return { kind: 'create-task', task }
-    }
-  }
+    title: 'Portable task',
+    mode: 'agent',
+    provider: {
+      type: 'model-api',
+      kind: 'anthropic',
+      name: 'Anthropic',
+      model: 'claude-test',
+      supportsTools: true
+    },
+    timeline: [
+      {
+        kind: 'message',
+        role: 'user',
+        content: 'Review this project.'
+      },
+      {
+        kind: 'activity',
+        activityType: 'tool',
+        title: 'Read a file',
+        status: 'success',
+        toolName: 'read_file',
+        result: 'contents'
+      }
+    ],
+    conversation: [],
+    source: { formatVersion: 1, exportedAt: TIMESTAMP }
+  } as GroundTaskImportTemplate
 }
 
 function pendingApproval(runId: string, callId: string): ActivityItem {
@@ -778,6 +796,275 @@ describe('JSON and SQLite state parity', () => {
           updates: []
         })
       })
+    })
+  })
+
+  it('refuses an activity update that names an activity but changes nothing', async () => {
+    await withStateParity(initialState(), async (parity) => {
+      const taskId = await createdTask(parity)
+      const activity = {
+        id: 'activity_one',
+        kind: 'activity' as const,
+        runId: 'run_1',
+        activityType: 'tool' as const,
+        title: 'First',
+        status: 'running' as const,
+        createdAt: TIMESTAMP
+      } as ActivityItem
+
+      await parity.commit({
+        name: 'append an activity',
+        apply: async (store) => {
+          await store.addItem(taskId, activity)
+          return {
+            kind: 'append-task-item',
+            taskId,
+            updatedAt: store.getTask(taskId).updatedAt,
+            item: activity
+          }
+        }
+      })
+
+      // The payload schema refuses a field-less update, but by the time a batch
+      // reaches the codec the JSON store has already committed its restamped
+      // `updatedAt`. Rejecting at plan time is what keeps the ledger from
+      // falling permanently one commit behind.
+      await parity.rejects({
+        name: 'name an activity without changing a field',
+        expect: /must change at least one field/u,
+        apply: (store) =>
+          store.mutateTask(taskId, () => {
+            throw new Error(
+              `Activity update for ${activity.id} must change at least one field`
+            )
+          }),
+        plan: (store) => ({
+          kind: 'update-activities',
+          taskId,
+          updatedAt: store.getTask(taskId).updatedAt,
+          updates: [{ itemId: activity.id }]
+        })
+      })
+    })
+  })
+
+  it('keeps provider upserts and a plain deletion in step', async () => {
+    await withStateParity(initialState(), async (parity) => {
+      await parity.commit({
+        name: 'add a third provider',
+        apply: async (store) => {
+          const added = provider({
+            id: 'provider_third',
+            name: 'Third',
+            model: 'third-model'
+          })
+          await store.upsertProvider(added)
+          return { kind: 'upsert-provider', provider: added }
+        }
+      })
+
+      await parity.commit({
+        name: 'update an existing provider in place',
+        apply: async (store) => {
+          const updated = provider({
+            id: 'provider_third',
+            name: 'Third (renamed)',
+            model: 'third-model-v2',
+            hasApiKey: true,
+            updatedAt: '2026-07-31T14:00:00.000Z'
+          })
+          await store.upsertProvider(updated)
+          return { kind: 'upsert-provider', provider: updated }
+        }
+      })
+
+      // A plain deletion carries no secret references but still cascades the
+      // default provider and any task pointing at the deleted one.
+      const taskId = await createdTask(parity)
+      await parity.commit({
+        name: 'point the task at the provider being deleted',
+        apply: async (store) => {
+          const task = await store.mutateTask(taskId, (mutable) => {
+            mutable.providerId = 'provider_third'
+          })
+          return {
+            kind: 'patch-task',
+            taskId,
+            updatedAt: task.updatedAt,
+            patch: { providerId: 'provider_third' }
+          }
+        }
+      })
+
+      await parity.commit({
+        name: 'delete that provider',
+        apply: async (store) => {
+          await store.deleteProvider('provider_third')
+          return { kind: 'delete-provider', providerId: 'provider_third' }
+        }
+      })
+
+      const state = JSON.parse(parity.canonicalState()) as PersistedStateData
+      expect(state.providers.map((entry) => entry.id)).toEqual([
+        'provider_local',
+        'provider_second'
+      ])
+      expect(state.tasks[0]?.providerId).toBe('provider_local')
+      expect(state.settings.defaultProviderId).toBe('provider_local')
+      expect(state.pendingSecretDeletes).toEqual([])
+    })
+  })
+
+  it('keeps an imported task in step', async () => {
+    await withStateParity(initialState(), async (parity) => {
+      // Pull `defaultProviderId` away from the provider the import will land
+      // on. Without this the imported task's provider already matches the
+      // default, and importing would be indistinguishable from creating.
+      const first = await createdTask(parity)
+      const second = await createdTask(parity)
+      await parity.commit({
+        name: 'move the second task to the other provider',
+        apply: async (store) => {
+          const task = await store.mutateTask(second, (mutable) => {
+            mutable.providerId = 'provider_second'
+          })
+          return {
+            kind: 'patch-task',
+            taskId: second,
+            updatedAt: task.updatedAt,
+            patch: { providerId: 'provider_second' }
+          }
+        }
+      })
+      await parity.commit({
+        name: 'reselect the task on the first provider',
+        apply: async (store) => {
+          await store.selectTask(first)
+          return { kind: 'select-task', taskId: first }
+        }
+      })
+
+      await parity.commit({
+        name: 'import a portable task',
+        apply: async (store) => {
+          const task = await store.importTask(importTemplate())
+          return { kind: 'import-task', task }
+        }
+      })
+
+      const state = JSON.parse(parity.canonicalState()) as PersistedStateData
+      const imported = state.tasks[0]
+      expect(state.settings.selectedTaskId).toBe(imported?.id)
+      // The template's provider hint matches nothing, so the import falls back
+      // to the selected task's provider.
+      expect(imported?.providerId).toBe('provider_local')
+      // Importing selects the task but, unlike creating one, must leave the
+      // default provider alone.
+      expect(state.settings.defaultProviderId).toBe('provider_second')
+      expect(imported?.items.every((item) => item.historyOnly)).toBe(true)
+    })
+  })
+
+  it('keeps runtime and model sessions in step, including clearing them', async () => {
+    await withStateParity(initialState(), async (parity) => {
+      const taskId = await createdTask(parity)
+      const runtimeSession = {
+        adapterId: 'cli.codex',
+        sessionCompatibilityId: 'codex',
+        sessionId: 'session_1',
+        providerRevision: TIMESTAMP,
+        workspacePath: '/workspace/one',
+        mode: 'agent',
+        updatedAt: TIMESTAMP
+      }
+      const modelSession = {
+        adapterId: 'model.openai-compatible',
+        providerRevision: TIMESTAMP,
+        model: 'test-model',
+        mode: 'agent',
+        conversation: [],
+        updatedAt: TIMESTAMP
+      }
+
+      await parity.commit({
+        name: 'record a runtime session',
+        apply: async (store) => {
+          const task = await store.mutateTask(taskId, (mutable) => {
+            mutable.runtimeSessions = {
+              provider_local: structuredClone(runtimeSession)
+            } as NonNullable<Task['runtimeSessions']>
+          })
+          return {
+            kind: 'set-task-runtime-session',
+            taskId,
+            updatedAt: task.updatedAt,
+            providerId: 'provider_local',
+            session: runtimeSession
+          }
+        }
+      })
+
+      await parity.commit({
+        name: 'record a model session for the same task',
+        apply: async (store) => {
+          const task = await store.mutateTask(taskId, (mutable) => {
+            mutable.modelSessions = {
+              provider_local: structuredClone(modelSession)
+            } as NonNullable<Task['modelSessions']>
+          })
+          return {
+            kind: 'set-task-model-session',
+            taskId,
+            updatedAt: task.updatedAt,
+            providerId: 'provider_local',
+            session: modelSession
+          }
+        }
+      })
+
+      // Clearing the last session for a provider must drop the whole map, not
+      // leave an empty object behind.
+      await parity.commit({
+        name: 'clear the runtime session',
+        apply: async (store) => {
+          const task = await store.mutateTask(taskId, (mutable) => {
+            delete mutable.runtimeSessions?.provider_local
+            if (!Object.keys(mutable.runtimeSessions ?? {}).length) {
+              delete mutable.runtimeSessions
+            }
+          })
+          return {
+            kind: 'set-task-runtime-session',
+            taskId,
+            updatedAt: task.updatedAt,
+            providerId: 'provider_local',
+            session: null
+          }
+        }
+      })
+
+      await parity.commit({
+        name: 'clear the model session',
+        apply: async (store) => {
+          const task = await store.mutateTask(taskId, (mutable) => {
+            delete mutable.modelSessions?.provider_local
+            if (!Object.keys(mutable.modelSessions ?? {}).length) {
+              delete mutable.modelSessions
+            }
+          })
+          return {
+            kind: 'set-task-model-session',
+            taskId,
+            updatedAt: task.updatedAt,
+            providerId: 'provider_local',
+            session: null
+          }
+        }
+      })
+
+      const state = JSON.parse(parity.canonicalState()) as PersistedStateData
+      expect(state.tasks[0]).not.toHaveProperty('runtimeSessions')
+      expect(state.tasks[0]).not.toHaveProperty('modelSessions')
     })
   })
 
