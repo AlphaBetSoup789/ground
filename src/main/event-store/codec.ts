@@ -16,6 +16,11 @@ import {
   EventStoreVersionError
 } from './errors'
 import {
+  SEMANTIC_PAYLOAD_CODECS,
+  toEventPayload,
+  type SemanticEventKind
+} from './event-payloads'
+import {
   EVENT_SCHEMA_VERSION,
   MAX_EVENT_PAYLOAD_BYTES,
   MAX_PROJECTION_BYTES,
@@ -45,12 +50,6 @@ const bootstrapPayloadSchema = z
     ),
     normalizedStateSha256: sha256Schema,
     state: z.unknown()
-  })
-  .strict()
-
-const sidebarCollapsedPayloadSchema = z
-  .object({
-    collapsed: z.boolean()
   })
   .strict()
 
@@ -172,35 +171,32 @@ export function encodeLedgerEvent(event: GroundLedgerEvent): EncodedLedgerEvent 
         )
       }
     }
-    case 'settings.sidebar-collapsed-set': {
-      const parsed = sidebarCollapsedPayloadSchema.safeParse({
-        collapsed: event.collapsed
-      })
+    default: {
+      // Own-property check, not truthiness: a caller that reaches past the
+      // static type with `constructor`, `toString`, or `__proto__` would
+      // otherwise inherit a truthy value off `Object.prototype` and fail with a
+      // TypeError instead of this boundary's error.
+      if (!Object.hasOwn(SEMANTIC_PAYLOAD_CODECS, event.kind)) {
+        throw new EventCodecError(
+          `Unsupported ledger event kind ${String(event.kind)}`
+        )
+      }
+      const codec = SEMANTIC_PAYLOAD_CODECS[event.kind]
+      const parsed = codec.schema.safeParse(toEventPayload(event))
       if (!parsed.success) {
         throw new EventCodecError(
-          'Sidebar-collapse event failed schema validation',
+          `Ledger event ${event.kind} failed schema validation`,
           { cause: parsed.error }
         )
       }
       return {
-        event: {
-          kind: event.kind,
-          collapsed: parsed.data.collapsed
-        },
+        event: { kind: event.kind, ...parsed.data } as GroundLedgerEvent,
         kind: event.kind,
-        entityId: 'settings',
+        entityId: codec.entityId(parsed.data),
         payloadJson: encodeCanonicalJson(parsed.data, {
           maxBytes: MAX_EVENT_PAYLOAD_BYTES
         })
       }
-    }
-    default: {
-      const neverEvent: never = event
-      throw new EventCodecError(
-        `Unsupported ledger event kind ${String(
-          (neverEvent as { kind?: unknown }).kind
-        )}`
-      )
     }
   }
 }
@@ -237,26 +233,32 @@ export function decodeLedgerEvent(
       }
       return parseBootstrapEvent({ kind, ...(payload as object) })
     }
-    case 'settings.sidebar-collapsed-set': {
-      if (entityId !== 'settings') {
-        throw new EventStoreCorruptionError(
-          'Sidebar-collapse event has the wrong entity ID'
+    default: {
+      // `kind` is an untrusted database string here, so the own-property check
+      // is load-bearing: `constructor`, `toString`, and `__proto__` all resolve
+      // to truthy inherited values and would crash with a TypeError rather than
+      // failing closed at this boundary.
+      if (!Object.hasOwn(SEMANTIC_PAYLOAD_CODECS, kind)) {
+        throw new EventStoreVersionError(
+          'event',
+          `Unsupported ledger event kind ${kind}`
         )
       }
-      const parsed = sidebarCollapsedPayloadSchema.safeParse(payload)
+      const codec = SEMANTIC_PAYLOAD_CODECS[kind as SemanticEventKind]
+      const parsed = codec.schema.safeParse(payload)
       if (!parsed.success) {
         throw new EventStoreCorruptionError(
-          'Sidebar-collapse event payload failed schema validation',
+          `Ledger event ${kind} payload failed schema validation`,
           { cause: parsed.error }
         )
       }
-      return { kind, collapsed: parsed.data.collapsed }
+      if (entityId !== codec.entityId(parsed.data)) {
+        throw new EventStoreCorruptionError(
+          `Ledger event ${kind} has the wrong entity ID`
+        )
+      }
+      return { kind, ...parsed.data } as GroundLedgerEvent
     }
-    default:
-      throw new EventStoreVersionError(
-        'event',
-        `Unsupported ledger event kind ${kind}`
-      )
   }
 }
 

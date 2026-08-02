@@ -166,7 +166,7 @@ const cliProviderSchema = z
     }
   })
 
-const providerSchema = z.discriminatedUnion('kind', [
+export const providerSchema = z.discriminatedUnion('kind', [
   z.object({ ...modelProviderFields, kind: z.literal('openai') }),
   z.object({ ...modelProviderFields, kind: z.literal('anthropic') }),
   z.object({ ...modelProviderFields, kind: z.literal('google') }),
@@ -190,7 +190,7 @@ const baseMcpServer = {
   updatedAt: timestamp
 }
 
-const mcpServerSchema = z.discriminatedUnion('transport', [
+export const mcpServerSchema = z.discriminatedUnion('transport', [
   z.object({
     ...baseMcpServer,
     transport: z.literal('streamable-http'),
@@ -400,6 +400,11 @@ const activityItemSchema = z
     }
   })
 
+export const taskItemSchema = z.discriminatedUnion('kind', [
+  messageItemSchema,
+  activityItemSchema
+])
+
 const providerStateSchema = z.object({
   adapterId: z.string().min(1).max(200),
   schemaVersion: z.literal(1),
@@ -463,7 +468,7 @@ const runtimeSessionFields = {
   updatedAt: timestamp
 }
 
-const runtimeSessionSchema = z.union([
+export const runtimeSessionSchema = z.union([
   z.object({
     adapterId: identifier,
     sessionCompatibilityId: identifier,
@@ -494,7 +499,7 @@ const runtimeSessionsSchema = z
     )
   )
 
-const modelRuntimeSessionSchema = z.object({
+export const modelRuntimeSessionSchema = z.object({
   adapterId: z.string().min(1).max(200),
   providerRevision: timestamp,
   providerFingerprint: sha256.optional(),
@@ -508,7 +513,7 @@ const modelRuntimeSessionSchema = z.object({
   updatedAt: timestamp
 })
 
-const taskSchema = z
+export const taskSchema = z
   .object({
     id: identifier,
     title: z.string().min(1).max(120),
@@ -522,9 +527,7 @@ const taskSchema = z
     updatedAt: timestamp,
     runtimeSessions: runtimeSessionsSchema.optional(),
     modelSessions: z.record(identifier, modelRuntimeSessionSchema).optional(),
-    items: z
-      .array(z.discriminatedUnion('kind', [messageItemSchema, activityItemSchema]))
-      .max(MAX_PERSISTED_TASK_ITEMS)
+    items: z.array(taskItemSchema).max(MAX_PERSISTED_TASK_ITEMS)
   })
   .refine(
     (task) =>

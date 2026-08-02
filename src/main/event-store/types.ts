@@ -19,6 +19,42 @@ export const MAX_DATABASE_BYTES = 512 * 1024 * 1024
 export type EventKind =
   | 'legacy-state.bootstrapped'
   | 'settings.sidebar-collapsed-set'
+  | 'settings.selected-task-set'
+  | 'settings.default-provider-set'
+  | 'provider.upserted'
+  | 'provider.secret-transition-published'
+  | 'provider.deleted'
+  | 'secret-cleanup.queued'
+  | 'secret-cleanup.acknowledged'
+  | 'mcp-server.saved'
+  | 'mcp-server.deleted'
+  | 'task.created'
+  | 'task.forked'
+  | 'task.imported'
+  | 'task.deleted'
+  | 'task.archived-set'
+  | 'task.title-set'
+  | 'task.provider-set'
+  | 'task.mode-set'
+  | 'task.workspace-set'
+  | 'task.imported-history-set'
+  | 'task.run-status-set'
+  | 'task.runtime-session-set'
+  | 'task.model-session-set'
+  | 'task.item-appended'
+  | 'task.message-content-set'
+  | 'task.activity-updated'
+  | 'managed-execution.started'
+  | 'managed-execution.completed'
+  | 'managed-execution.interrupted'
+
+/**
+ * Entity bodies are carried as opaque portable JSON here and validated in full
+ * by `parsePersistedState` when the reducer folds them into the projection.
+ * Keeping one validation authority prevents the ledger vocabulary and the state
+ * schema from drifting apart.
+ */
+export type LedgerEntityBody = Record<string, unknown>
 
 export interface LegacyStateBootstrappedEvent {
   readonly kind: 'legacy-state.bootstrapped'
@@ -35,14 +71,266 @@ export interface SidebarCollapsedSetEvent {
   readonly collapsed: boolean
 }
 
+export interface SelectedTaskSetEvent {
+  readonly kind: 'settings.selected-task-set'
+  /** `null` clears the selection without deleting a task. */
+  readonly taskId: string | null
+}
+
+export interface DefaultProviderSetEvent {
+  readonly kind: 'settings.default-provider-set'
+  readonly providerId: string
+}
+
+export interface ProviderUpsertedEvent {
+  readonly kind: 'provider.upserted'
+  readonly providerId: string
+  readonly provider: LedgerEntityBody
+}
+
 /**
- * The first engine slice deliberately exposes only semantic facts that its
- * reducer understands. Later task/run/approval facts extend this union rather
- * than introducing a generic state replacement or JSON-patch escape hatch.
+ * Publishes an exact provider revision together with the vault-cleanup
+ * references that revision makes obsolete. The ledger records only opaque
+ * references; secret material never enters an event.
+ */
+export interface ProviderSecretTransitionPublishedEvent {
+  readonly kind: 'provider.secret-transition-published'
+  readonly providerId: string
+  readonly provider: LedgerEntityBody
+  readonly stagedReference?: string
+  readonly obsoleteReferences: readonly string[]
+}
+
+export interface ProviderDeletedEvent {
+  readonly kind: 'provider.deleted'
+  readonly providerId: string
+  readonly obsoleteReferences: readonly string[]
+}
+
+export interface SecretCleanupQueuedEvent {
+  readonly kind: 'secret-cleanup.queued'
+  readonly reference: string
+}
+
+export interface SecretCleanupAcknowledgedEvent {
+  readonly kind: 'secret-cleanup.acknowledged'
+  readonly references: readonly string[]
+}
+
+export interface McpServerSavedEvent {
+  readonly kind: 'mcp-server.saved'
+  readonly serverId: string
+  readonly server: LedgerEntityBody
+}
+
+export interface McpServerDeletedEvent {
+  readonly kind: 'mcp-server.deleted'
+  readonly serverId: string
+}
+
+export interface TaskCreatedEvent {
+  readonly kind: 'task.created'
+  readonly taskId: string
+  readonly task: LedgerEntityBody
+}
+
+export interface TaskForkedEvent {
+  readonly kind: 'task.forked'
+  readonly taskId: string
+  readonly sourceTaskId: string
+  readonly task: LedgerEntityBody
+}
+
+export interface TaskImportedEvent {
+  readonly kind: 'task.imported'
+  readonly taskId: string
+  readonly task: LedgerEntityBody
+}
+
+export interface TaskDeletedEvent {
+  readonly kind: 'task.deleted'
+  readonly taskId: string
+}
+
+export interface TaskArchivedSetEvent {
+  readonly kind: 'task.archived-set'
+  readonly taskId: string
+  /** `null` unarchives; a timestamp archives at that exact instant. */
+  readonly archivedAt: string | null
+  readonly updatedAt: string
+}
+
+export interface TaskTitleSetEvent {
+  readonly kind: 'task.title-set'
+  readonly taskId: string
+  readonly title: string
+  readonly updatedAt: string
+}
+
+export interface TaskProviderSetEvent {
+  readonly kind: 'task.provider-set'
+  readonly taskId: string
+  readonly providerId: string
+  readonly updatedAt: string
+}
+
+export interface TaskModeSetEvent {
+  readonly kind: 'task.mode-set'
+  readonly taskId: string
+  readonly mode: 'ask' | 'agent'
+  readonly updatedAt: string
+}
+
+export interface TaskWorkspaceSetEvent {
+  readonly kind: 'task.workspace-set'
+  readonly taskId: string
+  readonly workspacePath: string | null
+  readonly updatedAt: string
+}
+
+export interface TaskImportedHistorySetEvent {
+  readonly kind: 'task.imported-history-set'
+  readonly taskId: string
+  readonly includeImportedHistory: boolean | null
+  readonly updatedAt: string
+}
+
+export interface TaskRunStatusSetEvent {
+  readonly kind: 'task.run-status-set'
+  readonly taskId: string
+  readonly runStatus: 'idle' | 'running' | 'awaiting-approval' | 'failed'
+  readonly updatedAt: string
+}
+
+export interface TaskRuntimeSessionSetEvent {
+  readonly kind: 'task.runtime-session-set'
+  readonly taskId: string
+  readonly providerId: string
+  /** `null` forgets exactly one runtime session binding. */
+  readonly session: LedgerEntityBody | null
+  readonly updatedAt: string
+}
+
+export interface TaskModelSessionSetEvent {
+  readonly kind: 'task.model-session-set'
+  readonly taskId: string
+  readonly providerId: string
+  /** `null` forgets exactly one model session binding. */
+  readonly session: LedgerEntityBody | null
+  readonly updatedAt: string
+}
+
+export interface TaskItemAppendedEvent {
+  readonly kind: 'task.item-appended'
+  readonly taskId: string
+  readonly itemId: string
+  readonly item: LedgerEntityBody
+  readonly updatedAt: string
+}
+
+export interface TaskMessageContentSetEvent {
+  readonly kind: 'task.message-content-set'
+  readonly taskId: string
+  readonly itemId: string
+  readonly content: string
+  readonly updatedAt: string
+}
+
+/**
+ * A bounded, named-field activity progression. Absent fields are unchanged and
+ * an explicit `null` clears exactly one optional field; there is deliberately no
+ * arbitrary-path patch form.
+ */
+export interface TaskActivityUpdatedEvent {
+  readonly kind: 'task.activity-updated'
+  readonly taskId: string
+  readonly itemId: string
+  readonly updatedAt: string
+  readonly status?: 'pending' | 'running' | 'success' | 'error' | 'denied'
+  readonly title?: string
+  readonly detail?: string | null
+  readonly result?: string | null
+  readonly durationMs?: number | null
+  readonly failureKind?: string | null
+  readonly approvalId?: string | null
+}
+
+export interface ManagedExecutionStartedEvent {
+  readonly kind: 'managed-execution.started'
+  readonly taskId: string
+  readonly itemId: string
+  readonly runId: string
+  readonly callId: string
+  readonly toolName: string
+  readonly executionKind: 'workspace-write' | 'command' | 'mcp'
+  readonly actionSha256: string
+  readonly approvalSha256: string
+  readonly startedAt: string
+  readonly updatedAt: string
+}
+
+export interface ManagedExecutionCompletedEvent {
+  readonly kind: 'managed-execution.completed'
+  readonly taskId: string
+  readonly itemId: string
+  readonly operationId: string
+  readonly actionSha256: string
+  readonly status: 'success' | 'error'
+  readonly result?: string
+  readonly durationMs?: number
+  readonly completedAt: string
+  readonly updatedAt: string
+}
+
+/**
+ * Immutable outcome-unknown evidence. Nothing in the reducer may rewrite an
+ * interrupted operation into a completed or failed one.
+ */
+export interface ManagedExecutionInterruptedEvent {
+  readonly kind: 'managed-execution.interrupted'
+  readonly taskId: string
+  readonly itemId: string
+  readonly operationId: string
+  readonly interruptedAt: string
+  readonly updatedAt: string
+}
+
+/**
+ * Every fact the reducer understands. New durable behavior extends this union
+ * with a named event rather than introducing a generic state replacement, a
+ * JSON-patch escape hatch, or a whole-snapshot mutation.
  */
 export type GroundLedgerEvent =
   | LegacyStateBootstrappedEvent
   | SidebarCollapsedSetEvent
+  | SelectedTaskSetEvent
+  | DefaultProviderSetEvent
+  | ProviderUpsertedEvent
+  | ProviderSecretTransitionPublishedEvent
+  | ProviderDeletedEvent
+  | SecretCleanupQueuedEvent
+  | SecretCleanupAcknowledgedEvent
+  | McpServerSavedEvent
+  | McpServerDeletedEvent
+  | TaskCreatedEvent
+  | TaskForkedEvent
+  | TaskImportedEvent
+  | TaskDeletedEvent
+  | TaskArchivedSetEvent
+  | TaskTitleSetEvent
+  | TaskProviderSetEvent
+  | TaskModeSetEvent
+  | TaskWorkspaceSetEvent
+  | TaskImportedHistorySetEvent
+  | TaskRunStatusSetEvent
+  | TaskRuntimeSessionSetEvent
+  | TaskModelSessionSetEvent
+  | TaskItemAppendedEvent
+  | TaskMessageContentSetEvent
+  | TaskActivityUpdatedEvent
+  | ManagedExecutionStartedEvent
+  | ManagedExecutionCompletedEvent
+  | ManagedExecutionInterruptedEvent
 
 export interface LedgerEventRecord {
   readonly eventSchemaVersion: typeof EVENT_SCHEMA_VERSION
