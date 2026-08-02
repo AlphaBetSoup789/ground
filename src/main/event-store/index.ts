@@ -95,7 +95,12 @@ export {
   type ManagedExecutionInterruptedEvent,
   type LedgerEntityBody
 } from './types'
-export { SEMANTIC_PAYLOAD_CODECS, toEventPayload } from './event-payloads'
+export {
+  SEMANTIC_PAYLOAD_CODECS,
+  toEventPayload,
+  type SemanticEventKind,
+  type SemanticPayloadCodec
+} from './event-payloads'
 export {
   defaultWitnessPath,
   FileHeadWitnessStore,

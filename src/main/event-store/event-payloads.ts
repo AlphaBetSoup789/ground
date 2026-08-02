@@ -298,8 +298,20 @@ const constantEntityId =
   (): string =>
     value
 
+/**
+ * Every event kind except the bootstrap fact, which carries a whole normalized
+ * projection and is special-cased in the codec rather than given a payload
+ * schema here.
+ */
+export type SemanticEventKind = Exclude<EventKind, 'legacy-state.bootstrapped'>
+
+/**
+ * Total over `SemanticEventKind` rather than partial: adding a kind to
+ * `EventKind` without a codec is a compile error, so the registry cannot fall
+ * silently behind the event vocabulary.
+ */
 export const SEMANTIC_PAYLOAD_CODECS: Readonly<
-  Partial<Record<EventKind, SemanticPayloadCodec>>
+  Record<SemanticEventKind, SemanticPayloadCodec>
 > = Object.freeze({
   'settings.sidebar-collapsed-set': {
     schema: sidebarCollapsedPayload,
@@ -387,7 +399,7 @@ export const SEMANTIC_PAYLOAD_CODECS: Readonly<
     schema: managedExecutionInterruptedPayload,
     entityId: byTaskId
   }
-} satisfies Partial<Record<EventKind, SemanticPayloadCodec>>)
+} satisfies Record<SemanticEventKind, SemanticPayloadCodec>)
 
 /**
  * Strips `kind` and drops absent optional fields. Canonical JSON refuses

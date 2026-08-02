@@ -15,7 +15,11 @@ import {
   EventStoreCorruptionError,
   EventStoreVersionError
 } from './errors'
-import { SEMANTIC_PAYLOAD_CODECS, toEventPayload } from './event-payloads'
+import {
+  SEMANTIC_PAYLOAD_CODECS,
+  toEventPayload,
+  type SemanticEventKind
+} from './event-payloads'
 import {
   EVENT_SCHEMA_VERSION,
   MAX_EVENT_PAYLOAD_BYTES,
@@ -168,12 +172,16 @@ export function encodeLedgerEvent(event: GroundLedgerEvent): EncodedLedgerEvent 
       }
     }
     default: {
-      const codec = SEMANTIC_PAYLOAD_CODECS[event.kind]
-      if (!codec) {
+      // Own-property check, not truthiness: a caller that reaches past the
+      // static type with `constructor`, `toString`, or `__proto__` would
+      // otherwise inherit a truthy value off `Object.prototype` and fail with a
+      // TypeError instead of this boundary's error.
+      if (!Object.hasOwn(SEMANTIC_PAYLOAD_CODECS, event.kind)) {
         throw new EventCodecError(
           `Unsupported ledger event kind ${String(event.kind)}`
         )
       }
+      const codec = SEMANTIC_PAYLOAD_CODECS[event.kind]
       const parsed = codec.schema.safeParse(toEventPayload(event))
       if (!parsed.success) {
         throw new EventCodecError(
@@ -226,13 +234,17 @@ export function decodeLedgerEvent(
       return parseBootstrapEvent({ kind, ...(payload as object) })
     }
     default: {
-      const codec = SEMANTIC_PAYLOAD_CODECS[kind as EventKind]
-      if (!codec) {
+      // `kind` is an untrusted database string here, so the own-property check
+      // is load-bearing: `constructor`, `toString`, and `__proto__` all resolve
+      // to truthy inherited values and would crash with a TypeError rather than
+      // failing closed at this boundary.
+      if (!Object.hasOwn(SEMANTIC_PAYLOAD_CODECS, kind)) {
         throw new EventStoreVersionError(
           'event',
           `Unsupported ledger event kind ${kind}`
         )
       }
+      const codec = SEMANTIC_PAYLOAD_CODECS[kind as SemanticEventKind]
       const parsed = codec.schema.safeParse(payload)
       if (!parsed.success) {
         throw new EventStoreCorruptionError(
