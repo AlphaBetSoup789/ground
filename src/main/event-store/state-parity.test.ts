@@ -757,6 +757,30 @@ describe('JSON and SQLite state parity', () => {
     })
   })
 
+  it('refuses an activity update that would claim to change nothing', async () => {
+    await withStateParity(initialState(), async (parity) => {
+      const taskId = await createdTask(parity)
+
+      // The store restamps `updatedAt` for any commit it accepts, so an empty
+      // batch here could never honestly mean "nothing changed". Planning one
+      // would leave the ledger a commit behind the JSON store.
+      await parity.rejects({
+        name: 'update no activities at all',
+        expect: /must change at least one activity/u,
+        apply: (store) =>
+          store.mutateTask(taskId, () => {
+            throw new Error('Activity update must change at least one activity')
+          }),
+        plan: (store) => ({
+          kind: 'update-activities',
+          taskId,
+          updatedAt: store.getTask(taskId).updatedAt,
+          updates: []
+        })
+      })
+    })
+  })
+
   it('appends a message and revises its content', async () => {
     await withStateParity(initialState(), async (parity) => {
       const taskId = await createdTask(parity)

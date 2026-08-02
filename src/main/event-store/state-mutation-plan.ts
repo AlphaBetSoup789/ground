@@ -391,6 +391,13 @@ export function planStateMutation(
       }
 
     case 'update-activities':
+      // An empty batch is a claim that the store changed nothing, and this
+      // operation can never honestly make it: the store restamps `updatedAt`
+      // for any commit it accepts. A caller with nothing to update should not
+      // have committed, so refuse rather than plan a silent divergence.
+      if (!mutation.updates.length) {
+        throw new Error('Activity update must change at least one activity')
+      }
       return {
         name: 'update-activities',
         events: mutation.updates.map((update) => ({
