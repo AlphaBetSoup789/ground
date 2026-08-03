@@ -706,10 +706,35 @@ started claim that is still running can complete, completion must match the
 started action hash, and nothing can rewrite an interrupted operation into an
 outcome.
 
+A production mutation planner translates each `StateStore` mutation into the
+named event batch that reproduces it, and a composition layer publishes that
+batch. Where the composer is used, SQLite is the only authority: it plans
+against the ledger's own committed projection, appends with the exact head that
+plan was built against, verifies the committed projection matches the plan, and
+only then adopts it as memory. Nothing observable changes before durable
+publication, and no seam exists through which a JSON document could become a
+second authority or a fallback.
+
+The composer separates a mutation that definitely did not commit from one whose
+durable outcome it cannot describe. Planner rejections, schema rejections, and
+head conflicts are ordinary operational errors that leave memory and the ledger
+head untouched and may be retried. An ambiguous commit, a post-commit
+head-witness failure, or a committed projection that does not match its plan
+seal the composer and invoke the same process-exit authority the JSON store
+uses, through the same `StatePersistenceError` and `onPersistenceUncertain`
+contract.
+
 The store is still not constructed by the production desktop. Tasks, runs,
 approvals, and provider revisions continue to be served from the JSON
-`StateStore` until every production mutation path has event coverage and the
-migration path is exercised end to end, so the cutover remains a later slice.
+`StateStore`, because activating SQLite today would regress three recovery
+behaviors the composition layer does not address. Copy-on-migrate does not
+perform the interrupted-run transition `StateStore.load` performs, so a started
+managed execution would reach the ledger without becoming outcome-unknown. It
+reads only the primary JSON document, where `StateStore` falls through three
+retained generations and quarantines unreadable files. Local snapshot review,
+export, and restore are defined over rotated JSON generations and have no ledger
+equivalent yet. Those are recovery-contract work rather than composition work,
+so the cutover remains a later slice.
 
 Native package workflows target macOS arm64/x64, Windows x64, and Linux x64. A
 fixed packaged smoke verifies app identity, OS-encrypted vault round-trip, the

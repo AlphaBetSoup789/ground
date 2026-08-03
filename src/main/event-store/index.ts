@@ -102,6 +102,18 @@ export {
   type SemanticPayloadCodec
 } from './event-payloads'
 export {
+  planStateMutation,
+  type ActivityUpdate,
+  type PlannedMutation,
+  type StateMutation,
+  type TaskFieldPatch
+} from './state-mutation-plan'
+export {
+  SqliteStateComposer,
+  type ComposedMutation,
+  type StateComposerOptions
+} from './state-composer'
+export {
   defaultWitnessPath,
   FileHeadWitnessStore,
   fileHeadWitnessStore
