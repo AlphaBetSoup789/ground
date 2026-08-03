@@ -529,10 +529,24 @@ describe('SQLite state composer', () => {
         composer.commit({ kind: 'create-task', task: taskBody() })
       ).rejects.toBeInstanceOf(EventStoreConflictError)
 
-      // A definite failure: nothing sealed, no exit authority, memory intact.
+      // A definite failure: nothing sealed and no exit authority.
       expect(composer.isSealed()).toBe(false)
       expect(uncertainties).toEqual([])
-      expect(encodeProjection(composer.snapshot()).stateJson).toBe(before)
+      expect(before).not.toBe('')
+
+      // The conflict resynchronized this view from the ledger rather than
+      // leaving it stale, so the composer stays usable.
+      expect(composer.snapshot().settings.sidebarCollapsed).toBe(true)
+      expect(composer.head().sequence).toBe(ledger.getHead().sequence)
+
+      const recovered = await composer.commit({
+        kind: 'create-task',
+        task: taskBody()
+      })
+      expect(recovered.committed).toBe(true)
+      expect(composer.snapshot().tasks).toHaveLength(1)
+      // And the outside writer's change survived the recovery.
+      expect(composer.snapshot().settings.sidebarCollapsed).toBe(true)
     })
   })
 

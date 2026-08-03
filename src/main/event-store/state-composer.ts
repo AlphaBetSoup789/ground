@@ -1,7 +1,10 @@
 import type { PersistedStateData } from '../state-schema'
 import { StatePersistenceError } from '../store'
 import { encodeProjection } from './codec'
-import { EventStorePersistenceUncertainError } from './errors'
+import {
+  EventStoreConflictError,
+  EventStorePersistenceUncertainError
+} from './errors'
 import { reduceLedgerEvent } from './reducer'
 import type { SqliteEventStore } from './sqlite-event-store'
 import {
@@ -48,7 +51,10 @@ import type { LedgerHead } from './types'
  *
  * A planner rejection, a schema rejection, or a head conflict all mean the batch
  * definitely did not commit. They are ordinary operational errors: memory and
- * the ledger head are untouched and the caller may retry.
+ * the ledger head are untouched and the caller may retry. A head conflict
+ * additionally resynchronizes this view from the ledger, so a writer that
+ * arrived first cannot wedge every later mutation against a head that no longer
+ * exists.
  *
  * An ambiguous commit, a post-commit witness failure, or a committed projection
  * that does not match the plan all mean durable state may have moved in a way
@@ -184,6 +190,20 @@ export class SqliteStateComposer {
           // Ambiguous commit or post-commit witness failure. Durable state may
           // have moved; this process can no longer describe it.
           throw this.sealForUncertainty(error)
+        }
+        if (error instanceof EventStoreConflictError) {
+          // A writer this composer never saw reached the ledger first. The
+          // batch definitely did not commit, but this view is now stale, and
+          // leaving it stale would fail every later mutation against a head
+          // that no longer exists.
+          //
+          // Resynchronize from the ledger — still the only authority — and
+          // rethrow. The mutation is deliberately not replanned or retried
+          // here: its preconditions were checked against state that no longer
+          // holds, so re-deciding it belongs to the caller, against the fresh
+          // projection.
+          this.state = this.ledger.getProjection()
+          this.trackedHead = this.ledger.getHead()
         }
         // A definite failure before publication. Nothing moved, so this stays an
         // ordinary operational error and must not be reported as uncertainty.
