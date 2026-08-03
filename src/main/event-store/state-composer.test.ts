@@ -36,14 +36,27 @@ const ACTION_SHA = sha256('action')
 const APPROVAL_SHA = sha256('approval')
 
 const temporaryDirectories: string[] = []
+const openLedgers: SqliteEventStore[] = []
 
 afterEach(async () => {
+  // Windows refuses to unlink an open database file, so every ledger a test
+  // opened is closed before its directory is removed. A sealed store still
+  // closes; its close error is irrelevant to cleanup.
+  await Promise.all(
+    openLedgers.splice(0).map((ledger) => ledger.close().catch(() => undefined))
+  )
   await Promise.all(
     temporaryDirectories
       .splice(0)
       .map((directory) => rm(directory, { recursive: true, force: true }))
   )
 })
+
+/** Registers a ledger for deterministic close before directory cleanup. */
+function track(ledger: SqliteEventStore): SqliteEventStore {
+  openLedgers.push(ledger)
+  return ledger
+}
 
 async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(
@@ -122,11 +135,13 @@ async function harness(
 ): Promise<Harness> {
   const directory = await temporaryDirectory()
   const databasePath = path.join(directory, 'ground.sqlite')
-  const ledger = await SqliteEventStore.create({
-    databasePath,
-    bootstrap: bootstrap(options.state),
-    dependencies: deterministicDependencies(options.fault)
-  })
+  const ledger = track(
+    await SqliteEventStore.create({
+      databasePath,
+      bootstrap: bootstrap(options.state),
+      dependencies: deterministicDependencies(options.fault)
+    })
+  )
   const uncertainties: StatePersistenceError[] = []
   const composer = SqliteStateComposer.adopt(ledger, {
     onPersistenceUncertain: (error) => uncertainties.push(error)
@@ -651,15 +666,17 @@ describe('SQLite state composer', () => {
       const directory = await temporaryDirectory()
       const databasePath = path.join(directory, 'ground.sqlite')
       let armed = false
-      const ledger = await SqliteEventStore.create({
-        databasePath,
-        bootstrap: bootstrap(),
-        dependencies: deterministicDependencies((point) => {
-          if (armed && point === 'before-witness-publish') {
-            throw new Error('injected before witness publish')
-          }
+      const ledger = track(
+        await SqliteEventStore.create({
+          databasePath,
+          bootstrap: bootstrap(),
+          dependencies: deterministicDependencies((point) => {
+            if (armed && point === 'before-witness-publish') {
+              throw new Error('injected before witness publish')
+            }
+          })
         })
-      })
+      )
       const composer = SqliteStateComposer.adopt(ledger)
       armed = true
 
@@ -670,10 +687,9 @@ describe('SQLite state composer', () => {
       await ledger.close()
 
       // The database is ahead of the witness, which is repairable.
-      const reopened = await SqliteEventStore.open({
-        databasePath,
-        integrityCheck: 'full'
-      })
+      const reopened = track(
+        await SqliteEventStore.open({ databasePath, integrityCheck: 'full' })
+      )
       expect(reopened.getProjection().tasks).toHaveLength(1)
       const witness = await fileHeadWitnessStore.read(
         `${databasePath}.head.json`
@@ -686,11 +702,13 @@ describe('SQLite state composer', () => {
       const directory = await temporaryDirectory()
       const databasePath = path.join(directory, 'ground.sqlite')
       const witnessPath = `${databasePath}.head.json`
-      const ledger = await SqliteEventStore.create({
-        databasePath,
-        bootstrap: bootstrap(),
-        dependencies: deterministicDependencies()
-      })
+      const ledger = track(
+        await SqliteEventStore.create({
+          databasePath,
+          bootstrap: bootstrap(),
+          dependencies: deterministicDependencies()
+        })
+      )
       const composer = SqliteStateComposer.adopt(ledger)
       await composer.commit({ kind: 'create-task', task: taskBody() })
       const head = ledger.getHead()
@@ -716,11 +734,13 @@ describe('SQLite state composer', () => {
     it('replays a composed sequence to byte-identical state', async () => {
       const directory = await temporaryDirectory()
       const databasePath = path.join(directory, 'ground.sqlite')
-      const ledger = await SqliteEventStore.create({
-        databasePath,
-        bootstrap: bootstrap(),
-        dependencies: deterministicDependencies()
-      })
+      const ledger = track(
+        await SqliteEventStore.create({
+          databasePath,
+          bootstrap: bootstrap(),
+          dependencies: deterministicDependencies()
+        })
+      )
       const composer = SqliteStateComposer.adopt(ledger)
 
       await startedExecution(composer)
@@ -740,10 +760,9 @@ describe('SQLite state composer', () => {
       const composed = encodeProjection(composer.snapshot()).stateJson
       await ledger.close()
 
-      const reopened = await SqliteEventStore.open({
-        databasePath,
-        integrityCheck: 'full'
-      })
+      const reopened = track(
+        await SqliteEventStore.open({ databasePath, integrityCheck: 'full' })
+      )
       const restarted = SqliteStateComposer.adopt(reopened)
       expect(encodeProjection(restarted.snapshot()).stateJson).toBe(composed)
 
@@ -772,11 +791,13 @@ describe('SQLite state composer', () => {
     it('refuses a second create against the same database', async () => {
       const directory = await temporaryDirectory()
       const databasePath = path.join(directory, 'ground.sqlite')
-      const ledger = await SqliteEventStore.create({
-        databasePath,
-        bootstrap: bootstrap(),
-        dependencies: deterministicDependencies()
-      })
+      const ledger = track(
+        await SqliteEventStore.create({
+          databasePath,
+          bootstrap: bootstrap(),
+          dependencies: deterministicDependencies()
+        })
+      )
       await ledger.close()
       await expect(
         SqliteEventStore.create({ databasePath, bootstrap: bootstrap() })
@@ -799,11 +820,13 @@ describe('SQLite state composer', () => {
         }),
         'utf8'
       )
-      const ledger = await SqliteEventStore.create({
-        databasePath,
-        bootstrap: bootstrap(),
-        dependencies: deterministicDependencies()
-      })
+      const ledger = track(
+        await SqliteEventStore.create({
+          databasePath,
+          bootstrap: bootstrap(),
+          dependencies: deterministicDependencies()
+        })
+      )
       const composer = SqliteStateComposer.adopt(ledger)
       await composer.commit({ kind: 'create-task', task: taskBody() })
 
