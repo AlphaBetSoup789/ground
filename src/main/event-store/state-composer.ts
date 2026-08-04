@@ -220,6 +220,15 @@ export class SqliteStateComposer {
       const plan = planStateMutation(before, captured)
 
       if (!plan.events.length) {
+        // A no-op still returns this composer's projection and head, so it is
+        // still an answer about the ledger — and it is the one path that would
+        // otherwise never consult the database. Without this check a second
+        // handle could advance the ledger and every no-op would keep reporting
+        // pre-conflict state as current, with the composer never noticing.
+        //
+        // The plan itself was built against that same possibly-stale state, so
+        // "no events" is only trustworthy once the head behind it is.
+        await this.verifyStillCurrent()
         return {
           name: plan.name,
           plan,
@@ -326,6 +335,21 @@ export class SqliteStateComposer {
       // behavior.
     }
     return this.persistenceUncertainty
+  }
+
+  /**
+   * Confirms this view still describes the durable ledger, marking the composer
+   * stale and rethrowing on conflict exactly as the publication path does.
+   */
+  private async verifyStillCurrent(): Promise<void> {
+    try {
+      await this.ledger.verifyDurableHead(this.trackedHead)
+    } catch (error) {
+      if (error instanceof EventStoreConflictError) {
+        this.markStale(error)
+      }
+      throw error
+    }
   }
 
   /**

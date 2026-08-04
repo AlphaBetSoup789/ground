@@ -630,6 +630,61 @@ describe('SQLite state composer', () => {
       expect(recovered.snapshot().settings.sidebarCollapsed).toBe(true)
     })
 
+    it('fails closed when a mutation that plans no events runs against an advanced database', async () => {
+      const directory = await temporaryDirectory()
+      const databasePath = path.join(directory, 'ground.sqlite')
+      const first = track(
+        await SqliteEventStore.create({
+          databasePath,
+          bootstrap: bootstrap(),
+          dependencies: deterministicDependencies()
+        })
+      )
+      const uncertainties: StatePersistenceError[] = []
+      const composer = SqliteStateComposer.adopt(first, {
+        onPersistenceUncertain: (error) => uncertainties.push(error)
+      })
+
+      const second = track(await SqliteEventStore.open({ databasePath }))
+      await second.appendEventBatch({
+        expectedHead: second.getHead(),
+        events: [{ kind: 'settings.sidebar-collapsed-set', collapsed: true }]
+      })
+
+      // Deleting an unknown provider plans no events. Returning early would
+      // answer from the stale cache without ever consulting the database, so
+      // the no-op path has to verify the durable head like any other.
+      const conflict = await composer
+        .commit({ kind: 'delete-provider', providerId: 'provider_missing' })
+        .then(() => undefined)
+        .catch((caught: unknown) => caught)
+
+      expect(conflict).toBeInstanceOf(EventStoreConflictError)
+      expect(composer.isStale()).toBe(true)
+      expect(composer.isSealed()).toBe(false)
+      expect(uncertainties).toEqual([])
+      // The stale answer this would otherwise have returned.
+      expect(first.getProjection().settings.sidebarCollapsed).toBe(false)
+      expect(() => composer.snapshot()).toThrow(StateComposerStaleError)
+      expect(() => composer.head()).toThrow(StateComposerStaleError)
+    })
+
+    it('lets a no-op through when the database still matches', async () => {
+      const { composer, ledger } = await harness()
+      const before = encodeProjection(composer.snapshot()).stateJson
+      const head = ledger.getHead()
+
+      const result = await composer.commit({
+        kind: 'delete-provider',
+        providerId: 'provider_missing'
+      })
+
+      expect(result.committed).toBe(false)
+      expect(composer.isStale()).toBe(false)
+      expect(encodeProjection(composer.snapshot()).stateJson).toBe(before)
+      expect(composer.head().sequence).toBe(head.sequence)
+    })
+
     it('fails closed on a conflict from the same handle without claiming to resynchronize', async () => {
       const { composer, ledger, uncertainties } = await harness()
 

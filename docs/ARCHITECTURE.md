@@ -737,6 +737,14 @@ the event store, behind its integrity checks and writer lock, so a conflict
 instead marks the composer stale: it stops answering reads and refuses further
 mutations until the ledger is reopened.
 
+A mutation that plans no events still returns the composer's projection and
+head, so it is still an answer about the ledger, and it is the one path that
+would otherwise never consult the database. It therefore verifies the durable
+head first, through a read-only event-store operation that runs the same
+writer-lock, file-hardening, and witness-reconciliation prologue a publication
+runs. A conflict there marks the composer stale exactly as a publication
+conflict does.
+
 The store is still not constructed by the production desktop. Tasks, runs,
 approvals, and provider revisions continue to be served from the JSON
 `StateStore`, because activating SQLite today would regress three recovery
