@@ -383,6 +383,14 @@ export class SqliteStateComposer {
     try {
       await this.ledger.verifyDurableHead(this.trackedHead)
     } catch (error) {
+      // Verification runs the same prologue a publication runs, so it can fail
+      // the same ways and must be classified the same way. In particular a
+      // database ahead of its witness whose repair fails is a persistence
+      // ambiguity, not a conflict: letting it escape unclassified here would
+      // leave the composer unsealed and never reach the exit authority.
+      if (error instanceof EventStorePersistenceUncertainError) {
+        throw this.sealForUncertainty(error)
+      }
       if (error instanceof EventStoreConflictError) {
         this.markStale(error)
       }

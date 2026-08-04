@@ -746,7 +746,10 @@ first, through a read-only event-store operation that runs the same writer-lock,
 file-hardening, and witness-reconciliation prologue a publication runs. If the
 head still matches, the no-op or the rejection stands unchanged; if it does not,
 the conflict replaces it and marks the composer stale exactly as a publication
-conflict does. A mutation that succeeds pays for no extra round trip, because
+conflict does. Verification runs a publication's prologue, so it can fail a
+publication's ways: a database ahead of its witness whose repair fails is a
+persistence ambiguity there too, and seals the composer through the same
+process-exit authority rather than surfacing as a conflict. A mutation that succeeds pays for no extra round trip, because
 publication verifies the head as part of committing.
 
 The store is still not constructed by the production desktop. Tasks, runs,

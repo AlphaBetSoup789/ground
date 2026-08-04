@@ -941,6 +941,79 @@ describe('SQLite state composer', () => {
       expect(databasePath).toContain('ground.sqlite')
     })
 
+    it('seals when verification hits a behind witness whose repair fails', async () => {
+      const directory = await temporaryDirectory()
+      const databasePath = path.join(directory, 'ground.sqlite')
+      const witnessPath = `${databasePath}.head.json`
+
+      // Publishing is delegated to the real store until armed, so the ledger
+      // opens normally and only the verification-time repair fails.
+      let failPublish = false
+      const witnessStore = {
+        read: (filePath: string) => fileHeadWitnessStore.read(filePath),
+        publish: async (
+          filePath: string,
+          witness: Parameters<typeof fileHeadWitnessStore.publish>[1],
+          options?: Parameters<typeof fileHeadWitnessStore.publish>[2]
+        ) => {
+          if (failPublish) throw new Error('injected witness repair failure')
+          await fileHeadWitnessStore.publish(filePath, witness, options)
+        }
+      }
+
+      const ledger = track(
+        await SqliteEventStore.create({
+          databasePath,
+          bootstrap: bootstrap(),
+          dependencies: { ...deterministicDependencies(), witnessStore }
+        })
+      )
+      // The witness that will be replayed to put the database ahead of it.
+      const behindWitness = await fileHeadWitnessStore.read(witnessPath)
+      expect(behindWitness).toBeDefined()
+
+      const uncertainties: StatePersistenceError[] = []
+      const composer = SqliteStateComposer.adopt(ledger, {
+        onPersistenceUncertain: (error) => uncertainties.push(error)
+      })
+      await composer.commit({ kind: 'create-task', task: taskBody() })
+      const committed = encodeProjection(composer.snapshot()).stateJson
+
+      // Roll the witness back to a valid earlier prefix, so the database is
+      // ahead of it, then make the repair that discovers this fail.
+      await fileHeadWitnessStore.publish(witnessPath, behindWitness!)
+      failPublish = true
+
+      // Any path that verifies the durable head reaches the repair. A no-op is
+      // the smallest one.
+      const error = await composer
+        .commit({ kind: 'delete-provider', providerId: 'provider_missing' })
+        .then(() => undefined)
+        .catch((caught: unknown) => caught)
+
+      // Classified exactly as the append path classifies it.
+      expect(error).toBeInstanceOf(StatePersistenceError)
+      expect((error as Error).message).toBe(
+        'Ground could not conclusively publish local state'
+      )
+      expect((error as Error).cause).toBeInstanceOf(
+        EventStorePersistenceUncertainError
+      )
+      expect(composer.isSealed()).toBe(true)
+      expect(composer.isStale()).toBe(false)
+      expect(uncertainties).toHaveLength(1)
+
+      // Sealed behavior: reads stay available at the last committed
+      // projection, and later mutations are refused with the same error.
+      expect(encodeProjection(composer.snapshot()).stateJson).toBe(committed)
+      await expect(
+        composer.commit({ kind: 'select-task', taskId: 'task_1' })
+      ).rejects.toBe(error)
+      expect(uncertainties).toHaveLength(1)
+
+      failPublish = false
+    })
+
     it('repairs a behind witness on reopen after a sealed pre-witness fault', async () => {
       const directory = await temporaryDirectory()
       const databasePath = path.join(directory, 'ground.sqlite')
