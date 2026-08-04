@@ -49,12 +49,20 @@ import type { LedgerHead } from './types'
  *
  * The distinction that matters most is between *failed* and *unknown*.
  *
- * A planner rejection, a schema rejection, or a head conflict all mean the batch
- * definitely did not commit. They are ordinary operational errors: memory and
- * the ledger head are untouched and the caller may retry. A head conflict
- * additionally resynchronizes this view from the ledger, so a writer that
- * arrived first cannot wedge every later mutation against a head that no longer
- * exists.
+ * A planner rejection or a schema rejection means the batch definitely did not
+ * commit. Those are ordinary operational errors: memory and the ledger head are
+ * untouched and the caller may retry immediately.
+ *
+ * A head conflict also means the batch definitely did not commit, so it is not
+ * persistence uncertainty and never invokes the exit authority. It is, however,
+ * unrecoverable from here. The conflicting writer may have been a second
+ * `SqliteEventStore` handle on the same database, in which case this handle's
+ * `getProjection()` and `getHead()` are exactly as stale as this composer;
+ * adopting them would serve pre-conflict state while claiming to have
+ * resynchronized. Re-reading the database belongs to `SqliteEventStore`, behind
+ * its integrity checks and writer lock. So a conflict marks the composer stale:
+ * it stops answering reads and refuses further mutations until the ledger is
+ * reopened.
  *
  * An ambiguous commit, a post-commit witness failure, or a committed projection
  * that does not match the plan all mean durable state may have moved in a way
@@ -73,6 +81,23 @@ import type { LedgerHead } from './types'
  * snapshot export/restore is defined over rotated JSON generations that have no
  * ledger equivalent yet. Those are recovery-contract work, not composition work.
  */
+
+/**
+ * A conflicting writer invalidated a composer's view of the ledger.
+ *
+ * Deliberately not a `StatePersistenceError`: nothing was published, the durable
+ * state is intact, and the process must not exit. The composer simply cannot be
+ * trusted to describe the ledger any more, and the caller must reopen it.
+ */
+export class StateComposerStaleError extends Error {
+  constructor(cause: unknown) {
+    super(
+      'Ground SQLite state composer is stale; reopen the ledger before mutating',
+      { cause }
+    )
+    this.name = 'StateComposerStaleError'
+  }
+}
 
 export interface StateComposerOptions {
   /**
@@ -108,6 +133,7 @@ export class SqliteStateComposer {
    */
   private trackedHead: LedgerHead
   private persistenceUncertainty?: StatePersistenceError
+  private staleness?: StateComposerStaleError
   private transactionQueue: Promise<void> = Promise.resolve()
 
   private constructor(
@@ -132,19 +158,41 @@ export class SqliteStateComposer {
     return new SqliteStateComposer(ledger, options.onPersistenceUncertain)
   }
 
-  /** The composer's authoritative state: the ledger's committed projection. */
+  /**
+   * The composer's authoritative state: the ledger's committed projection.
+   *
+   * Throws once the composer is stale, because a reader handed pre-conflict
+   * state could not tell it apart from current state — which is the failure
+   * this fails closed against.
+   *
+   * A seal does not block reads. `StateStore` gates mutations on persistence
+   * uncertainty and leaves reads alone, and the state here is still the last
+   * state this process durably committed; it is the *next* publication that
+   * cannot be trusted. The process is exiting regardless.
+   */
   snapshot(): PersistedStateData {
+    this.assertFresh()
     return structuredClone(this.state)
   }
 
   /** The head this composer's state was derived from. */
   head(): LedgerHead {
+    this.assertFresh()
     return { ...this.trackedHead }
   }
 
   /** True once a publication became ambiguous and the composer stopped. */
   isSealed(): boolean {
     return this.persistenceUncertainty !== undefined
+  }
+
+  /**
+   * True once a conflicting writer made this view untrustworthy. Unlike a seal,
+   * this is not a persistence ambiguity: nothing was published, and the process
+   * does not exit. The ledger must be reopened.
+   */
+  isStale(): boolean {
+    return this.staleness !== undefined
   }
 
   /**
@@ -156,13 +204,20 @@ export class SqliteStateComposer {
    * needed to hit.
    */
   commit(mutation: StateMutation): Promise<ComposedMutation> {
+    // Captured at invocation time, before anything is queued. Callers hold live
+    // references to the objects inside a mutation — the streaming timeline
+    // writer keeps mutating its renderer-facing item after queueing the
+    // insertion, which is why `StateStore.addItem` clones too. Planning against
+    // the object as it looks whenever the queue drains would persist a
+    // different fact than the caller asked for.
+    const captured = structuredClone(mutation)
     return this.enqueueTransaction(async () => {
-      this.assertPersistenceCertain()
+      this.assertUsable()
 
       // Planned against the ledger's own committed projection. A planner
       // rejection throws here, before the ledger has been contacted at all.
       const before = this.state
-      const plan = planStateMutation(before, mutation)
+      const plan = planStateMutation(before, captured)
 
       if (!plan.events.length) {
         return {
@@ -193,17 +248,21 @@ export class SqliteStateComposer {
         }
         if (error instanceof EventStoreConflictError) {
           // A writer this composer never saw reached the ledger first. The
-          // batch definitely did not commit, but this view is now stale, and
-          // leaving it stale would fail every later mutation against a head
-          // that no longer exists.
+          // batch definitely did not commit, so this is not persistence
+          // uncertainty and must not invoke the exit authority.
           //
-          // Resynchronize from the ledger — still the only authority — and
-          // rethrow. The mutation is deliberately not replanned or retried
-          // here: its preconditions were checked against state that no longer
-          // holds, so re-deciding it belongs to the caller, against the fresh
-          // projection.
-          this.state = this.ledger.getProjection()
-          this.trackedHead = this.ledger.getHead()
+          // It is also not recoverable from here. `getProjection()` and
+          // `getHead()` return the handle's own cache, and when the writer was
+          // a second handle on the same database that cache is exactly as stale
+          // as this composer — adopting it would serve pre-conflict state while
+          // claiming to have resynchronized. Re-reading the database is
+          // `SqliteEventStore`'s responsibility, behind its own integrity
+          // checks and writer lock, and this layer deliberately does not own
+          // opening or repairing a database.
+          //
+          // So the composer fails closed: it keeps its state to itself and
+          // refuses further work until a caller reopens the ledger.
+          this.markStale(error)
         }
         // A definite failure before publication. Nothing moved, so this stays an
         // ordinary operational error and must not be reported as uncertainty.
@@ -269,9 +328,28 @@ export class SqliteStateComposer {
     return this.persistenceUncertainty
   }
 
-  private assertPersistenceCertain(): void {
+  /**
+   * Records that a conflicting writer invalidated this view.
+   *
+   * The conflict itself is rethrown by the caller so the true cause survives;
+   * this only stops the composer from being used again.
+   */
+  private markStale(cause: EventStoreConflictError): void {
+    this.staleness ??= new StateComposerStaleError(cause)
+  }
+
+  /** Mutation gate: neither an uncertain publication nor a stale view. */
+  private assertUsable(): void {
     if (this.persistenceUncertainty) {
       throw this.persistenceUncertainty
+    }
+    this.assertFresh()
+  }
+
+  /** Read gate: this view must still describe the ledger. */
+  private assertFresh(): void {
+    if (this.staleness) {
+      throw this.staleness
     }
   }
 

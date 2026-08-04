@@ -10,6 +10,7 @@ import {
   encodeProjection,
   EventStoreConflictError,
   EventStorePersistenceUncertainError,
+  StateComposerStaleError,
   fileHeadWitnessStore,
   replayLedgerDeterministically,
   sha256,
@@ -419,6 +420,55 @@ describe('SQLite state composer', () => {
     })
   })
 
+  describe('mutation capture', () => {
+    it('persists the mutation as it was at invocation, not as the caller later left it', async () => {
+      const { composer } = await harness()
+      await composer.commit({ kind: 'create-task', task: taskBody() })
+
+      // The streaming timeline writer keeps mutating its renderer-facing item
+      // after queueing the insertion, so the item must be captured now.
+      const item = {
+        id: 'message_1',
+        kind: 'message' as const,
+        role: 'assistant' as const,
+        content: 'partial',
+        createdAt: TIMESTAMP
+      }
+      const mutation = {
+        kind: 'append-task-item' as const,
+        taskId: 'task_1',
+        updatedAt: TIMESTAMP,
+        item: item as Task['items'][number]
+      }
+
+      const pending = composer.commit(mutation)
+      // Mutated after `commit` returned but before the queued work runs.
+      item.content = 'mutated after queueing'
+      ;(mutation as { taskId: string }).taskId = 'task_missing'
+      await pending
+
+      const persisted = composer.snapshot().tasks[0]?.items[0]
+      expect(persisted?.kind === 'message' && persisted.content).toBe('partial')
+    })
+
+    it('captures a nested provider body before queueing', async () => {
+      const { composer } = await harness()
+      const profile = provider({ id: 'provider_third', name: 'Third' })
+
+      const pending = composer.commit({
+        kind: 'upsert-provider',
+        provider: profile
+      })
+      profile.name = 'Renamed after queueing'
+      await pending
+
+      const stored = composer
+        .snapshot()
+        .providers.find((entry) => entry.id === 'provider_third')
+      expect(stored?.name).toBe('Third')
+    })
+  })
+
   describe('rejected mutations', () => {
     it.each([
       [
@@ -513,13 +563,78 @@ describe('SQLite state composer', () => {
       )
     })
 
-    it('surfaces a head conflict as an ordinary error, not as uncertainty', async () => {
-      const { composer, ledger, uncertainties } = await harness()
-      const before = encodeProjection(composer.snapshot()).stateJson
+    it('fails closed on a conflict from a second handle rather than adopting its stale cache', async () => {
+      const directory = await temporaryDirectory()
+      const databasePath = path.join(directory, 'ground.sqlite')
+      const first = track(
+        await SqliteEventStore.create({
+          databasePath,
+          bootstrap: bootstrap(),
+          dependencies: deterministicDependencies()
+        })
+      )
+      const uncertainties: StatePersistenceError[] = []
+      const composer = SqliteStateComposer.adopt(first, {
+        onPersistenceUncertain: (error) => uncertainties.push(error)
+      })
 
-      // A writer outside the composer advances the head. The composer plans
-      // against the head it tracked, so this is caught before publication
-      // rather than discovered as a divergence after it.
+      // A second handle on the same database advances the durable ledger. The
+      // first handle's cache does not learn about it.
+      const second = track(await SqliteEventStore.open({ databasePath }))
+      await second.appendEventBatch({
+        expectedHead: second.getHead(),
+        events: [{ kind: 'settings.sidebar-collapsed-set', collapsed: true }]
+      })
+      const durableHead = second.getHead()
+      expect(second.getProjection().settings.sidebarCollapsed).toBe(true)
+      // The stale handle still reports the pre-conflict view.
+      expect(first.getProjection().settings.sidebarCollapsed).toBe(false)
+
+      const conflict = await composer
+        .commit({ kind: 'create-task', task: taskBody() })
+        .then(() => undefined)
+        .catch((caught: unknown) => caught)
+
+      // The batch definitely did not commit, so this is not uncertainty and the
+      // exit authority is never invoked.
+      expect(conflict).toBeInstanceOf(EventStoreConflictError)
+      expect(composer.isSealed()).toBe(false)
+      expect(uncertainties).toEqual([])
+
+      // The composer is unusable rather than resynchronized. Crucially it does
+      // not answer reads with the stale handle cache, which still says
+      // sequence 1 and `sidebarCollapsed: false`.
+      expect(composer.isStale()).toBe(true)
+      expect(() => composer.snapshot()).toThrow(StateComposerStaleError)
+      expect(() => composer.head()).toThrow(StateComposerStaleError)
+      await expect(
+        composer.commit({ kind: 'select-task', taskId: 'task_1' })
+      ).rejects.toBeInstanceOf(StateComposerStaleError)
+
+      // Recovery is a reopen, and the reopened ledger carries the durable state.
+      await second.close()
+      await first.close()
+      const reopened = track(
+        await SqliteEventStore.open({ databasePath, integrityCheck: 'full' })
+      )
+      expect(reopened.getHead().sequence).toBe(durableHead.sequence)
+      expect(reopened.getProjection().settings.sidebarCollapsed).toBe(true)
+      const recovered = SqliteStateComposer.adopt(reopened)
+      expect(recovered.isStale()).toBe(false)
+      expect(recovered.head().sequence).toBe(durableHead.sequence)
+      const committed = await recovered.commit({
+        kind: 'create-task',
+        task: taskBody()
+      })
+      expect(committed.committed).toBe(true)
+      expect(recovered.snapshot().settings.sidebarCollapsed).toBe(true)
+    })
+
+    it('fails closed on a conflict from the same handle without claiming to resynchronize', async () => {
+      const { composer, ledger, uncertainties } = await harness()
+
+      // Same handle, so its cache is actually current — but the composer still
+      // refuses rather than deciding case by case which caches it may trust.
       await ledger.appendEventBatch({
         expectedHead: ledger.getHead(),
         events: [{ kind: 'settings.sidebar-collapsed-set', collapsed: true }]
@@ -529,24 +644,10 @@ describe('SQLite state composer', () => {
         composer.commit({ kind: 'create-task', task: taskBody() })
       ).rejects.toBeInstanceOf(EventStoreConflictError)
 
-      // A definite failure: nothing sealed and no exit authority.
+      expect(composer.isStale()).toBe(true)
       expect(composer.isSealed()).toBe(false)
       expect(uncertainties).toEqual([])
-      expect(before).not.toBe('')
-
-      // The conflict resynchronized this view from the ledger rather than
-      // leaving it stale, so the composer stays usable.
-      expect(composer.snapshot().settings.sidebarCollapsed).toBe(true)
-      expect(composer.head().sequence).toBe(ledger.getHead().sequence)
-
-      const recovered = await composer.commit({
-        kind: 'create-task',
-        task: taskBody()
-      })
-      expect(recovered.committed).toBe(true)
-      expect(composer.snapshot().tasks).toHaveLength(1)
-      // And the outside writer's change survived the recovery.
-      expect(composer.snapshot().settings.sidebarCollapsed).toBe(true)
+      expect(() => composer.snapshot()).toThrow(StateComposerStaleError)
     })
   })
 

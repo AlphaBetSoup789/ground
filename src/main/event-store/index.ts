@@ -110,6 +110,7 @@ export {
 } from './state-mutation-plan'
 export {
   SqliteStateComposer,
+  StateComposerStaleError,
   type ComposedMutation,
   type StateComposerOptions
 } from './state-composer'

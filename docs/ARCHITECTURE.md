@@ -715,14 +715,27 @@ only then adopts it as memory. Nothing observable changes before durable
 publication, and no seam exists through which a JSON document could become a
 second authority or a fallback.
 
+Each mutation is captured at invocation time, before it is queued, because
+callers keep live references to the objects inside one; the streaming timeline
+writer mutates its renderer-facing item after queueing the insertion.
+
 The composer separates a mutation that definitely did not commit from one whose
-durable outcome it cannot describe. Planner rejections, schema rejections, and
-head conflicts are ordinary operational errors that leave memory and the ledger
-head untouched and may be retried. An ambiguous commit, a post-commit
-head-witness failure, or a committed projection that does not match its plan
-seal the composer and invoke the same process-exit authority the JSON store
-uses, through the same `StatePersistenceError` and `onPersistenceUncertain`
-contract.
+durable outcome it cannot describe. Planner and schema rejections are ordinary
+operational errors that leave memory and the ledger head untouched and may be
+retried immediately. An ambiguous commit, a post-commit head-witness failure, or
+a committed projection that does not match its plan seal the composer and invoke
+the same process-exit authority the JSON store uses, through the same
+`StatePersistenceError` and `onPersistenceUncertain` contract.
+
+A head conflict is a third case. Nothing was published, so it is never reported
+as persistence uncertainty and never exits the process, but it is also not
+recoverable in place: the conflicting writer may have been a second event-store
+handle on the same database, whose cached projection and head are then exactly
+as stale as the composer's own. Adopting that cache would serve pre-conflict
+state while claiming to have resynchronized. Re-reading the database belongs to
+the event store, behind its integrity checks and writer lock, so a conflict
+instead marks the composer stale: it stops answering reads and refuses further
+mutations until the ledger is reopened.
 
 The store is still not constructed by the production desktop. Tasks, runs,
 approvals, and provider revisions continue to be served from the JSON
