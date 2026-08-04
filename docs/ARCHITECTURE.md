@@ -737,13 +737,17 @@ the event store, behind its integrity checks and writer lock, so a conflict
 instead marks the composer stale: it stops answering reads and refuses further
 mutations until the ledger is reopened.
 
-A mutation that plans no events still returns the composer's projection and
-head, so it is still an answer about the ledger, and it is the one path that
-would otherwise never consult the database. It therefore verifies the durable
-head first, through a read-only event-store operation that runs the same
-writer-lock, file-hardening, and witness-reconciliation prologue a publication
-runs. A conflict there marks the composer stale exactly as a publication
-conflict does.
+Two paths would otherwise answer without consulting the database. A mutation
+that plans no events still returns the composer's projection and head, and a
+mutation the planner or reducer rejects returns a statement about state — that a
+provider is the last one, that an MCP server does not exist. Both are only as
+trustworthy as the projection behind them, so both verify the durable head
+first, through a read-only event-store operation that runs the same writer-lock,
+file-hardening, and witness-reconciliation prologue a publication runs. If the
+head still matches, the no-op or the rejection stands unchanged; if it does not,
+the conflict replaces it and marks the composer stale exactly as a publication
+conflict does. A mutation that succeeds pays for no extra round trip, because
+publication verifies the head as part of committing.
 
 The store is still not constructed by the production desktop. Tasks, runs,
 approvals, and provider revisions continue to be served from the JSON

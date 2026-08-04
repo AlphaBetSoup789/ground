@@ -38,8 +38,9 @@ import type { LedgerHead } from './types'
  * would create a state the next startup could not explain:
  *
  * 1. Refuse outright if a previous publication was ambiguous.
- * 2. Plan against the current projection. A rejected mutation fails here, with
- *    no batch and no ledger contact at all.
+ * 2. Plan against the current projection. A rejection here is verified against
+ *    the durable head before it is believed, because it was decided from state
+ *    that another writer may already have moved past.
  * 3. Append with the exact head the plan was built against, so a writer this
  *    composer never saw conflicts before publication rather than interleaving.
  * 4. Verify the committed projection is the one the plan predicted.
@@ -51,7 +52,10 @@ import type { LedgerHead } from './types'
  *
  * A planner rejection or a schema rejection means the batch definitely did not
  * commit. Those are ordinary operational errors: memory and the ledger head are
- * untouched and the caller may retry immediately.
+ * untouched and the caller may retry immediately. They are decided from this
+ * composer's projection, though, so before one is reported the head behind it is
+ * verified; a rejection that turns out to describe state the ledger no longer
+ * holds is replaced by the conflict that actually explains it.
  *
  * A head conflict also means the batch definitely did not commit, so it is not
  * persistence uncertainty and never invokes the exit authority. It is, however,
@@ -214,10 +218,11 @@ export class SqliteStateComposer {
     return this.enqueueTransaction(async () => {
       this.assertUsable()
 
-      // Planned against the ledger's own committed projection. A planner
-      // rejection throws here, before the ledger has been contacted at all.
+      // Planned against the ledger's own committed projection.
       const before = this.state
-      const plan = planStateMutation(before, captured)
+      const plan = await this.decidedAgainstCurrentState(() =>
+        planStateMutation(before, captured)
+      )
 
       if (!plan.events.length) {
         // A no-op still returns this composer's projection and head, so it is
@@ -241,7 +246,9 @@ export class SqliteStateComposer {
       // The head the plan was built against, so a writer this composer never
       // saw is rejected before publication rather than discovered after it.
       const expectedHead = this.trackedHead
-      const predicted = this.predictProjection(before, plan)
+      const predicted = await this.decidedAgainstCurrentState(() =>
+        this.predictProjection(before, plan)
+      )
 
       let appended
       try {
@@ -335,6 +342,37 @@ export class SqliteStateComposer {
       // behavior.
     }
     return this.persistenceUncertainty
+  }
+
+  /**
+   * Runs a decision that is derived purely from this composer's view of state,
+   * and refuses to report its rejection unless that view is still current.
+   *
+   * Planning and prediction both answer questions about state — is this the
+   * last provider, does this MCP server exist, does this task already exist —
+   * so a rejection they produce is only as trustworthy as the projection behind
+   * it. Against a database another handle has advanced, that rejection is a
+   * statement about state the ledger no longer holds, and returning it would
+   * leave the composer looking healthy while it keeps serving stale reads.
+   *
+   * So a rejection is verified before it is believed. If the head still
+   * matches, the rejection was real and is rethrown unchanged. If it does not,
+   * the conflict replaces it and the composer goes stale — the caller learns
+   * the actual problem instead of a domain error decided on stale state.
+   *
+   * Only the failing path pays for this. A decision that succeeds is published
+   * through `appendEventBatch`, which verifies the head as part of committing,
+   * so an ordinary mutation adds no extra round trip.
+   */
+  private async decidedAgainstCurrentState<Result>(
+    decide: () => Result
+  ): Promise<Result> {
+    try {
+      return decide()
+    } catch (error) {
+      await this.verifyStillCurrent()
+      throw error
+    }
   }
 
   /**

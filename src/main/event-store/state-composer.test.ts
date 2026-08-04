@@ -514,9 +514,11 @@ describe('SQLite state composer', () => {
 
       await expect(composer.commit(mutation)).rejects.toThrow(expected)
 
-      // A rejection is an ordinary operational error: nothing moved and the
+      // A rejection is an ordinary operational error: the durable head still
+      // matches, so the original domain error stands, nothing moved, and the
       // composer stays open for the next mutation.
       expect(composer.isSealed()).toBe(false)
+      expect(composer.isStale()).toBe(false)
       expect(encodeProjection(composer.snapshot()).stateJson).toBe(before)
       expect(ledger.getHead().sequence).toBe(head.sequence)
       expect(ledger.getHead().eventHash).toBe(head.eventHash)
@@ -628,6 +630,113 @@ describe('SQLite state composer', () => {
       })
       expect(committed.committed).toBe(true)
       expect(recovered.snapshot().settings.sidebarCollapsed).toBe(true)
+    })
+
+    it('adds no durable round trip to a mutation that succeeds', async () => {
+      const { ledger } = await harness()
+      let verifications = 0
+      const counted = new Proxy(ledger, {
+        get(target, property, receiver) {
+          if (property === 'verifyDurableHead') {
+            return (head: Parameters<SqliteEventStore['verifyDurableHead']>[0]) => {
+              verifications += 1
+              return target.verifyDurableHead(head)
+            }
+          }
+          return Reflect.get(target, property, receiver)
+        }
+      })
+      const composer = SqliteStateComposer.adopt(counted)
+
+      await composer.commit({ kind: 'create-task', task: taskBody() })
+      await composer.commit({
+        kind: 'patch-task',
+        taskId: 'task_1',
+        updatedAt: TIMESTAMP,
+        patch: { title: 'Renamed' }
+      })
+      // Publication already verifies the head as part of committing, so the
+      // successful path must not pay for a second check.
+      expect(verifications).toBe(0)
+
+      // Only the paths that would otherwise answer from an unverified view do.
+      await composer.commit({
+        kind: 'delete-provider',
+        providerId: 'provider_missing'
+      })
+      expect(verifications).toBe(1)
+      await expect(
+        composer.commit({ kind: 'delete-mcp-server', serverId: 'server_missing' })
+      ).rejects.toThrow(/MCP server not found/u)
+      expect(verifications).toBe(2)
+    })
+
+    it('replaces a planner rejection decided on stale state with the real conflict', async () => {
+      const directory = await temporaryDirectory()
+      const databasePath = path.join(directory, 'ground.sqlite')
+      const first = track(
+        await SqliteEventStore.create({
+          databasePath,
+          bootstrap: bootstrap(),
+          dependencies: deterministicDependencies()
+        })
+      )
+      const uncertainties: StatePersistenceError[] = []
+      const composer = SqliteStateComposer.adopt(first, {
+        onPersistenceUncertain: (error) => uncertainties.push(error)
+      })
+
+      const second = track(await SqliteEventStore.open({ databasePath }))
+      await second.appendEventBatch({
+        expectedHead: second.getHead(),
+        events: [{ kind: 'settings.sidebar-collapsed-set', collapsed: true }]
+      })
+
+      // "MCP server not found" is a statement about state, and this composer's
+      // state is behind the database. The rejection cannot be trusted, so the
+      // conflict that explains it is returned instead.
+      const rejection = await composer
+        .commit({ kind: 'delete-mcp-server', serverId: 'server_missing' })
+        .then(() => undefined)
+        .catch((caught: unknown) => caught)
+
+      expect(rejection).toBeInstanceOf(EventStoreConflictError)
+      expect((rejection as Error).message).not.toMatch(/MCP server not found/u)
+      expect(composer.isStale()).toBe(true)
+      expect(composer.isSealed()).toBe(false)
+      expect(uncertainties).toEqual([])
+      expect(() => composer.snapshot()).toThrow(StateComposerStaleError)
+    })
+
+    it('replaces a reducer rejection decided on stale state with the real conflict', async () => {
+      const directory = await temporaryDirectory()
+      const databasePath = path.join(directory, 'ground.sqlite')
+      const first = track(
+        await SqliteEventStore.create({
+          databasePath,
+          bootstrap: bootstrap(),
+          dependencies: deterministicDependencies()
+        })
+      )
+      const composer = SqliteStateComposer.adopt(first)
+      await composer.commit({ kind: 'create-task', task: taskBody() })
+
+      const second = track(await SqliteEventStore.open({ databasePath }))
+      await second.appendEventBatch({
+        expectedHead: second.getHead(),
+        events: [{ kind: 'settings.sidebar-collapsed-set', collapsed: true }]
+      })
+
+      // A duplicate task is refused while predicting the projection, after
+      // planning succeeds. That prediction is stale-state reasoning too.
+      const rejection = await composer
+        .commit({ kind: 'create-task', task: taskBody() })
+        .then(() => undefined)
+        .catch((caught: unknown) => caught)
+
+      expect(rejection).toBeInstanceOf(EventStoreConflictError)
+      expect((rejection as Error).message).not.toMatch(/already exists/u)
+      expect(composer.isStale()).toBe(true)
     })
 
     it('fails closed when a mutation that plans no events runs against an advanced database', async () => {
