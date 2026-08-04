@@ -706,10 +706,63 @@ started claim that is still running can complete, completion must match the
 started action hash, and nothing can rewrite an interrupted operation into an
 outcome.
 
+A production mutation planner translates each `StateStore` mutation into the
+named event batch that reproduces it, and a composition layer publishes that
+batch. Where the composer is used, SQLite is the only authority: it plans
+against the ledger's own committed projection, appends with the exact head that
+plan was built against, verifies the committed projection matches the plan, and
+only then adopts it as memory. Nothing observable changes before durable
+publication, and no seam exists through which a JSON document could become a
+second authority or a fallback.
+
+Each mutation is captured at invocation time, before it is queued, because
+callers keep live references to the objects inside one; the streaming timeline
+writer mutates its renderer-facing item after queueing the insertion.
+
+The composer separates a mutation that definitely did not commit from one whose
+durable outcome it cannot describe. Planner and schema rejections are ordinary
+operational errors that leave memory and the ledger head untouched and may be
+retried immediately. An ambiguous commit, a post-commit head-witness failure, or
+a committed projection that does not match its plan seal the composer and invoke
+the same process-exit authority the JSON store uses, through the same
+`StatePersistenceError` and `onPersistenceUncertain` contract.
+
+A head conflict is a third case. Nothing was published, so it is never reported
+as persistence uncertainty and never exits the process, but it is also not
+recoverable in place: the conflicting writer may have been a second event-store
+handle on the same database, whose cached projection and head are then exactly
+as stale as the composer's own. Adopting that cache would serve pre-conflict
+state while claiming to have resynchronized. Re-reading the database belongs to
+the event store, behind its integrity checks and writer lock, so a conflict
+instead marks the composer stale: it stops answering reads and refuses further
+mutations until the ledger is reopened.
+
+Two paths would otherwise answer without consulting the database. A mutation
+that plans no events still returns the composer's projection and head, and a
+mutation the planner or reducer rejects returns a statement about state — that a
+provider is the last one, that an MCP server does not exist. Both are only as
+trustworthy as the projection behind them, so both verify the durable head
+first, through a read-only event-store operation that runs the same writer-lock,
+file-hardening, and witness-reconciliation prologue a publication runs. If the
+head still matches, the no-op or the rejection stands unchanged; if it does not,
+the conflict replaces it and marks the composer stale exactly as a publication
+conflict does. Verification runs a publication's prologue, so it can fail a
+publication's ways: a database ahead of its witness whose repair fails is a
+persistence ambiguity there too, and seals the composer through the same
+process-exit authority rather than surfacing as a conflict. A mutation that succeeds pays for no extra round trip, because
+publication verifies the head as part of committing.
+
 The store is still not constructed by the production desktop. Tasks, runs,
 approvals, and provider revisions continue to be served from the JSON
-`StateStore` until every production mutation path has event coverage and the
-migration path is exercised end to end, so the cutover remains a later slice.
+`StateStore`, because activating SQLite today would regress three recovery
+behaviors the composition layer does not address. Copy-on-migrate does not
+perform the interrupted-run transition `StateStore.load` performs, so a started
+managed execution would reach the ledger without becoming outcome-unknown. It
+reads only the primary JSON document, where `StateStore` falls through three
+retained generations and quarantines unreadable files. Local snapshot review,
+export, and restore are defined over rotated JSON generations and have no ledger
+equivalent yet. Those are recovery-contract work rather than composition work,
+so the cutover remains a later slice.
 
 Native package workflows target macOS arm64/x64, Windows x64, and Linux x64. A
 fixed packaged smoke verifies app identity, OS-encrypted vault round-trip, the

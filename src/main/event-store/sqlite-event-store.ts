@@ -485,20 +485,68 @@ export class SqliteEventStore {
   ): Promise<AppendEventBatchResult> {
     return this.enqueue(() =>
       withLedgerWriterLock(this.databasePath, async () => {
-        this.assertWritable()
-        await tightenDatabaseFiles(this.databasePath)
-        const durableHead = readHead(this.database)
-        assertMatchingHead(this.head, durableHead, 'database')
-        const currentWitness = await reconcileHeadWitness(
-          this.witnessPath,
-          this.dependencies,
-          this.metadata,
-          this.head,
-          this.records
-        )
-        return this.appendInternal(input, currentWitness)
+        const { witness } = await this.reconcileDurableState()
+        return this.appendInternal(input, witness)
       })
     )
+  }
+
+  /**
+   * Verifies an expected head against the durable database without writing.
+   *
+   * `getHead()` answers from this handle's cache, which another handle's commit
+   * silently invalidates. A caller that needs to know its view is still current
+   * — one whose operation turned out to require no events, and which would
+   * otherwise return an answer derived from that cache without ever consulting
+   * the database — has no other way to find out.
+   *
+   * It runs the same prologue as an append, under the same writer lock, file
+   * hardening, and witness reconciliation, so a stale cache, a rolled-back
+   * database, and a witness disagreement are all detected on exactly the terms
+   * a publication would have detected them.
+   */
+  verifyDurableHead(
+    expectedHead: Pick<LedgerHead, 'sequence' | 'eventHash'>
+  ): Promise<void> {
+    return this.enqueue(() =>
+      withLedgerWriterLock(this.databasePath, async () => {
+        const { durableHead } = await this.reconcileDurableState()
+        if (
+          durableHead.sequence !== expectedHead.sequence ||
+          durableHead.eventHash !== expectedHead.eventHash
+        ) {
+          throw new EventStoreConflictError(
+            'Durable ledger head does not match the expected head'
+          )
+        }
+      })
+    )
+  }
+
+  /**
+   * The checks every writer-lock-held operation performs before trusting this
+   * handle's view: the store is writable, its files are hardened, the durable
+   * head still matches the cached head, and the external witness agrees.
+   *
+   * Shared so a read-only verification and a publication cannot drift apart on
+   * what "current" means.
+   */
+  private async reconcileDurableState(): Promise<{
+    readonly durableHead: LedgerHead
+    readonly witness: HeadWitness
+  }> {
+    this.assertWritable()
+    await tightenDatabaseFiles(this.databasePath)
+    const durableHead = readHead(this.database)
+    assertMatchingHead(this.head, durableHead, 'database')
+    const witness = await reconcileHeadWitness(
+      this.witnessPath,
+      this.dependencies,
+      this.metadata,
+      this.head,
+      this.records
+    )
+    return { durableHead, witness }
   }
 
   createVerifiedBackup(
