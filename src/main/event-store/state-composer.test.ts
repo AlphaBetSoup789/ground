@@ -1,0 +1,1239 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
+import type { ActivityItem, ProviderProfile, Task } from '../../shared/types'
+import type { PersistedStateData } from '../state-schema'
+import { StatePersistenceError } from '../store'
+import {
+  decodeLedgerEvent,
+  encodeProjection,
+  EventStoreConflictError,
+  EventStorePersistenceUncertainError,
+  StateComposerStaleError,
+  fileHeadWitnessStore,
+  replayLedgerDeterministically,
+  sha256,
+  SqliteEventStore,
+  type DecodedLedgerRecord,
+  type EventStoreDependencies,
+  type EventStoreFaultPoint,
+  type LegacyStateBootstrappedEvent
+} from './index'
+import { SqliteStateComposer } from './state-composer'
+import type { StateMutation } from './state-mutation-plan'
+
+/**
+ * Verification for the SQLite composition layer.
+ *
+ * The mapping tests prove every typed mutation reaches the ledger. The failure
+ * tests matter more: they prove the layer tells apart a mutation that definitely
+ * did not commit from one whose durable outcome it cannot describe, because that
+ * distinction is what a production cutover would rest on.
+ */
+
+const TIMESTAMP = '2026-07-31T12:00:00.000Z'
+const ACTION_SHA = sha256('action')
+const APPROVAL_SHA = sha256('approval')
+
+const temporaryDirectories: string[] = []
+const openLedgers: SqliteEventStore[] = []
+
+afterEach(async () => {
+  // Windows refuses to unlink an open database file, so every ledger a test
+  // opened is closed before its directory is removed. A sealed store still
+  // closes; its close error is irrelevant to cleanup.
+  await Promise.all(
+    openLedgers.splice(0).map((ledger) => ledger.close().catch(() => undefined))
+  )
+  await Promise.all(
+    temporaryDirectories
+      .splice(0)
+      .map((directory) => rm(directory, { recursive: true, force: true }))
+  )
+})
+
+/** Registers a ledger for deterministic close before directory cleanup. */
+function track(ledger: SqliteEventStore): SqliteEventStore {
+  openLedgers.push(ledger)
+  return ledger
+}
+
+async function temporaryDirectory(): Promise<string> {
+  const directory = await mkdtemp(
+    path.join(os.tmpdir(), 'ground-state-composer-')
+  )
+  temporaryDirectories.push(directory)
+  return directory
+}
+
+function provider(overrides: Partial<ProviderProfile> = {}): ProviderProfile {
+  return {
+    id: 'provider_local',
+    name: 'Local',
+    kind: 'openai-compatible',
+    baseUrl: 'http://127.0.0.1:11434/v1',
+    model: 'test-model',
+    hasApiKey: false,
+    supportsTools: true,
+    createdAt: TIMESTAMP,
+    updatedAt: TIMESTAMP,
+    ...overrides
+  } as ProviderProfile
+}
+
+function initialState(): PersistedStateData {
+  return {
+    version: 2,
+    providers: [provider(), provider({ id: 'provider_second', name: 'Second' })],
+    mcpServers: [],
+    tasks: [],
+    settings: {
+      defaultProviderId: 'provider_local',
+      sidebarCollapsed: false
+    },
+    pendingSecretDeletes: []
+  } as PersistedStateData
+}
+
+function bootstrap(
+  state: PersistedStateData = initialState()
+): LegacyStateBootstrappedEvent {
+  const normalized = encodeProjection(state)
+  return {
+    kind: 'legacy-state.bootstrapped',
+    sourceFormat: 'ground-json',
+    sourceStateVersion: 2,
+    sourceSha256: sha256('legacy-json-source'),
+    sourceByteLength: Buffer.byteLength('legacy-json-source'),
+    normalizedStateSha256: normalized.stateSha256,
+    state: normalized.state
+  }
+}
+
+let clock = 0
+function deterministicDependencies(
+  fault?: (point: EventStoreFaultPoint) => void
+): EventStoreDependencies {
+  return {
+    now: () => new Date(Date.UTC(2026, 6, 31, 12, 0, (clock += 1))).toISOString(),
+    fault
+  }
+}
+
+interface Harness {
+  readonly ledger: SqliteEventStore
+  readonly composer: SqliteStateComposer
+  readonly databasePath: string
+  readonly uncertainties: StatePersistenceError[]
+}
+
+async function harness(
+  options: {
+    readonly state?: PersistedStateData
+    readonly fault?: (point: EventStoreFaultPoint) => void
+  } = {}
+): Promise<Harness> {
+  const directory = await temporaryDirectory()
+  const databasePath = path.join(directory, 'ground.sqlite')
+  const ledger = track(
+    await SqliteEventStore.create({
+      databasePath,
+      bootstrap: bootstrap(options.state),
+      dependencies: deterministicDependencies(options.fault)
+    })
+  )
+  const uncertainties: StatePersistenceError[] = []
+  const composer = SqliteStateComposer.adopt(ledger, {
+    onPersistenceUncertain: (error) => uncertainties.push(error)
+  })
+  return { ledger, composer, databasePath, uncertainties }
+}
+
+/** A task body shaped the way `StateStore.createTask` produces one. */
+function taskBody(overrides: Partial<Task> = {}): Task {
+  return {
+    id: 'task_1',
+    title: 'New task',
+    providerId: 'provider_local',
+    mode: 'agent',
+    runStatus: 'idle',
+    createdAt: TIMESTAMP,
+    updatedAt: TIMESTAMP,
+    items: [],
+    ...overrides
+  } as Task
+}
+
+function approvalActivity(overrides: Partial<ActivityItem> = {}): ActivityItem {
+  return {
+    id: 'activity_approval',
+    kind: 'activity',
+    runId: 'run_1',
+    callId: 'call_1',
+    activityType: 'approval',
+    approvalId: 'approval_1',
+    toolName: 'run_command',
+    title: 'Run a command',
+    status: 'pending',
+    createdAt: TIMESTAMP,
+    ...overrides
+  } as ActivityItem
+}
+
+/** Drives a task to a started managed execution. */
+async function startedExecution(composer: SqliteStateComposer): Promise<void> {
+  await composer.commit({ kind: 'create-task', task: taskBody() })
+  await composer.commit({
+    kind: 'append-task-item',
+    taskId: 'task_1',
+    updatedAt: TIMESTAMP,
+    item: approvalActivity()
+  })
+  await composer.commit({
+    kind: 'patch-task',
+    taskId: 'task_1',
+    updatedAt: TIMESTAMP,
+    patch: { runStatus: 'awaiting-approval' }
+  })
+  await composer.commit({
+    kind: 'begin-managed-execution',
+    taskId: 'task_1',
+    updatedAt: TIMESTAMP,
+    itemId: 'activity_approval',
+    runId: 'run_1',
+    callId: 'call_1',
+    toolName: 'run_command',
+    executionKind: 'command',
+    actionSha256: ACTION_SHA,
+    approvalSha256: APPROVAL_SHA,
+    startedAt: TIMESTAMP
+  })
+}
+
+describe('SQLite state composer', () => {
+  describe('typed mutation mapping', () => {
+    it('composes every task, settings and timeline mutation onto the ledger', async () => {
+      const { composer, ledger } = await harness()
+
+      const mutations: readonly StateMutation[] = [
+        { kind: 'create-task', task: taskBody() },
+        {
+          kind: 'patch-task',
+          taskId: 'task_1',
+          updatedAt: TIMESTAMP,
+          patch: {
+            title: 'Renamed',
+            mode: 'ask',
+            runStatus: 'running',
+            workspacePath: '/workspace',
+            includeImportedHistory: true,
+            providerId: 'provider_second'
+          }
+        },
+        {
+          kind: 'append-task-item',
+          taskId: 'task_1',
+          updatedAt: TIMESTAMP,
+          item: {
+            id: 'message_1',
+            kind: 'message',
+            role: 'assistant',
+            content: 'partial',
+            createdAt: TIMESTAMP
+          } as Task['items'][number]
+        },
+        {
+          kind: 'set-message-content',
+          taskId: 'task_1',
+          updatedAt: TIMESTAMP,
+          itemId: 'message_1',
+          content: 'complete'
+        },
+        {
+          kind: 'set-task-runtime-session',
+          taskId: 'task_1',
+          updatedAt: TIMESTAMP,
+          providerId: 'provider_local',
+          session: {
+            adapterId: 'cli.codex',
+            sessionCompatibilityId: 'codex',
+            sessionId: 'session_1',
+            providerRevision: TIMESTAMP,
+            workspacePath: '/workspace',
+            mode: 'agent',
+            updatedAt: TIMESTAMP
+          }
+        },
+        {
+          kind: 'set-task-model-session',
+          taskId: 'task_1',
+          updatedAt: TIMESTAMP,
+          providerId: 'provider_local',
+          session: {
+            adapterId: 'model.openai-compatible',
+            providerRevision: TIMESTAMP,
+            model: 'test-model',
+            mode: 'agent',
+            conversation: [],
+            updatedAt: TIMESTAMP
+          }
+        },
+        {
+          kind: 'set-task-runtime-session',
+          taskId: 'task_1',
+          updatedAt: TIMESTAMP,
+          providerId: 'provider_local',
+          session: null
+        },
+        { kind: 'select-task', taskId: 'task_1' },
+        {
+          // Archiving refuses an active task, so the run stops first.
+          kind: 'patch-task',
+          taskId: 'task_1',
+          updatedAt: TIMESTAMP,
+          patch: { runStatus: 'idle' }
+        },
+        {
+          kind: 'set-task-archived',
+          taskId: 'task_1',
+          updatedAt: TIMESTAMP,
+          archived: false,
+          archivedAt: null
+        },
+        { kind: 'fork-task', sourceTaskId: 'task_1', task: taskBody({ id: 'task_2' }) },
+        { kind: 'import-task', task: taskBody({ id: 'task_3' }) },
+        { kind: 'delete-task', taskId: 'task_3' }
+      ]
+
+      for (const mutation of mutations) {
+        const result = await composer.commit(mutation)
+        expect(result.committed).toBe(true)
+        // Memory tracks the committed projection exactly.
+        expect(encodeProjection(composer.snapshot()).stateJson).toBe(
+          encodeProjection(result.state).stateJson
+        )
+      }
+
+      expect(composer.snapshot().tasks.map((task) => task.id)).toEqual([
+        'task_2',
+        'task_1'
+      ])
+      expect(ledger.getHead().sequence).toBeGreaterThan(mutations.length)
+    })
+
+    it('composes every provider, secret-cleanup and MCP mutation', async () => {
+      const { composer } = await harness()
+
+      await composer.commit({
+        kind: 'upsert-provider',
+        provider: provider({ id: 'provider_third', name: 'Third' })
+      })
+      await composer.commit({
+        kind: 'save-mcp-server',
+        server: {
+          id: 'server_docs',
+          name: 'Docs',
+          namespace: 'docs',
+          enabled: true,
+          trustedFingerprints: {},
+          transport: 'stdio',
+          command: 'docs-server',
+          args: [],
+          createdAt: TIMESTAMP,
+          updatedAt: TIMESTAMP
+        } as never
+      })
+      await composer.commit({
+        kind: 'delete-mcp-server',
+        serverId: 'server_docs'
+      })
+      await composer.commit({
+        kind: 'queue-provisional-secret-delete',
+        reference: 'secret_staged'
+      })
+      await composer.commit({
+        kind: 'publish-provider-secret-transition',
+        provider: provider({ id: 'provider_third', hasApiKey: true }),
+        stagedReference: 'secret_staged',
+        obsoleteReferences: ['secret_old_a', 'secret_old_b']
+      })
+      await composer.commit({
+        kind: 'acknowledge-secret-deletes',
+        references: ['secret_old_a']
+      })
+      await composer.commit({
+        kind: 'delete-provider-with-secret-transition',
+        providerId: 'provider_third',
+        obsoleteReferences: ['secret_final']
+      })
+      await composer.commit({
+        kind: 'delete-provider',
+        providerId: 'provider_second'
+      })
+
+      const state = composer.snapshot()
+      expect(state.providers.map((entry) => entry.id)).toEqual(['provider_local'])
+      expect(state.mcpServers).toEqual([])
+      // Exact references, preserved in order and without invention.
+      expect(state.pendingSecretDeletes).toEqual(['secret_old_b', 'secret_final'])
+    })
+
+    it('composes a managed execution through completion', async () => {
+      const { composer } = await harness()
+      await startedExecution(composer)
+
+      await composer.commit({
+        kind: 'complete-managed-execution',
+        taskId: 'task_1',
+        updatedAt: TIMESTAMP,
+        itemId: 'activity_approval',
+        operationId: 'activity_approval',
+        actionSha256: ACTION_SHA,
+        status: 'success',
+        result: 'done',
+        durationMs: 12,
+        completedAt: TIMESTAMP
+      })
+
+      const item = composer.snapshot().tasks[0]?.items[0]
+      expect(item?.kind === 'activity' && item.managedExecution?.phase).toBe(
+        'completed'
+      )
+    })
+
+    it('leaves memory and the ledger head untouched for a planned no-op', async () => {
+      const { composer, ledger } = await harness()
+      const before = encodeProjection(composer.snapshot()).stateJson
+      const head = ledger.getHead()
+
+      const result = await composer.commit({
+        kind: 'delete-provider',
+        providerId: 'provider_missing'
+      })
+
+      expect(result.committed).toBe(false)
+      expect(result.plan.events).toEqual([])
+      expect(encodeProjection(composer.snapshot()).stateJson).toBe(before)
+      expect(ledger.getHead().sequence).toBe(head.sequence)
+      expect(ledger.getHead().eventHash).toBe(head.eventHash)
+    })
+  })
+
+  describe('mutation capture', () => {
+    it('persists the mutation as it was at invocation, not as the caller later left it', async () => {
+      const { composer } = await harness()
+      await composer.commit({ kind: 'create-task', task: taskBody() })
+
+      // The streaming timeline writer keeps mutating its renderer-facing item
+      // after queueing the insertion, so the item must be captured now.
+      const item = {
+        id: 'message_1',
+        kind: 'message' as const,
+        role: 'assistant' as const,
+        content: 'partial',
+        createdAt: TIMESTAMP
+      }
+      const mutation = {
+        kind: 'append-task-item' as const,
+        taskId: 'task_1',
+        updatedAt: TIMESTAMP,
+        item: item as Task['items'][number]
+      }
+
+      const pending = composer.commit(mutation)
+      // Mutated after `commit` returned but before the queued work runs.
+      item.content = 'mutated after queueing'
+      ;(mutation as { taskId: string }).taskId = 'task_missing'
+      await pending
+
+      const persisted = composer.snapshot().tasks[0]?.items[0]
+      expect(persisted?.kind === 'message' && persisted.content).toBe('partial')
+    })
+
+    it('captures a nested provider body before queueing', async () => {
+      const { composer } = await harness()
+      const profile = provider({ id: 'provider_third', name: 'Third' })
+
+      const pending = composer.commit({
+        kind: 'upsert-provider',
+        provider: profile
+      })
+      profile.name = 'Renamed after queueing'
+      await pending
+
+      const stored = composer
+        .snapshot()
+        .providers.find((entry) => entry.id === 'provider_third')
+      expect(stored?.name).toBe('Third')
+    })
+  })
+
+  describe('rejected mutations', () => {
+    it.each([
+      [
+        'the last remaining provider',
+        { kind: 'delete-provider', providerId: 'provider_local' } as StateMutation,
+        /Keep at least one provider connected/u
+      ],
+      [
+        'an unknown MCP server',
+        { kind: 'delete-mcp-server', serverId: 'server_missing' } as StateMutation,
+        /MCP server not found/u
+      ],
+      [
+        'an empty activity update',
+        {
+          kind: 'update-activities',
+          taskId: 'task_1',
+          updatedAt: TIMESTAMP,
+          updates: []
+        } as StateMutation,
+        /must change at least one activity/u
+      ],
+      [
+        'a field-less activity update',
+        {
+          kind: 'update-activities',
+          taskId: 'task_1',
+          updatedAt: TIMESTAMP,
+          updates: [{ itemId: 'activity_approval' }]
+        } as StateMutation,
+        /must change at least one field/u
+      ]
+    ])('refuses %s without moving memory or the ledger head', async (
+      _name,
+      mutation,
+      expected
+    ) => {
+      const { composer, ledger } = await harness({
+        state: { ...initialState(), providers: [provider()] }
+      })
+      const before = encodeProjection(composer.snapshot()).stateJson
+      const head = ledger.getHead()
+
+      await expect(composer.commit(mutation)).rejects.toThrow(expected)
+
+      // A rejection is an ordinary operational error: the durable head still
+      // matches, so the original domain error stands, nothing moved, and the
+      // composer stays open for the next mutation.
+      expect(composer.isSealed()).toBe(false)
+      expect(composer.isStale()).toBe(false)
+      expect(encodeProjection(composer.snapshot()).stateJson).toBe(before)
+      expect(ledger.getHead().sequence).toBe(head.sequence)
+      expect(ledger.getHead().eventHash).toBe(head.eventHash)
+      expect(ledger.isSealed()).toBe(false)
+    })
+
+    it('refuses to rewrite an interrupted execution into an outcome', async () => {
+      const { composer } = await harness()
+      await startedExecution(composer)
+
+      await composer.commit({
+        kind: 'interrupt-managed-execution',
+        taskId: 'task_1',
+        updatedAt: TIMESTAMP,
+        itemId: 'activity_approval',
+        operationId: 'activity_approval',
+        interruptedAt: TIMESTAMP
+      })
+
+      const interrupted = composer.snapshot().tasks[0]?.items[0]
+      expect(
+        interrupted?.kind === 'activity' && interrupted.managedExecution?.phase
+      ).toBe('uncertain')
+      expect(interrupted?.kind === 'activity' && interrupted.status).toBe('error')
+
+      // Outcome-unknown evidence is immutable.
+      await expect(
+        composer.commit({
+          kind: 'complete-managed-execution',
+          taskId: 'task_1',
+          updatedAt: TIMESTAMP,
+          itemId: 'activity_approval',
+          operationId: 'activity_approval',
+          actionSha256: ACTION_SHA,
+          status: 'success',
+          result: 'done',
+          completedAt: TIMESTAMP
+        })
+      ).rejects.toThrow(/can never be completed|not an exact started claim/u)
+
+      const after = composer.snapshot().tasks[0]?.items[0]
+      expect(after?.kind === 'activity' && after.managedExecution?.phase).toBe(
+        'uncertain'
+      )
+    })
+
+    it('fails closed on a conflict from a second handle rather than adopting its stale cache', async () => {
+      const directory = await temporaryDirectory()
+      const databasePath = path.join(directory, 'ground.sqlite')
+      const first = track(
+        await SqliteEventStore.create({
+          databasePath,
+          bootstrap: bootstrap(),
+          dependencies: deterministicDependencies()
+        })
+      )
+      const uncertainties: StatePersistenceError[] = []
+      const composer = SqliteStateComposer.adopt(first, {
+        onPersistenceUncertain: (error) => uncertainties.push(error)
+      })
+
+      // A second handle on the same database advances the durable ledger. The
+      // first handle's cache does not learn about it.
+      const second = track(await SqliteEventStore.open({ databasePath }))
+      await second.appendEventBatch({
+        expectedHead: second.getHead(),
+        events: [{ kind: 'settings.sidebar-collapsed-set', collapsed: true }]
+      })
+      const durableHead = second.getHead()
+      expect(second.getProjection().settings.sidebarCollapsed).toBe(true)
+      // The stale handle still reports the pre-conflict view.
+      expect(first.getProjection().settings.sidebarCollapsed).toBe(false)
+
+      const conflict = await composer
+        .commit({ kind: 'create-task', task: taskBody() })
+        .then(() => undefined)
+        .catch((caught: unknown) => caught)
+
+      // The batch definitely did not commit, so this is not uncertainty and the
+      // exit authority is never invoked.
+      expect(conflict).toBeInstanceOf(EventStoreConflictError)
+      expect(composer.isSealed()).toBe(false)
+      expect(uncertainties).toEqual([])
+
+      // The composer is unusable rather than resynchronized. Crucially it does
+      // not answer reads with the stale handle cache, which still says
+      // sequence 1 and `sidebarCollapsed: false`.
+      expect(composer.isStale()).toBe(true)
+      expect(() => composer.snapshot()).toThrow(StateComposerStaleError)
+      expect(() => composer.head()).toThrow(StateComposerStaleError)
+      await expect(
+        composer.commit({ kind: 'select-task', taskId: 'task_1' })
+      ).rejects.toBeInstanceOf(StateComposerStaleError)
+
+      // Recovery is a reopen, and the reopened ledger carries the durable state.
+      await second.close()
+      await first.close()
+      const reopened = track(
+        await SqliteEventStore.open({ databasePath, integrityCheck: 'full' })
+      )
+      expect(reopened.getHead().sequence).toBe(durableHead.sequence)
+      expect(reopened.getProjection().settings.sidebarCollapsed).toBe(true)
+      const recovered = SqliteStateComposer.adopt(reopened)
+      expect(recovered.isStale()).toBe(false)
+      expect(recovered.head().sequence).toBe(durableHead.sequence)
+      const committed = await recovered.commit({
+        kind: 'create-task',
+        task: taskBody()
+      })
+      expect(committed.committed).toBe(true)
+      expect(recovered.snapshot().settings.sidebarCollapsed).toBe(true)
+    })
+
+    it('adds no durable round trip to a mutation that succeeds', async () => {
+      const { ledger } = await harness()
+      let verifications = 0
+      const counted = new Proxy(ledger, {
+        get(target, property, receiver) {
+          if (property === 'verifyDurableHead') {
+            return (head: Parameters<SqliteEventStore['verifyDurableHead']>[0]) => {
+              verifications += 1
+              return target.verifyDurableHead(head)
+            }
+          }
+          return Reflect.get(target, property, receiver)
+        }
+      })
+      const composer = SqliteStateComposer.adopt(counted)
+
+      await composer.commit({ kind: 'create-task', task: taskBody() })
+      await composer.commit({
+        kind: 'patch-task',
+        taskId: 'task_1',
+        updatedAt: TIMESTAMP,
+        patch: { title: 'Renamed' }
+      })
+      // Publication already verifies the head as part of committing, so the
+      // successful path must not pay for a second check.
+      expect(verifications).toBe(0)
+
+      // Only the paths that would otherwise answer from an unverified view do.
+      await composer.commit({
+        kind: 'delete-provider',
+        providerId: 'provider_missing'
+      })
+      expect(verifications).toBe(1)
+      await expect(
+        composer.commit({ kind: 'delete-mcp-server', serverId: 'server_missing' })
+      ).rejects.toThrow(/MCP server not found/u)
+      expect(verifications).toBe(2)
+    })
+
+    it('replaces a planner rejection decided on stale state with the real conflict', async () => {
+      const directory = await temporaryDirectory()
+      const databasePath = path.join(directory, 'ground.sqlite')
+      const first = track(
+        await SqliteEventStore.create({
+          databasePath,
+          bootstrap: bootstrap(),
+          dependencies: deterministicDependencies()
+        })
+      )
+      const uncertainties: StatePersistenceError[] = []
+      const composer = SqliteStateComposer.adopt(first, {
+        onPersistenceUncertain: (error) => uncertainties.push(error)
+      })
+
+      const second = track(await SqliteEventStore.open({ databasePath }))
+      await second.appendEventBatch({
+        expectedHead: second.getHead(),
+        events: [{ kind: 'settings.sidebar-collapsed-set', collapsed: true }]
+      })
+
+      // "MCP server not found" is a statement about state, and this composer's
+      // state is behind the database. The rejection cannot be trusted, so the
+      // conflict that explains it is returned instead.
+      const rejection = await composer
+        .commit({ kind: 'delete-mcp-server', serverId: 'server_missing' })
+        .then(() => undefined)
+        .catch((caught: unknown) => caught)
+
+      expect(rejection).toBeInstanceOf(EventStoreConflictError)
+      expect((rejection as Error).message).not.toMatch(/MCP server not found/u)
+      expect(composer.isStale()).toBe(true)
+      expect(composer.isSealed()).toBe(false)
+      expect(uncertainties).toEqual([])
+      expect(() => composer.snapshot()).toThrow(StateComposerStaleError)
+    })
+
+    it('replaces a reducer rejection decided on stale state with the real conflict', async () => {
+      const directory = await temporaryDirectory()
+      const databasePath = path.join(directory, 'ground.sqlite')
+      const first = track(
+        await SqliteEventStore.create({
+          databasePath,
+          bootstrap: bootstrap(),
+          dependencies: deterministicDependencies()
+        })
+      )
+      const composer = SqliteStateComposer.adopt(first)
+      await composer.commit({ kind: 'create-task', task: taskBody() })
+
+      const second = track(await SqliteEventStore.open({ databasePath }))
+      await second.appendEventBatch({
+        expectedHead: second.getHead(),
+        events: [{ kind: 'settings.sidebar-collapsed-set', collapsed: true }]
+      })
+
+      // A duplicate task is refused while predicting the projection, after
+      // planning succeeds. That prediction is stale-state reasoning too.
+      const rejection = await composer
+        .commit({ kind: 'create-task', task: taskBody() })
+        .then(() => undefined)
+        .catch((caught: unknown) => caught)
+
+      expect(rejection).toBeInstanceOf(EventStoreConflictError)
+      expect((rejection as Error).message).not.toMatch(/already exists/u)
+      expect(composer.isStale()).toBe(true)
+    })
+
+    it('fails closed when a mutation that plans no events runs against an advanced database', async () => {
+      const directory = await temporaryDirectory()
+      const databasePath = path.join(directory, 'ground.sqlite')
+      const first = track(
+        await SqliteEventStore.create({
+          databasePath,
+          bootstrap: bootstrap(),
+          dependencies: deterministicDependencies()
+        })
+      )
+      const uncertainties: StatePersistenceError[] = []
+      const composer = SqliteStateComposer.adopt(first, {
+        onPersistenceUncertain: (error) => uncertainties.push(error)
+      })
+
+      const second = track(await SqliteEventStore.open({ databasePath }))
+      await second.appendEventBatch({
+        expectedHead: second.getHead(),
+        events: [{ kind: 'settings.sidebar-collapsed-set', collapsed: true }]
+      })
+
+      // Deleting an unknown provider plans no events. Returning early would
+      // answer from the stale cache without ever consulting the database, so
+      // the no-op path has to verify the durable head like any other.
+      const conflict = await composer
+        .commit({ kind: 'delete-provider', providerId: 'provider_missing' })
+        .then(() => undefined)
+        .catch((caught: unknown) => caught)
+
+      expect(conflict).toBeInstanceOf(EventStoreConflictError)
+      expect(composer.isStale()).toBe(true)
+      expect(composer.isSealed()).toBe(false)
+      expect(uncertainties).toEqual([])
+      // The stale answer this would otherwise have returned.
+      expect(first.getProjection().settings.sidebarCollapsed).toBe(false)
+      expect(() => composer.snapshot()).toThrow(StateComposerStaleError)
+      expect(() => composer.head()).toThrow(StateComposerStaleError)
+    })
+
+    it('lets a no-op through when the database still matches', async () => {
+      const { composer, ledger } = await harness()
+      const before = encodeProjection(composer.snapshot()).stateJson
+      const head = ledger.getHead()
+
+      const result = await composer.commit({
+        kind: 'delete-provider',
+        providerId: 'provider_missing'
+      })
+
+      expect(result.committed).toBe(false)
+      expect(composer.isStale()).toBe(false)
+      expect(encodeProjection(composer.snapshot()).stateJson).toBe(before)
+      expect(composer.head().sequence).toBe(head.sequence)
+    })
+
+    it('fails closed on a conflict from the same handle without claiming to resynchronize', async () => {
+      const { composer, ledger, uncertainties } = await harness()
+
+      // Same handle, so its cache is actually current — but the composer still
+      // refuses rather than deciding case by case which caches it may trust.
+      await ledger.appendEventBatch({
+        expectedHead: ledger.getHead(),
+        events: [{ kind: 'settings.sidebar-collapsed-set', collapsed: true }]
+      })
+
+      await expect(
+        composer.commit({ kind: 'create-task', task: taskBody() })
+      ).rejects.toBeInstanceOf(EventStoreConflictError)
+
+      expect(composer.isStale()).toBe(true)
+      expect(composer.isSealed()).toBe(false)
+      expect(uncertainties).toEqual([])
+      expect(() => composer.snapshot()).toThrow(StateComposerStaleError)
+    })
+  })
+
+  describe('publication faults', () => {
+    it('treats a pre-commit fault as a retryable failure', async () => {
+      let armed = false
+      const { composer, ledger, uncertainties } = await harness({
+        fault: (point) => {
+          if (armed && point === 'before-commit') {
+            throw new Error('injected before commit')
+          }
+        }
+      })
+      const before = encodeProjection(composer.snapshot()).stateJson
+      const head = ledger.getHead()
+      armed = true
+
+      await expect(
+        composer.commit({ kind: 'create-task', task: taskBody() })
+      ).rejects.toThrow(/injected before commit/u)
+
+      // Definitely not committed: no seal, no exit authority, nothing moved.
+      expect(composer.isSealed()).toBe(false)
+      expect(uncertainties).toEqual([])
+      expect(encodeProjection(composer.snapshot()).stateJson).toBe(before)
+      expect(ledger.getHead().sequence).toBe(head.sequence)
+
+      // And the same mutation succeeds on retry.
+      armed = false
+      const retried = await composer.commit({
+        kind: 'create-task',
+        task: taskBody()
+      })
+      expect(retried.committed).toBe(true)
+      expect(composer.snapshot().tasks).toHaveLength(1)
+    })
+
+    it.each([
+      ['after-commit', 'after-commit' as EventStoreFaultPoint],
+      ['before-witness-publish', 'before-witness-publish' as EventStoreFaultPoint],
+      ['after-witness-rename', 'after-witness-rename' as EventStoreFaultPoint]
+    ])(
+      'seals and invokes the exit authority on a %s fault',
+      async (_name, faultPoint) => {
+        let armed = false
+        const { composer, uncertainties } = await harness({
+          fault: (point) => {
+            if (armed && point === faultPoint) {
+              throw new Error(`injected ${faultPoint}`)
+            }
+          }
+        })
+        const before = encodeProjection(composer.snapshot()).stateJson
+        armed = true
+
+        const error = await composer
+          .commit({ kind: 'create-task', task: taskBody() })
+          .then(() => undefined)
+          .catch((caught: unknown) => caught)
+
+        // Exactly the JSON store's uncertainty contract.
+        expect(error).toBeInstanceOf(StatePersistenceError)
+        expect((error as Error).message).toBe(
+          'Ground could not conclusively publish local state'
+        )
+        expect((error as Error).cause).toBeInstanceOf(
+          EventStorePersistenceUncertainError
+        )
+        expect(uncertainties).toHaveLength(1)
+        expect(composer.isSealed()).toBe(true)
+
+        // Memory never adopted the uncertain publication.
+        expect(encodeProjection(composer.snapshot()).stateJson).toBe(before)
+
+        // And the seal holds: a later mutation is refused with the same error.
+        await expect(
+          composer.commit({ kind: 'select-task', taskId: 'task_1' })
+        ).rejects.toBe(error)
+        // The exit authority is invoked once, not once per attempt.
+        expect(uncertainties).toHaveLength(1)
+      }
+    )
+
+    it('seals when the committed projection does not match its plan', async () => {
+      const { ledger, databasePath } = await harness()
+      const uncertainties: StatePersistenceError[] = []
+
+      // A ledger that commits truthfully but reports a projection the plan does
+      // not predict. This is the divergence a silent reducer drift would cause.
+      const divergent = new Proxy(ledger, {
+        get(target, property, receiver) {
+          if (property === 'appendEventBatch') {
+            return async (input: Parameters<
+              SqliteEventStore['appendEventBatch']
+            >[0]) => {
+              const result = await target.appendEventBatch(input)
+              return {
+                ...result,
+                projection: {
+                  ...result.projection,
+                  settings: {
+                    ...result.projection.settings,
+                    sidebarCollapsed: !result.projection.settings.sidebarCollapsed
+                  }
+                }
+              }
+            }
+          }
+          return Reflect.get(target, property, receiver)
+        }
+      })
+
+      const composer = SqliteStateComposer.adopt(divergent, {
+        onPersistenceUncertain: (error) => uncertainties.push(error)
+      })
+      const before = encodeProjection(composer.snapshot()).stateJson
+
+      const error = await composer
+        .commit({ kind: 'create-task', task: taskBody() })
+        .then(() => undefined)
+        .catch((caught: unknown) => caught)
+
+      expect(error).toBeInstanceOf(StatePersistenceError)
+      expect(uncertainties).toHaveLength(1)
+      expect(composer.isSealed()).toBe(true)
+      expect(encodeProjection(composer.snapshot()).stateJson).toBe(before)
+      expect(databasePath).toContain('ground.sqlite')
+    })
+
+    it('seals when verification hits a behind witness whose repair fails', async () => {
+      const directory = await temporaryDirectory()
+      const databasePath = path.join(directory, 'ground.sqlite')
+      const witnessPath = `${databasePath}.head.json`
+
+      // Publishing is delegated to the real store until armed, so the ledger
+      // opens normally and only the verification-time repair fails.
+      let failPublish = false
+      const witnessStore = {
+        read: (filePath: string) => fileHeadWitnessStore.read(filePath),
+        publish: async (
+          filePath: string,
+          witness: Parameters<typeof fileHeadWitnessStore.publish>[1],
+          options?: Parameters<typeof fileHeadWitnessStore.publish>[2]
+        ) => {
+          if (failPublish) throw new Error('injected witness repair failure')
+          await fileHeadWitnessStore.publish(filePath, witness, options)
+        }
+      }
+
+      const ledger = track(
+        await SqliteEventStore.create({
+          databasePath,
+          bootstrap: bootstrap(),
+          dependencies: { ...deterministicDependencies(), witnessStore }
+        })
+      )
+      // The witness that will be replayed to put the database ahead of it.
+      const behindWitness = await fileHeadWitnessStore.read(witnessPath)
+      expect(behindWitness).toBeDefined()
+
+      const uncertainties: StatePersistenceError[] = []
+      const composer = SqliteStateComposer.adopt(ledger, {
+        onPersistenceUncertain: (error) => uncertainties.push(error)
+      })
+      await composer.commit({ kind: 'create-task', task: taskBody() })
+      const committed = encodeProjection(composer.snapshot()).stateJson
+
+      // Roll the witness back to a valid earlier prefix, so the database is
+      // ahead of it, then make the repair that discovers this fail.
+      await fileHeadWitnessStore.publish(witnessPath, behindWitness!)
+      failPublish = true
+
+      // Any path that verifies the durable head reaches the repair. A no-op is
+      // the smallest one.
+      const error = await composer
+        .commit({ kind: 'delete-provider', providerId: 'provider_missing' })
+        .then(() => undefined)
+        .catch((caught: unknown) => caught)
+
+      // Classified exactly as the append path classifies it.
+      expect(error).toBeInstanceOf(StatePersistenceError)
+      expect((error as Error).message).toBe(
+        'Ground could not conclusively publish local state'
+      )
+      expect((error as Error).cause).toBeInstanceOf(
+        EventStorePersistenceUncertainError
+      )
+      expect(composer.isSealed()).toBe(true)
+      expect(composer.isStale()).toBe(false)
+      expect(uncertainties).toHaveLength(1)
+
+      // Sealed behavior: reads stay available at the last committed
+      // projection, and later mutations are refused with the same error.
+      expect(encodeProjection(composer.snapshot()).stateJson).toBe(committed)
+      await expect(
+        composer.commit({ kind: 'select-task', taskId: 'task_1' })
+      ).rejects.toBe(error)
+      expect(uncertainties).toHaveLength(1)
+
+      failPublish = false
+    })
+
+    it('repairs a behind witness on reopen after a sealed pre-witness fault', async () => {
+      const directory = await temporaryDirectory()
+      const databasePath = path.join(directory, 'ground.sqlite')
+      let armed = false
+      const ledger = track(
+        await SqliteEventStore.create({
+          databasePath,
+          bootstrap: bootstrap(),
+          dependencies: deterministicDependencies((point) => {
+            if (armed && point === 'before-witness-publish') {
+              throw new Error('injected before witness publish')
+            }
+          })
+        })
+      )
+      const composer = SqliteStateComposer.adopt(ledger)
+      armed = true
+
+      await expect(
+        composer.commit({ kind: 'create-task', task: taskBody() })
+      ).rejects.toBeInstanceOf(StatePersistenceError)
+      expect(composer.isSealed()).toBe(true)
+      await ledger.close()
+
+      // The database is ahead of the witness, which is repairable.
+      const reopened = track(
+        await SqliteEventStore.open({ databasePath, integrityCheck: 'full' })
+      )
+      expect(reopened.getProjection().tasks).toHaveLength(1)
+      const witness = await fileHeadWitnessStore.read(
+        `${databasePath}.head.json`
+      )
+      expect(witness?.sequence).toBe(reopened.getHead().sequence)
+      await reopened.close()
+    })
+
+    it('blocks a witness that is ahead of the database', async () => {
+      const directory = await temporaryDirectory()
+      const databasePath = path.join(directory, 'ground.sqlite')
+      const witnessPath = `${databasePath}.head.json`
+      const ledger = track(
+        await SqliteEventStore.create({
+          databasePath,
+          bootstrap: bootstrap(),
+          dependencies: deterministicDependencies()
+        })
+      )
+      const composer = SqliteStateComposer.adopt(ledger)
+      await composer.commit({ kind: 'create-task', task: taskBody() })
+      const head = ledger.getHead()
+      await ledger.close()
+
+      // Forge a witness beyond the database, as a filesystem rollback of the
+      // database behind an already-published head would leave things.
+      const published = await fileHeadWitnessStore.read(witnessPath)
+      expect(published).toBeDefined()
+      await fileHeadWitnessStore.publish(witnessPath, {
+        ...published!,
+        sequence: head.sequence + 1,
+        eventHash: sha256('forged-ahead')
+      })
+
+      await expect(
+        SqliteEventStore.open({ databasePath, integrityCheck: 'full' })
+      ).rejects.toThrow()
+    })
+  })
+
+  describe('restart equivalence', () => {
+    it('replays a composed sequence to byte-identical state', async () => {
+      const directory = await temporaryDirectory()
+      const databasePath = path.join(directory, 'ground.sqlite')
+      const ledger = track(
+        await SqliteEventStore.create({
+          databasePath,
+          bootstrap: bootstrap(),
+          dependencies: deterministicDependencies()
+        })
+      )
+      const composer = SqliteStateComposer.adopt(ledger)
+
+      await startedExecution(composer)
+      await composer.commit({
+        kind: 'queue-provisional-secret-delete',
+        reference: 'secret_staged'
+      })
+      await composer.commit({
+        kind: 'interrupt-managed-execution',
+        taskId: 'task_1',
+        updatedAt: TIMESTAMP,
+        itemId: 'activity_approval',
+        operationId: 'activity_approval',
+        interruptedAt: TIMESTAMP
+      })
+
+      const composed = encodeProjection(composer.snapshot()).stateJson
+      await ledger.close()
+
+      const reopened = track(
+        await SqliteEventStore.open({ databasePath, integrityCheck: 'full' })
+      )
+      const restarted = SqliteStateComposer.adopt(reopened)
+      expect(encodeProjection(restarted.snapshot()).stateJson).toBe(composed)
+
+      // And re-deriving from the durable rows agrees with the materialization.
+      const decoded: DecodedLedgerRecord[] = reopened.getRecords().map(
+        (record) => ({
+          record,
+          event: decodeLedgerEvent(
+            record.kind,
+            record.entityId,
+            record.payloadJson
+          )
+        })
+      )
+      expect(replayLedgerDeterministically(decoded).stateJson).toBe(composed)
+
+      // Interrupted evidence survives the restart intact.
+      const item = restarted.snapshot().tasks[0]?.items[0]
+      expect(item?.kind === 'activity' && item.managedExecution?.phase).toBe(
+        'uncertain'
+      )
+      expect(restarted.snapshot().pendingSecretDeletes).toEqual(['secret_staged'])
+      await reopened.close()
+    })
+
+    it('refuses a second create against the same database', async () => {
+      const directory = await temporaryDirectory()
+      const databasePath = path.join(directory, 'ground.sqlite')
+      const ledger = track(
+        await SqliteEventStore.create({
+          databasePath,
+          bootstrap: bootstrap(),
+          dependencies: deterministicDependencies()
+        })
+      )
+      await ledger.close()
+      await expect(
+        SqliteEventStore.create({ databasePath, bootstrap: bootstrap() })
+      ).rejects.toBeInstanceOf(EventStoreConflictError)
+    })
+  })
+
+  describe('authority boundaries', () => {
+    it('never reads or writes a JSON state document', async () => {
+      const directory = await temporaryDirectory()
+      const databasePath = path.join(directory, 'ground.sqlite')
+      const jsonPath = path.join(directory, 'ground-state.json')
+      // A JSON document that disagrees with the ledger. If the composer had any
+      // JSON seam, this would be visible in its state.
+      await writeFile(
+        jsonPath,
+        JSON.stringify({
+          ...initialState(),
+          settings: { defaultProviderId: 'provider_local', sidebarCollapsed: true }
+        }),
+        'utf8'
+      )
+      const ledger = track(
+        await SqliteEventStore.create({
+          databasePath,
+          bootstrap: bootstrap(),
+          dependencies: deterministicDependencies()
+        })
+      )
+      const composer = SqliteStateComposer.adopt(ledger)
+      await composer.commit({ kind: 'create-task', task: taskBody() })
+
+      expect(composer.snapshot().settings.sidebarCollapsed).toBe(false)
+      // SQLite alone decided the state.
+      expect(encodeProjection(composer.snapshot()).stateJson).toBe(
+        encodeProjection(ledger.getProjection()).stateJson
+      )
+      await ledger.close()
+    })
+
+    it('exposes no export, restore, renderer or recovery surface', () => {
+      const surface = [
+        ...Object.getOwnPropertyNames(SqliteStateComposer.prototype),
+        ...Object.getOwnPropertyNames(SqliteStateComposer)
+      ]
+      for (const forbidden of [
+        'export',
+        'restore',
+        'snapshotSelection',
+        'listLocalStateSnapshots',
+        'exportLocalStateSnapshot',
+        'restoreLocalStateSnapshot',
+        'recoveryNotice',
+        'addRecoveryNotice'
+      ]) {
+        expect(surface).not.toContain(forbidden)
+      }
+      // The only state readers are the committed projection and the head.
+      expect(surface).toContain('snapshot')
+      expect(surface).toContain('head')
+    })
+
+    it('carries no credential material into the ledger', async () => {
+      const { composer, ledger } = await harness()
+      await composer.commit({
+        kind: 'publish-provider-secret-transition',
+        provider: provider({
+          hasApiKey: true,
+          // An unmodelled credential field must not survive normalization.
+          apiKey: 'sk-should-never-persist'
+        } as Partial<ProviderProfile>),
+        stagedReference: 'secret_staged',
+        obsoleteReferences: ['secret_old']
+      })
+
+      const payloads = ledger
+        .getRecords()
+        .map((record) => record.payloadJson)
+        .join('\n')
+      expect(payloads).not.toContain('sk-should-never-persist')
+      expect(payloads).not.toContain('apiKey')
+      // The exact reference journal is preserved verbatim.
+      expect(composer.snapshot().pendingSecretDeletes).toEqual(['secret_old'])
+      await ledger.close()
+    })
+  })
+})
