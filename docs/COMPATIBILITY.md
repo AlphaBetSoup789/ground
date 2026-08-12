@@ -11,6 +11,14 @@ The first credential-free
 records locally installed versions and help-visible flags. It is deliberately
 narrower than the required authenticated compatibility report.
 
+A separate credential-free
+[OpenClaw interface source review](compatibility/openclaw-source-review-2026-08-11.md)
+records why neither OpenClaw command surface currently qualifies as a Ground
+runtime: the stable `openclaw agent --local --json` surface cannot bind Ground's
+canonical workspace, and the `agent exec` surface exists only in prereleases.
+OpenClaw is deliberately absent from every matrix and fixture below, and no
+OpenClaw adapter is registered. That review installed and ran nothing.
+
 ## Published pinned contract fixtures
 
 The executable [compatibility fixture set](../fixtures/compatibility/README.md)
