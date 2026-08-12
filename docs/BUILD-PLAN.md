@@ -465,10 +465,15 @@ named first-class runtime. First-class support requires a source-reviewed,
 statically registered `AgentRuntimeAdapter`, truthful capability reporting, and
 versioned compatibility evidence.
 
-- Integrate OpenClaw directly as a first-class runtime adapter against its stable
-  headless `agent exec` contract. Do not require a Generic CLI implementation as a
-  precursor when the pinned upstream contract already provides deterministic
-  process status and structured output.
+- Gate OpenClaw's first-class adapter on a pinned, non-prerelease headless contract
+  that binds Ground's canonical workspace and returns bounded structured output.
+  As of 2026-08-11, `agent exec` exists only in OpenClaw prereleases; the stable
+  `agent --local --json` surface cannot accept an explicit working directory and
+  therefore does not satisfy Ground's workspace-binding contract. Do not describe
+  either surface as supported until a source review and executable fixture prove
+  the exact released interface. A prerelease-only integration requires a separate
+  explicit experimental-support decision and cannot satisfy this milestone's
+  daily-driver acceptance gate.
 - For Hermes, use one bounded Generic CLI fixture only to select and verify the
   durable machine interface: one-shot CLI, headless server, or another documented
   protocol. Record stdout/stderr separation, cancellation, session behavior,
@@ -492,10 +497,12 @@ versioned compatibility evidence.
 
 Acceptance gate:
 
-- OpenClaw has a statically registered adapter, pinned deterministic success and
-  failure fixtures, bounded structured-output parsing, cancellation/process-tree
-  evidence, truthful runtime-owned permission disclosure, and packaged launch
-  evidence without real credentials.
+- OpenClaw has a statically registered adapter against a pinned non-prerelease
+  contract, deterministic success and failure fixtures, explicit canonical
+  workspace binding, bounded structured-output parsing, cancellation/process-tree
+  evidence, truthful runtime-owned permission disclosure, resolved model/provider
+  attribution, and packaged launch evidence without real credentials. Inherited
+  fallback behavior must not silently change provider or workspace authority.
 - The Hermes discovery slice produces a reviewed interface decision and a
   credential-free deterministic fixture; it cannot claim first-class support.
 - Hermes reaches first-class support only after its selected interface passes the
