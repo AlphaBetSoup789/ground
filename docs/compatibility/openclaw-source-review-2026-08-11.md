@@ -57,7 +57,9 @@ Presence of the `agent exec` subcommand was additionally checked at
 The only agent-turn entry point in stable OpenClaw is `openclaw agent`, with
 `--local` selecting embedded execution and `--json` selecting structured output.
 Ground rejects `openclaw agent --local --json` as the basis for a first-class
-`AgentRuntimeAdapter`. All three reasons are independently disqualifying.
+`AgentRuntimeAdapter`. The missing invocation-bound workspace and the inherited
+configuration authority are independently disqualifying. The required selector
+adds a session-ownership risk that the stable surface does not isolate.
 
 ### 1.1 No explicit working directory
 
@@ -105,12 +107,16 @@ Every turn must name a target session, agent id, session key, or E.164
 recipient. An `--agent` value is further validated against the configured agent
 set (`listAgentIds(cfg)` at `:703`); an unknown id is rejected.
 
-Ground has no provider-neutral concept that maps onto an OpenClaw agent id,
-session key, or messaging recipient, and it must not invent one. Selecting a
-session also means the turn joins durable external conversation state that
-Ground does not own, did not create, and cannot reason about — which is the
-opposite of Ground's rule that readable history belongs to the user's Ground
-task, not to a provider-owned conversation object.
+Ground currently has no reviewed mapping from its provider-neutral task identity
+to an OpenClaw agent id, session key, or messaging recipient, and it must not
+silently invent or reuse one. A future pinned interface could permit a fresh,
+isolated per-run selector if the associated state is transient and carries no
+authority beyond that run. The stable surface does not establish that isolation;
+its selector resolves through configured agent and session state. Using it can
+therefore join durable external conversation state that Ground does not own, did
+not create, and cannot reason about — the opposite of Ground's rule that readable
+history belongs to the user's Ground task, not to a provider-owned conversation
+object.
 
 ### 1.3 Workspace, session, plugin, and fallback behavior come from external configuration
 
@@ -240,10 +246,13 @@ preference.
    `taskkill.exe /T /F` cleanup exercised against a deterministic child,
    including a descendant that ignores the first signal.
 7. **No imported external session, approval, plugin, or workspace authority.** A
-   Ground run must not join, create, or inherit an OpenClaw session; must not
-   treat an OpenClaw permission decision as a Ground approval; must not gain
-   authority from operator plugin roots; and must not acquire workspace authority
-   beyond the path Ground supplied.
+   Ground run must not join or inherit a durable OpenClaw session; must not treat
+   an OpenClaw permission decision as a Ground approval; must not gain authority
+   from operator plugin roots; and must not acquire workspace authority beyond
+   the path Ground supplied. An isolated per-run session identifier or temporary
+   state is acceptable only when it is created for that invocation, removed after
+   it, carries no prior authority, and is never persisted as portable Ground
+   continuation state.
 
 Meeting all seven still yields only "integrated"; see
 [COMPATIBILITY.md](../COMPATIBILITY.md) for the separate evidence required before
