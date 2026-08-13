@@ -13,9 +13,10 @@ export class EventStoreVersionError extends EventStoreError {
       | 'reducer'
       | 'projection'
       | 'witness',
-    message: string
+    message: string,
+    options?: { cause?: unknown }
   ) {
-    super(message)
+    super(message, options)
     this.name = 'EventStoreVersionError'
   }
 }

@@ -18,6 +18,10 @@ import type {
   RecoveryNotice,
   TaskItem
 } from '../shared/types'
+import {
+  PersistedStateVersionError,
+  StateMigrationContractError
+} from './state-migrations'
 import { MAX_PERSISTED_TASK_ITEMS } from './state-schema'
 import {
   StatePersistenceError,
@@ -2023,5 +2027,122 @@ describe('StateStore', () => {
     const reloaded = new StateStore(filePath)
     await reloaded.load()
     expect(reloaded.snapshot().recoveryNotice).toBeUndefined()
+  })
+})
+
+describe('StateStore legacy generation recovery policy', () => {
+  async function directoryWithState(): Promise<{
+    directory: string
+    filePath: string
+  }> {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), 'ground-recovery-policy-')
+    )
+    const filePath = path.join(directory, 'state.json')
+    const store = new StateStore(filePath)
+    await store.load()
+    await store.createTask(directory)
+    return { directory, filePath }
+  }
+
+  it('fails closed on a future-version primary instead of serving a v2 backup', async () => {
+    const { filePath } = await directoryWithState()
+    const valid = await readFile(filePath, 'utf8')
+    await writeFile(`${filePath}.bak`, valid, { encoding: 'utf8', mode: 0o600 })
+    await writeFile(
+      filePath,
+      JSON.stringify({ ...JSON.parse(valid), version: 99 }),
+      { encoding: 'utf8', mode: 0o600 }
+    )
+
+    // A newer document is intact state written by a future build. Quarantining
+    // it and restoring the older backup would silently downgrade user data.
+    const store = new StateStore(filePath)
+    await expect(store.load()).rejects.toBeInstanceOf(
+      PersistedStateVersionError
+    )
+
+    // The future primary must survive: it was neither quarantined nor replaced.
+    expect(JSON.parse(await readFile(filePath, 'utf8')).version).toBe(99)
+    expect(
+      (await readdir(path.dirname(filePath))).filter((entry) =>
+        entry.includes('unreadable')
+      )
+    ).toEqual([])
+  })
+
+  it('accepts a version-1 primary through its registered migration', async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), 'ground-recovery-v1-')
+    )
+    const filePath = path.join(directory, 'state.json')
+    const seed = new StateStore(filePath)
+    await seed.load()
+    const current = JSON.parse(await readFile(filePath, 'utf8'))
+    const { pendingSecretDeletes: _drop, ...rest } = current
+    await writeFile(
+      filePath,
+      JSON.stringify({ ...rest, version: 1 }),
+      { encoding: 'utf8', mode: 0o600 }
+    )
+
+    // StateStore and the exact-v2 SQLite reader deliberately differ here.
+    const store = new StateStore(filePath)
+    await expect(store.load()).resolves.toBeUndefined()
+    expect(store.snapshot().providers.length).toBeGreaterThan(0)
+  })
+
+  it('distinguishes a fresh install from unreadable state', async () => {
+    const freshDirectory = await mkdtemp(
+      path.join(os.tmpdir(), 'ground-recovery-fresh-')
+    )
+    const fresh = new StateStore(path.join(freshDirectory, 'state.json'))
+    await fresh.load()
+    // Absence is not a recovery event, so no notice is raised.
+    expect(fresh.snapshot().recoveryNotice).toBeUndefined()
+
+    const { filePath } = await directoryWithState()
+    const valid = await readFile(filePath, 'utf8')
+    await writeFile(`${filePath}.bak`, valid, { encoding: 'utf8', mode: 0o600 })
+    await writeFile(filePath, '{ not json', {
+      encoding: 'utf8',
+      mode: 0o600
+    })
+    await writeFile(`${filePath}.bak`, 'also not json', {
+      encoding: 'utf8',
+      mode: 0o600
+    })
+
+    const damaged = new StateStore(filePath)
+    await damaged.load()
+    // Unreadable state is visible, never a silent fresh install.
+    expect(damaged.snapshot().recoveryNotice?.kind).toBe('state-reset')
+    expect(
+      (await readdir(path.dirname(filePath))).filter((entry) =>
+        entry.includes('unreadable')
+      ).length
+    ).toBeGreaterThan(0)
+  })
+
+  it('quarantines only the generations it actually attempted', async () => {
+    const { filePath } = await directoryWithState()
+    const valid = await readFile(filePath, 'utf8')
+    await writeFile(filePath, '{ not json', {
+      encoding: 'utf8',
+      mode: 0o600
+    })
+    await writeFile(`${filePath}.bak`, valid, { encoding: 'utf8', mode: 0o600 })
+    await writeFile(`${filePath}.bak.2`, 'never read', {
+      encoding: 'utf8',
+      mode: 0o600
+    })
+
+    const store = new StateStore(filePath)
+    await store.load()
+
+    expect(store.snapshot().recoveryNotice?.kind).toBe('backup-restored')
+    // Selection stops at the first success, so the older generation behind it
+    // is never read and therefore never quarantined.
+    expect(await readFile(`${filePath}.bak.2`, 'utf8')).toBe('never read')
   })
 })

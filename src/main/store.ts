@@ -22,6 +22,19 @@ import type {
 } from '../shared/types'
 import { createId, nowIso } from './lib/ids'
 import {
+  classifySharedStateFailure,
+  LegacyStateUnrecoverableError,
+  recoverInterruptedRuns,
+  selectLegacyStateGeneration,
+  stateBackupPaths,
+  type LegacyCandidateFailure,
+  type LegacyCandidateOutcome
+} from './legacy-state-recovery'
+import {
+  PersistedStateVersionError,
+  StateMigrationContractError
+} from './state-migrations'
+import {
   MAX_PERSISTED_TASK_ITEMS,
   parsePersistedState,
   type PersistedStateData
@@ -59,15 +72,9 @@ const IMPORT_FIELD_LIMITS = Object.freeze({
 
 const MAX_STATE_FILE_BYTES = 128 * 1024 * 1024
 const STATE_READ_CHUNK_BYTES = 64 * 1024
-const STATE_BACKUP_RETENTION = 3
 const LOCAL_STATE_SNAPSHOT_ID_PATTERN =
   /^state_snapshot_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u
-const MANAGED_EXECUTION_OUTCOME_UNKNOWN =
-  'Outcome unknown: Ground closed after this action started. Review the workspace or external system before deciding what to do next. Ground will not retry this action automatically.'
-const LEGACY_MANAGED_EXECUTION_OUTCOME_UNKNOWN =
-  'Outcome unknown: Ground closed while this mutating action was running before durable execution claims were available. Review the workspace or external system before deciding what to do next. Ground will not retry this action automatically.'
-const MAX_INTERRUPTED_RUN_SUMMARIES = 256
 
 interface LocalStateSnapshotSelection {
   filePath: string
@@ -243,16 +250,6 @@ function requireSha256(value: string, label: string): void {
   if (!SHA256_PATTERN.test(value)) {
     throw new Error(`${label} must be a lowercase SHA-256 digest`)
   }
-}
-
-function managedStartedAt(
-  createdAt: string,
-  recoveryTimestamp: string
-): string {
-  const parsed = Date.parse(createdAt)
-  return Number.isFinite(parsed)
-    ? new Date(parsed).toISOString()
-    : recoveryTimestamp
 }
 
 function requireActivityItem(task: Task, itemId: string): ActivityItem {
@@ -475,59 +472,78 @@ export class StateStore {
 
   async load(): Promise<void> {
     await this.enqueueTransaction(async () => {
-      const backupPaths = stateBackupPaths(this.filePath)
-      let candidate: PersistedStateData | undefined
+      // One clock read for the whole recovery. The shared policy never resolves
+      // time itself, so every layer of this load stamps the same instant.
+      const interruptedAt = nowIso()
+      let recoveredState: PersistedStateData
+      let recovered = false
       let rewritePrimary = false
       let nextRecoveryNotice: RecoveryNotice | undefined
+      let encountered: readonly LegacyCandidateOutcome[] = []
 
       try {
-        candidate = await readStateFile(this.filePath)
-      } catch (primaryError) {
-        if (!isStateRecoveryError(primaryError)) throw primaryError
-        const recoveryErrors: unknown[] = [primaryError]
-        if (isCorruptStateFileError(primaryError)) {
-          await quarantineCorruptFile(this.filePath)
-        }
-        for (const backupPath of backupPaths) {
-          try {
-            candidate = await readStateFile(backupPath)
-            break
-          } catch (backupError) {
-            if (!isStateRecoveryError(backupError)) throw backupError
-            recoveryErrors.push(backupError)
-            if (isCorruptStateFileError(backupError)) {
-              await quarantineCorruptFile(backupPath)
+        const selection = await selectLegacyStateGeneration(this.filePath, {
+          read: async (filePath) => {
+            try {
+              return { state: await readStateFile(filePath) }
+            } catch (error) {
+              // Surface typed version and migration-plan evidence to the caller
+              // rather than the generic wrapper. Snapshot listing still relies
+              // on `InvalidStateFileError` to skip an unreadable generation, so
+              // only this path unwraps.
+              throw unwrapTypedStateEvidence(error)
             }
-          }
-        }
-
-        rewritePrimary = true
-        if (candidate) {
-          nextRecoveryNotice = {
-            id: `backup-restored:${Date.now()}`,
-            kind: 'backup-restored',
-            title: 'Recovered local history',
-            detail:
-              'Ground could not read the newest state file and restored a retained last-known-good local backup. Unreadable files were preserved for diagnosis.'
-          }
+          },
+          classify: classifyStateStoreFailure,
+          interruptedAt
+        })
+        encountered = selection.encountered
+        if (selection.source === 'none') {
+          // Every generation is genuinely absent: a fresh install, not a
+          // recovery event. No notice, because nothing was lost — but the
+          // initial document is still materialized, exactly as it was before
+          // selection moved into the shared policy.
+          recoveredState = createInitialState()
+          rewritePrimary = true
         } else {
-          candidate = createInitialState()
-          if (recoveryErrors.some((error) => !isMissingStateFileError(error))) {
+          recoveredState = selection.state
+          recovered = selection.recovered
+          if (selection.source === 'retained') {
+            rewritePrimary = true
             nextRecoveryNotice = {
-              id: `state-reset:${Date.now()}`,
-              kind: 'state-reset',
-              title: 'Local state needs attention',
+              id: `backup-restored:${Date.now()}`,
+              kind: 'backup-restored',
+              title: 'Recovered local history',
               detail:
-                'Ground could not validate the saved state or any retained backup, so it opened a clean local workspace. Unreadable files were preserved for diagnosis.'
+                'Ground could not read the newest state file and restored a retained last-known-good local backup. Unreadable files were preserved for diagnosis.'
             }
           }
+        }
+      } catch (error) {
+        if (!(error instanceof LegacyStateUnrecoverableError)) throw error
+        // At least one generation exists but none validated. This is a visible
+        // recovery event, never a silent fresh install.
+        encountered = error.encountered
+        recoveredState = createInitialState()
+        rewritePrimary = true
+        nextRecoveryNotice = {
+          id: `state-reset:${Date.now()}`,
+          kind: 'state-reset',
+          title: 'Local state needs attention',
+          detail:
+            'Ground could not validate the saved state or any retained backup, so it opened a clean local workspace. Unreadable files were preserved for diagnosis.'
         }
       }
 
-      if (!candidate) throw new Error('Ground state recovery produced no state')
-      const recoveredCandidate = structuredClone(candidate)
-      const recovered = recoverInterruptedRuns(recoveredCandidate)
-      const normalized = normalizeState(recoveredCandidate)
+      // Selection is pure. Quarantine is this store's own side effect and runs
+      // only for generations it actually attempted and found corrupt.
+      for (const outcome of encountered) {
+        if (outcome.failure === 'corrupt') {
+          await quarantineCorruptFile(outcome.path)
+        }
+      }
+
+      const normalized = normalizeState(recoveredState)
       if (rewritePrimary || recovered) {
         await this.persistStateDocument(this.filePath, normalized.payload)
       }
@@ -1385,7 +1401,8 @@ export class StateStore {
         true
       )
       const candidate = structuredClone(material.state)
-      recoverInterruptedRuns(candidate)
+      // One clock read, passed into the shared pure recovery function.
+      recoverInterruptedRuns(candidate, nowIso())
       const normalized = normalizeState(candidate)
       await this.publishRuntimeState(normalized.payload)
       this.state = normalized.state
@@ -1627,12 +1644,6 @@ async function persistState(filePath: string, payload: string): Promise<void> {
   }
 }
 
-function stateBackupPaths(filePath: string): string[] {
-  return Array.from({ length: STATE_BACKUP_RETENTION }, (_, index) =>
-    index === 0 ? `${filePath}.bak` : `${filePath}.bak.${index + 1}`
-  )
-}
-
 async function replacePrivateStateFile(
   filePath: string,
   payload: string
@@ -1823,6 +1834,37 @@ function errorCode(error: unknown): string | undefined {
   return (error as NodeJS.ErrnoException | undefined)?.code
 }
 
+/**
+ * Bridge this store's reader failures into the shared fall-through policy.
+ *
+ * Version and migration-contract evidence fails closed even though the legacy
+ * behavior treated both as ordinary corruption: a newer document is intact state
+ * from a future build, so quarantining it and serving an older backup would
+ * silently downgrade the user's data.
+ */
+function classifyStateStoreFailure(error: unknown): LegacyCandidateFailure {
+  const shared = classifySharedStateFailure(error)
+  if (shared) return shared
+  if (isMissingStateFileError(error)) return 'missing'
+  if (isCorruptStateFileError(error)) return 'corrupt'
+  return 'operational'
+}
+
+/**
+ * `parseStatePayload` wraps every schema and migration failure in one
+ * `InvalidStateFileError`, so typed version and migration-plan evidence is only
+ * reachable through the recorded cause. Recover it so the shared policy and the
+ * caller both see the real classification.
+ */
+function unwrapTypedStateEvidence(error: unknown): unknown {
+  if (!(error instanceof InvalidStateFileError)) return error
+  const cause = error.cause
+  return cause instanceof PersistedStateVersionError ||
+    cause instanceof StateMigrationContractError
+    ? cause
+    : error
+}
+
 function isMissingStateFileError(error: unknown): boolean {
   return errorCode(error) === 'ENOENT'
 }
@@ -1832,10 +1874,6 @@ function isCorruptStateFileError(error: unknown): boolean {
     error instanceof InvalidStateFileError ||
     errorCode(error) === 'ELOOP'
   )
-}
-
-function isStateRecoveryError(error: unknown): boolean {
-  return isMissingStateFileError(error) || isCorruptStateFileError(error)
 }
 
 async function quarantineCorruptFile(filePath: string): Promise<void> {
@@ -1849,150 +1887,4 @@ async function quarantineCorruptFile(filePath: string): Promise<void> {
     // filesystem failures are operational and must remain visible to callers.
     if (!isMissingStateFileError(error)) throw error
   }
-}
-
-function recoverInterruptedRuns(state: PersistedStateData): boolean {
-  let recovered = false
-  const interruptedAt = nowIso()
-  for (const task of state.tasks) {
-    const taskWasActive = isTaskActive(task)
-    const activeActivity = [...task.items]
-      .reverse()
-      .find(
-        (item) =>
-          item.kind === 'activity' &&
-          (item.status === 'pending' || item.status === 'running')
-      )
-    const interruptedRunId =
-      activeActivity?.kind === 'activity'
-        ? activeActivity.runId
-        : [...task.items]
-            .reverse()
-            .find((item) => item.kind === 'message' && item.runId)?.runId ??
-          createId('run')
-    let activityRecovered = false
-    const recoveredRunIds = new Set<string>()
-    const outcomeUnknownRunIds = new Set<string>()
-    for (const item of task.items) {
-      if (item.kind !== 'activity') continue
-      const marker = item.managedExecution
-      if (
-        marker?.claim === 'approved' &&
-        marker.phase === 'started'
-      ) {
-        item.managedExecution = {
-          ...marker,
-          phase: 'uncertain',
-          interruptedAt
-        }
-        item.status = 'error'
-        item.result = MANAGED_EXECUTION_OUTCOME_UNKNOWN
-        delete item.approvalId
-        delete item.durationMs
-        activityRecovered = true
-        recoveredRunIds.add(item.runId)
-        outcomeUnknownRunIds.add(item.runId)
-        continue
-      }
-      if (item.status === 'running' && !marker) {
-        const legacyKind = managedExecutionKind(item)
-        if (legacyKind) {
-          item.activityType =
-            legacyKind === 'command' ? 'command' : 'tool'
-          item.managedExecution = {
-            version: 1,
-            operationId: item.id,
-            claim: 'legacy-untracked',
-            kind: legacyKind,
-            phase: 'uncertain',
-            startedAt: managedStartedAt(item.createdAt, interruptedAt),
-            interruptedAt
-          }
-          item.result = LEGACY_MANAGED_EXECUTION_OUTCOME_UNKNOWN
-          delete item.durationMs
-          outcomeUnknownRunIds.add(item.runId)
-        }
-      }
-      if (item.status === 'pending' || item.status === 'running') {
-        item.status = 'error'
-        delete item.approvalId
-        activityRecovered = true
-        recoveredRunIds.add(item.runId)
-      }
-    }
-
-    const invalidatesContinuation =
-      taskWasActive || outcomeUnknownRunIds.size > 0
-    let continuationCleared = false
-    if (invalidatesContinuation && task.runtimeSessions) {
-      delete task.runtimeSessions
-      continuationCleared = true
-    }
-    if (invalidatesContinuation && task.modelSessions) {
-      for (const session of Object.values(task.modelSessions)) {
-        if (Object.hasOwn(session, 'checkpoint')) {
-          delete session.checkpoint
-          continuationCleared = true
-        }
-      }
-    }
-
-    const summaryRunIds = new Set<string>()
-    if (taskWasActive) {
-      for (const runId of recoveredRunIds) summaryRunIds.add(runId)
-      if (!summaryRunIds.size) summaryRunIds.add(interruptedRunId)
-    } else {
-      for (const runId of outcomeUnknownRunIds) summaryRunIds.add(runId)
-    }
-    let summariesAdded = 0
-    const summaryLimit = Math.min(
-      MAX_INTERRUPTED_RUN_SUMMARIES,
-      Math.max(0, MAX_PERSISTED_TASK_ITEMS - task.items.length)
-    )
-    for (const runId of summaryRunIds) {
-      if (summariesAdded >= summaryLimit) break
-      if (
-        task.items.some(
-          (item) =>
-            item.kind === 'activity' &&
-            item.runId === runId &&
-            item.activityType === 'error' &&
-            item.title === 'Run interrupted'
-        )
-      ) {
-        continue
-      }
-      const outcomeUnknown = outcomeUnknownRunIds.has(runId)
-      task.items.push({
-        id: createId('activity'),
-        kind: 'activity',
-        runId,
-        activityType: 'error',
-        title: 'Run interrupted',
-        detail: outcomeUnknown
-          ? 'Ground closed after a mutating action started. Its outcome is unknown, Ground did not retry it, and any native runtime continuation or model checkpoint was cleared. Review the workspace or external system before continuing.'
-          : 'Ground closed before this run reached a terminal state. Review the workspace before retrying.',
-        status: 'error',
-        createdAt: interruptedAt
-      })
-      summariesAdded += 1
-    }
-
-    if (
-      taskWasActive ||
-      outcomeUnknownRunIds.size > 0
-    ) {
-      task.runStatus = 'failed'
-    }
-    if (
-      activityRecovered ||
-      taskWasActive ||
-      continuationCleared ||
-      summariesAdded > 0
-    ) {
-      task.updatedAt = interruptedAt
-      recovered = true
-    }
-  }
-  return recovered
 }

@@ -1,3 +1,4 @@
+import type { LegacySourceMigrationGate } from '../legacy-state-recovery'
 import type { PersistedStateData } from '../state-schema'
 
 export const DATABASE_FORMAT_VERSION = 1 as const
@@ -449,6 +450,19 @@ export interface OpenEventStoreInput {
 export interface JsonV2MigrationInput {
   readonly sourceJsonPath: string
   readonly databasePath: string
+  /**
+   * Required. The SQLite writer lock coordinates ledger writers only, and
+   * `StateStore` never acquires it, so without this authority a live store can
+   * rewrite the legacy source between the final revalidation and the database
+   * hard-link. It is deliberately not optional and has no no-op default.
+   */
+  readonly gate: LegacySourceMigrationGate
+  /**
+   * Required. One injected recovery instant used by both the initial selection
+   * and the pre-publication revalidation, so two selections of identical bytes
+   * produce identical projections.
+   */
+  readonly interruptedAt: string
   readonly witnessPath?: string
   readonly dependencies?: EventStoreDependencies
   readonly fault?: (point: JsonV2MigrationFaultPoint) => void
@@ -463,8 +477,33 @@ export type JsonV2MigrationFaultPoint =
   | 'before-migration-temporary-cleanup'
 
 export interface JsonV2MigrationResult {
+  /** SHA-256 of the exact generation that supplied the state. */
   readonly sourceSha256: string
   readonly normalizedStateSha256: string
+  /** Byte length of the exact generation that supplied the state. */
   readonly sourceByteLength: number
   readonly head: LedgerHead
+  /**
+   * Which generation was selected. Bounded main-owned metadata for startup
+   * display; it deliberately never reaches the ledger, the projection, or the
+   * renderer, and it never carries a filesystem path.
+   */
+  readonly sourceGeneration: 'primary' | 'retained'
+  /** Zero-based retained-generation index when `sourceGeneration` is retained. */
+  readonly retainedIndex?: number
+  /** How many generations were attempted and found missing or corrupt. */
+  readonly unreadableGenerationCount: number
 }
+
+/**
+ * A migration attempt's outcome.
+ *
+ * `no-legacy-source` is a normal fresh-install condition, not a failure: there
+ * is no truthful legacy source to record, the only bootstrap kind is
+ * `legacy-state.bootstrapped`, and no database or witness is created. It is
+ * modelled as a result rather than an error so a caller cannot confuse it with
+ * unreadable state, which throws.
+ */
+export type JsonV2MigrationOutcome =
+  | ({ readonly outcome: 'migrated' } & JsonV2MigrationResult)
+  | { readonly outcome: 'no-legacy-source' }
