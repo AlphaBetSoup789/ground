@@ -545,6 +545,94 @@ describe('legacy generation selection policy', () => {
       recoverInterruptedRuns(baseState(), 'x'.repeat(64))
     ).toThrow(TypeError)
   })
+
+  it('does not derive legacy-untracked startedAt via Date.parse of a loose createdAt', () => {
+    // Activity createdAt is a 1–100 character string, not the managed-execution
+    // ISO-with-offset schema. Date.parse treats timezone-less values as local
+    // time, so the same bytes would mint a different startedAt in UTC than in
+    // America/New_York (2026-07-30T20:00:00.000Z vs 2026-07-31T00:00:00.000Z).
+    const createdAt = '2026-07-30T20:00:00'
+    const state = baseState()
+    state.tasks = [
+      {
+        id: 'task_legacy',
+        title: 'Legacy write',
+        providerId: 'provider_local',
+        mode: 'agent',
+        runStatus: 'running',
+        items: [
+          {
+            id: 'activity_write',
+            kind: 'activity',
+            runId: 'run_write',
+            activityType: 'tool',
+            title: 'Writing a file',
+            toolName: 'write_file',
+            status: 'running',
+            createdAt
+          }
+        ],
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z'
+      }
+    ]
+
+    const first = structuredClone(state)
+    const second = structuredClone(state)
+    expect(recoverInterruptedRuns(first, INTERRUPTED_AT)).toBe(true)
+    expect(recoverInterruptedRuns(second, INTERRUPTED_AT)).toBe(true)
+
+    const recovered = first.tasks[0]?.items.find(
+      (item) => item.id === 'activity_write'
+    )
+    if (!recovered || recovered.kind !== 'activity') {
+      throw new Error('expected the recovered write activity')
+    }
+    expect(recovered.managedExecution?.startedAt).toBe(INTERRUPTED_AT)
+    expect(recovered.managedExecution?.startedAt).not.toBe(
+      new Date(Date.parse(createdAt)).toISOString()
+    )
+    expect(JSON.stringify(second)).toBe(JSON.stringify(first))
+  })
+
+  it('canonicalizes a strict offset createdAt into legacy-untracked startedAt', () => {
+    const createdAt = '2026-07-30T16:00:00-04:00'
+    const state = baseState()
+    state.tasks = [
+      {
+        id: 'task_legacy',
+        title: 'Legacy write',
+        providerId: 'provider_local',
+        mode: 'agent',
+        runStatus: 'running',
+        items: [
+          {
+            id: 'activity_write',
+            kind: 'activity',
+            runId: 'run_write',
+            activityType: 'tool',
+            title: 'Writing a file',
+            toolName: 'write_file',
+            status: 'running',
+            createdAt
+          }
+        ],
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z'
+      }
+    ]
+
+    recoverInterruptedRuns(state, INTERRUPTED_AT)
+    const recovered = state.tasks[0]?.items.find(
+      (item) => item.id === 'activity_write'
+    )
+    if (!recovered || recovered.kind !== 'activity') {
+      throw new Error('expected the recovered write activity')
+    }
+    expect(recovered.managedExecution?.startedAt).toBe(
+      '2026-07-30T20:00:00.000Z'
+    )
+  })
 })
 
 describe('persisted state migration evidence', () => {

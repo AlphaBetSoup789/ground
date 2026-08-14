@@ -848,6 +848,28 @@ describe('JSON v2 copy-on-migrate generation recovery', () => {
         databasePath
       })
     ).rejects.toThrow(/bounded ISO-8601/)
+    // Date.parse accepts this timezone-less value. The outer gate must still
+    // reject it as the recovery schema does, rather than admitting it and
+    // wrapping a later TypeError as a generic pre-selection failure.
+    await expect(
+      migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
+        interruptedAt: '2026-08-13T00:00:00.000',
+        sourceJsonPath: sourcePath,
+        databasePath
+      })
+    ).rejects.toMatchObject({
+      name: 'JsonV2MigrationError',
+      message: expect.stringMatching(/bounded ISO-8601/)
+    })
+    await expect(
+      migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
+        interruptedAt: 'August 13, 2026 00:00:00 GMT',
+        sourceJsonPath: sourcePath,
+        databasePath
+      })
+    ).rejects.toThrow(/bounded ISO-8601/)
   })
 
   it('holds the gate after publication and reopens it after a pre-publication failure', async () => {

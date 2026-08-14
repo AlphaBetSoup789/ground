@@ -3,6 +3,7 @@ import { link, lstat, open } from 'node:fs/promises'
 import path from 'node:path'
 import { TextDecoder } from 'node:util'
 import {
+  assertRecoveryTimestamp,
   classifySharedStateFailure,
   LegacyStateUnrecoverableError,
   selectLegacyStateGeneration,
@@ -374,14 +375,12 @@ function sameEncounteredOutcomes(
 }
 
 function assertBoundedTimestamp(value: string): void {
-  if (
-    typeof value !== 'string' ||
-    value.length < 20 ||
-    value.length > 40 ||
-    !Number.isFinite(Date.parse(value))
-  ) {
+  try {
+    assertRecoveryTimestamp(value, 'interruptedAt')
+  } catch (error) {
     throw new JsonV2MigrationError(
-      'A bounded ISO-8601 interruptedAt timestamp is required'
+      'A bounded ISO-8601 interruptedAt timestamp is required',
+      { cause: error }
     )
   }
 }

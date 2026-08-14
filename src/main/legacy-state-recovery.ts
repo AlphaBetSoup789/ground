@@ -194,7 +194,7 @@ export async function selectLegacyStateGeneration<
   primaryPath: string,
   options: LegacySelectionOptions<T>
 ): Promise<LegacyGenerationSelection<T>> {
-  assertBoundedTimestamp(options.interruptedAt, 'interruptedAt')
+  assertRecoveryTimestamp(options.interruptedAt, 'interruptedAt')
   const paths = legacyGenerationPaths(primaryPath)
   const encountered: LegacyCandidateOutcome[] = []
 
@@ -257,7 +257,7 @@ const MAX_RECOVERY_TIMESTAMP_CHARACTERS = 40
  */
 const RECOVERY_TIMESTAMP_SCHEMA = z.iso.datetime({ offset: true })
 
-function assertBoundedTimestamp(value: string, label: string): void {
+export function assertRecoveryTimestamp(value: string, label: string): void {
   if (
     typeof value !== 'string' ||
     value.length > MAX_RECOVERY_TIMESTAMP_CHARACTERS ||
@@ -329,6 +329,13 @@ function managedStartedAt(
   createdAt: string,
   recoveryTimestamp: string
 ): string {
+  // Activity createdAt is a loose 1–100 character string. Date.parse treats
+  // timezone-less values as local time, so the same bytes would produce a
+  // different startedAt across hosts. Only a strict offset timestamp is a
+  // portable instant; anything else uses the injected recovery stamp.
+  if (!RECOVERY_TIMESTAMP_SCHEMA.safeParse(createdAt).success) {
+    return recoveryTimestamp
+  }
   const parsed = Date.parse(createdAt)
   return Number.isFinite(parsed)
     ? new Date(parsed).toISOString()
@@ -348,7 +355,7 @@ export function recoverInterruptedRuns(
   state: PersistedStateData,
   interruptedAt: string
 ): boolean {
-  assertBoundedTimestamp(interruptedAt, 'interruptedAt')
+  assertRecoveryTimestamp(interruptedAt, 'interruptedAt')
   let recovered = false
   for (const task of state.tasks) {
     const taskWasActive = isTaskActive(task)
