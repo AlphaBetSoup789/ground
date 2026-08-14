@@ -365,35 +365,95 @@ describe('legacy generation selection policy', () => {
     expect(JSON.stringify(second.state)).toBe(JSON.stringify(first.state))
   })
 
-  it('derives an invented run identifier that avoids persisted run ids', async () => {
-    const state = baseState()
-    state.tasks = [
-      {
-        id: 'task_no_runs',
-        title: 'Active task without run-bearing items',
-        providerId: 'provider_local',
-        mode: 'agent',
-        runStatus: 'running',
-        items: [],
-        createdAt: '2026-08-01T00:00:00.000Z',
-        updatedAt: '2026-08-01T00:00:00.000Z'
+  it('derives an invented fallback run id that avoids an occupied run id', async () => {
+    // An active task whose only item is terminal and carries no message runId is
+    // the one shape that reaches the invented-fallback branch.
+    const activeTaskWithoutRunBearingItems = (runId: string) => {
+      const state = baseState()
+      state.tasks = [
+        {
+          id: 'task_fallback',
+          title: 'Active task',
+          providerId: 'provider_local',
+          mode: 'agent',
+          runStatus: 'running',
+          items: [
+            {
+              id: 'activity_terminal',
+              kind: 'activity',
+              runId,
+              activityType: 'tool',
+              title: 'Already finished',
+              status: 'success',
+              createdAt: '2026-08-01T00:00:00.000Z'
+            }
+          ],
+          createdAt: '2026-08-01T00:00:00.000Z',
+          updatedAt: '2026-08-01T00:00:00.000Z'
+        }
+      ]
+      return state
+    }
+
+    const summaryOf = (state: PersistedStateData): { runId: string } => {
+      const summary = state.tasks[0]!.items.find(
+        (item) => item.kind === 'activity' && item.title === 'Run interrupted'
+      )
+      if (!summary || typeof summary.runId !== 'string') {
+        throw new Error('expected an interruption summary bound to a run')
       }
-    ]
-    const selection = await selectLegacyStateGeneration(PRIMARY, {
-      read: reader({ [PRIMARY]: state }),
+      return { runId: summary.runId }
+    }
+
+    // Derive the fallback the clean document produces.
+    const clean = await selectLegacyStateGeneration(PRIMARY, {
+      read: reader({
+        [PRIMARY]: activeTaskWithoutRunBearingItems('run_other')
+      }),
       classify,
       interruptedAt: INTERRUPTED_AT
     })
-    if (selection.source !== 'primary') throw new Error('unreachable')
-    const summary = selection.state.tasks[0]!.items[0]!
-    expect(summary.runId).toMatch(/^run_recovered_[0-9a-f]{32}$/u)
+    if (clean.source !== 'primary') throw new Error('unreachable')
+    const firstDerivedRunId = summaryOf(clean.state).runId
+    expect(firstDerivedRunId).toMatch(/^run_recovered_[0-9a-f]{32}$/u)
+
+    // Seed that exact run id on a terminal item that does not become the
+    // selected interrupted run, so the first derived candidate is occupied.
+    const options = {
+      read: reader({
+        [PRIMARY]: activeTaskWithoutRunBearingItems(firstDerivedRunId)
+      }),
+      classify,
+      interruptedAt: INTERRUPTED_AT
+    }
+    const first = await selectLegacyStateGeneration(PRIMARY, options)
+    const second = await selectLegacyStateGeneration(PRIMARY, options)
+    if (first.source !== 'primary' || second.source !== 'primary') {
+      throw new Error('unreachable')
+    }
+
+    const summaryRunId = summaryOf(first.state).runId
+    expect(summaryRunId).toMatch(/^run_recovered_[0-9a-f]{32}$/u)
+    expect(summaryRunId).not.toBe(firstDerivedRunId)
+
+    const runIds = first.state.tasks[0]!.items.map((item) => item.runId)
+    expect(new Set(runIds).size).toBe(runIds.length)
+    expect(runIds).toContain(firstDerivedRunId)
+
+    expect(JSON.stringify(second.state)).toBe(JSON.stringify(first.state))
   })
 
+
   it('encodes hash inputs unambiguously across identifier boundaries', async () => {
-    // Two tasks whose (taskId, runId) tuples would collide under naive
-    // delimiter joining must still receive distinct derived identifiers.
-    const state = baseState()
+    // These two tuples collapse to one digest input under the previous
+    // `parts.join(NUL)` encoding:
+    //   ("a", "b<NUL>c")  -> a<NUL>b<NUL>c<NUL>run-interrupted<NUL>ts
+    //   ("a<NUL>b", "c")  -> a<NUL>b<NUL>c<NUL>run-interrupted<NUL>ts
+    // Persisted identifiers are arbitrary bounded strings, so a NUL is
+    // representable and the ambiguity is reachable from untrusted state.
+    const NUL = String.fromCharCode(0)
     const timestamp = '2026-08-01T00:00:00.000Z'
+    const state = baseState()
     const makeTask = (id: string, runId: string) => ({
       id,
       title: 'Active',
@@ -414,7 +474,7 @@ describe('legacy generation selection policy', () => {
       createdAt: timestamp,
       updatedAt: timestamp
     })
-    state.tasks = [makeTask('a', 'b:c'), makeTask('a:b', 'c')]
+    state.tasks = [makeTask('a', `b${NUL}c`), makeTask(`a${NUL}b`, 'c')]
 
     const selection = await selectLegacyStateGeneration(PRIMARY, {
       read: reader({ [PRIMARY]: state }),
@@ -422,6 +482,7 @@ describe('legacy generation selection policy', () => {
       interruptedAt: INTERRUPTED_AT
     })
     if (selection.source !== 'primary') throw new Error('unreachable')
+
     const summaryIds = selection.state.tasks.flatMap((task) =>
       task.items
         .filter(
@@ -429,9 +490,12 @@ describe('legacy generation selection policy', () => {
         )
         .map((item) => item.id)
     )
+    // The occupied set is per task, so it cannot mask a cross-task collision:
+    // only the encoding keeps these two derived identifiers apart.
     expect(summaryIds).toHaveLength(2)
     expect(new Set(summaryIds).size).toBe(2)
   })
+
 
   it.each([
     ['a locale string', 'Aug 13 2026'],
