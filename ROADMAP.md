@@ -165,6 +165,8 @@ are not necessarily release-certified.
 ## Beta
 
 - Certified Windows and Linux packages
+- First-class OpenClaw and Hermes agent-runtime adapters, with Hermes machine-
+  interface discovery completed before its adapter is treated as supported
 - Broader managed-worktree orchestration and coordinated parallel agent tasks
 - Durable terminal sessions and supervised background commands
 - MCP remote authentication/OAuth, resources/prompts, and finer per-capability

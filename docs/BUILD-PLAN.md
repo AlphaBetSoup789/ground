@@ -455,6 +455,63 @@ Acceptance gate:
   deterministic conformance without importing private Ground internals.
 - Contract changes follow semantic versioning and include migration notes.
 
+### M5.1a First-class external agent runtimes — P1
+
+Requirements: GR-2, GR-3, GR-5, GR-7
+
+The Generic CLI remains Ground's universal escape hatch for an unsupported
+executable, but a text-only Generic CLI profile is not completion evidence for a
+named first-class runtime. First-class support requires a source-reviewed,
+statically registered `AgentRuntimeAdapter`, truthful capability reporting, and
+versioned compatibility evidence.
+
+- Gate OpenClaw's first-class adapter on a pinned, non-prerelease headless contract
+  that binds Ground's canonical workspace and returns bounded structured output.
+  As of 2026-08-11, `agent exec` exists only in OpenClaw prereleases; the stable
+  `agent --local --json` surface cannot accept an explicit working directory and
+  therefore does not satisfy Ground's workspace-binding contract. Do not describe
+  either surface as supported until a source review and executable fixture prove
+  the exact released interface. A prerelease-only integration requires a separate
+  explicit experimental-support decision and cannot satisfy this milestone's
+  daily-driver acceptance gate.
+- For Hermes, use one bounded Generic CLI fixture only to select and verify the
+  durable machine interface: one-shot CLI, headless server, or another documented
+  protocol. Record stdout/stderr separation, cancellation, session behavior,
+  workspace binding, and version identity before approving a first-class adapter.
+- Replace the Hermes discovery profile with a first-class runtime adapter after
+  the interface decision. A working text response alone must remain labeled
+  experimental and must not enter the supported-runtime matrix.
+- Keep runtime-owned tools and permission decisions distinct from Ground-managed
+  approvals. Parsed activity is observability and must never be presented as proof
+  that Ground authorized the runtime's internal action.
+- Bind every launch to the exact executable, adapter revision, provider-profile
+  fingerprint, canonical workspace, task mode, and cancellation owner. Do not let
+  a runtime silently create a second worktree or broaden workspace authority when
+  Ground already owns isolation.
+- Persist only normalized Ground history and adapter-owned, compatibility-bound
+  continuation state. Treat runtime memory, skills, plugins, config, and native
+  sessions as external state rather than portable Ground task content.
+- Report only capabilities and attribution proven by the selected interface. Do
+  not synthesize streaming, per-tool approvals, usage, cost, model identity, or
+  resumability from a final text response.
+
+Acceptance gate:
+
+- OpenClaw has a statically registered adapter against a pinned non-prerelease
+  contract, deterministic success and failure fixtures, explicit canonical
+  workspace binding, bounded structured-output parsing, cancellation/process-tree
+  evidence, truthful runtime-owned permission disclosure, resolved model/provider
+  attribution, and packaged launch evidence without real credentials. Inherited
+  fallback behavior must not silently change provider or workspace authority.
+- The Hermes discovery slice produces a reviewed interface decision and a
+  credential-free deterministic fixture; it cannot claim first-class support.
+- Hermes reaches first-class support only after its selected interface passes the
+  public runtime-adapter conformance suite, negative protocol tests, cancellation
+  checks, session-compatibility rules, and packaged launch evidence.
+- Switching away from either runtime preserves readable provider-neutral history
+  and does not transfer its opaque memory, credentials, approvals, plugins, or
+  workspace authority to another adapter.
+
 ### M5.2 MCP completeness — P2
 
 Requirements: GR-4.6, GR-5
