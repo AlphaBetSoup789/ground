@@ -316,6 +316,159 @@ describe('legacy generation selection policy', () => {
     )
   })
 
+  it('avoids a pre-seeded derived identifier while staying deterministic', async () => {
+    // Derive the identifier recovery would choose on a clean document, then seed
+    // that exact value so the first candidate is occupied.
+    const clean = await selectLegacyStateGeneration(PRIMARY, {
+      read: reader({ [PRIMARY]: stateWithRunningTask() }),
+      classify,
+      interruptedAt: INTERRUPTED_AT
+    })
+    if (clean.source !== 'primary') throw new Error('unreachable')
+    const firstDerivedId = clean.state.tasks[0]!.items.find(
+      (item) => item.kind === 'activity' && item.title === 'Run interrupted'
+    )!.id
+    expect(firstDerivedId).toMatch(/^activity_recovered_[0-9a-f]{32}$/u)
+
+    const seeded = stateWithRunningTask()
+    seeded.tasks[0]!.items.push({
+      id: firstDerivedId,
+      kind: 'message',
+      runId: 'run_other',
+      role: 'assistant',
+      content: 'pre-seeded collision',
+      createdAt: '2026-08-01T00:00:00.000Z'
+    })
+
+    const options = {
+      read: reader({ [PRIMARY]: seeded }),
+      classify,
+      interruptedAt: INTERRUPTED_AT
+    }
+    const first = await selectLegacyStateGeneration(PRIMARY, options)
+    const second = await selectLegacyStateGeneration(PRIMARY, options)
+    if (first.source !== 'primary' || second.source !== 'primary') {
+      throw new Error('unreachable')
+    }
+
+    const summaries = first.state.tasks[0]!.items.filter(
+      (item) => item.kind === 'activity' && item.title === 'Run interrupted'
+    )
+    expect(summaries).toHaveLength(1)
+    // The occupied candidate is stepped past deterministically.
+    expect(summaries[0]!.id).not.toBe(firstDerivedId)
+    expect(summaries[0]!.id).toMatch(/^activity_recovered_[0-9a-f]{32}$/u)
+    // Every identifier in the document remains unique.
+    const ids = first.state.tasks[0]!.items.map((item) => item.id)
+    expect(new Set(ids).size).toBe(ids.length)
+    // Two recoveries of identical input remain byte-identical.
+    expect(JSON.stringify(second.state)).toBe(JSON.stringify(first.state))
+  })
+
+  it('derives an invented run identifier that avoids persisted run ids', async () => {
+    const state = baseState()
+    state.tasks = [
+      {
+        id: 'task_no_runs',
+        title: 'Active task without run-bearing items',
+        providerId: 'provider_local',
+        mode: 'agent',
+        runStatus: 'running',
+        items: [],
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z'
+      }
+    ]
+    const selection = await selectLegacyStateGeneration(PRIMARY, {
+      read: reader({ [PRIMARY]: state }),
+      classify,
+      interruptedAt: INTERRUPTED_AT
+    })
+    if (selection.source !== 'primary') throw new Error('unreachable')
+    const summary = selection.state.tasks[0]!.items[0]!
+    expect(summary.runId).toMatch(/^run_recovered_[0-9a-f]{32}$/u)
+  })
+
+  it('encodes hash inputs unambiguously across identifier boundaries', async () => {
+    // Two tasks whose (taskId, runId) tuples would collide under naive
+    // delimiter joining must still receive distinct derived identifiers.
+    const state = baseState()
+    const timestamp = '2026-08-01T00:00:00.000Z'
+    const makeTask = (id: string, runId: string) => ({
+      id,
+      title: 'Active',
+      providerId: 'provider_local',
+      mode: 'agent' as const,
+      runStatus: 'running' as const,
+      items: [
+        {
+          id: `${id}_activity`,
+          kind: 'activity' as const,
+          runId,
+          activityType: 'tool' as const,
+          title: 'Running',
+          status: 'running' as const,
+          createdAt: timestamp
+        }
+      ],
+      createdAt: timestamp,
+      updatedAt: timestamp
+    })
+    state.tasks = [makeTask('a', 'b:c'), makeTask('a:b', 'c')]
+
+    const selection = await selectLegacyStateGeneration(PRIMARY, {
+      read: reader({ [PRIMARY]: state }),
+      classify,
+      interruptedAt: INTERRUPTED_AT
+    })
+    if (selection.source !== 'primary') throw new Error('unreachable')
+    const summaryIds = selection.state.tasks.flatMap((task) =>
+      task.items
+        .filter(
+          (item) => item.kind === 'activity' && item.title === 'Run interrupted'
+        )
+        .map((item) => item.id)
+    )
+    expect(summaryIds).toHaveLength(2)
+    expect(new Set(summaryIds).size).toBe(2)
+  })
+
+  it.each([
+    ['a locale string', 'Aug 13 2026'],
+    ['a timezone-less timestamp', '2026-08-13T00:00:00'],
+    ['a date-only value', '2026-08-13'],
+    ['an impossible calendar date', '2026-02-30T00:00:00.000Z'],
+    ['an out-of-range month', '2026-13-01T00:00:00.000Z'],
+    ['trailing content', '2026-08-13T00:00:00.000Zx'],
+    ['leading whitespace', ' 2026-08-13T00:00:00.000Z'],
+    ['an unbounded value', `2026-08-13T00:00:00.000Z${'0'.repeat(64)}`],
+    ['an empty string', '']
+  ])('rejects %s as a recovery timestamp', async (_label, value) => {
+    await expect(
+      selectLegacyStateGeneration(PRIMARY, {
+        read: reader({ [PRIMARY]: baseState() }),
+        classify,
+        interruptedAt: value
+      })
+    ).rejects.toBeInstanceOf(TypeError)
+    expect(() => recoverInterruptedRuns(baseState(), value)).toThrow(TypeError)
+  })
+
+  it.each([
+    ['UTC with milliseconds', '2026-08-13T00:00:00.000Z'],
+    ['UTC without milliseconds', '2026-08-13T00:00:00Z'],
+    ['an explicit positive offset', '2026-08-13T00:00:00+02:00'],
+    ['an explicit negative offset', '2026-08-13T00:00:00-05:30']
+  ])('accepts %s', async (_label, value) => {
+    await expect(
+      selectLegacyStateGeneration(PRIMARY, {
+        read: reader({ [PRIMARY]: baseState() }),
+        classify,
+        interruptedAt: value
+      })
+    ).resolves.toMatchObject({ source: 'primary' })
+  })
+
   it('rejects an unbounded or invalid recovery timestamp', async () => {
     await expect(
       selectLegacyStateGeneration(PRIMARY, {

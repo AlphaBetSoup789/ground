@@ -404,13 +404,26 @@ async function readJsonV2Source(
       { cause: error }
     )
   }
+  // A document that is not a state object at all, or whose version field is not
+  // a usable version number, is damaged rather than versioned. Those may fall
+  // through to an older generation. Only a well-formed version that this reader
+  // cannot accept is version evidence, which fails closed.
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new EventStoreCorruptionError(
+      'Legacy JSON state is not a state object'
+    )
+  }
+  const declaredVersion = (value as { version?: unknown }).version
   if (
-    !value ||
-    typeof value !== 'object' ||
-    Array.isArray(value) ||
-    (value as { version?: unknown }).version !==
-      CURRENT_PERSISTED_STATE_VERSION
+    typeof declaredVersion !== 'number' ||
+    !Number.isSafeInteger(declaredVersion) ||
+    declaredVersion < 1
   ) {
+    throw new EventStoreCorruptionError(
+      'Legacy JSON state does not declare a usable persisted-state version'
+    )
+  }
+  if (declaredVersion !== CURRENT_PERSISTED_STATE_VERSION) {
     throw new EventStoreVersionError(
       'projection',
       `Copy-on-migrate requires exact JSON state version ${CURRENT_PERSISTED_STATE_VERSION}`

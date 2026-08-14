@@ -612,7 +612,10 @@ describe('JSON v2 copy-on-migrate generation recovery', () => {
       ...legacyState(),
       version: 9
     } as unknown as PersistedStateData)
-    await writeGeneration(`${sourcePath}.bak`, legacyState())
+    const backupPayload = await writeGeneration(
+      `${sourcePath}.bak`,
+      legacyState()
+    )
 
     await expect(
       migrateJsonV2ToSqlite({
@@ -627,6 +630,67 @@ describe('JSON v2 copy-on-migrate generation recovery', () => {
     })
   })
 
+  it('falls back from a malformed-version primary to a valid v2 backup', async () => {
+    const directory = await temporaryDirectory()
+    const sourcePath = path.join(directory, 'state.json')
+    const databasePath = path.join(directory, 'ground.sqlite')
+    // A version field that is not a usable version number is damage, not a
+    // version this reader declines. It must not block recovery.
+    await writeGeneration(sourcePath, {
+      ...legacyState(),
+      version: 'two'
+    } as unknown as PersistedStateData)
+    const backupPayload = await writeGeneration(
+      `${sourcePath}.bak`,
+      legacyState()
+    )
+
+    const result = migrated(
+      await migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
+        sourceJsonPath: sourcePath,
+        databasePath
+      })
+    )
+
+    expect(result.sourceGeneration).toBe('retained')
+    expect(result.retainedIndex).toBe(0)
+    expect(result.sourceSha256).toBe(
+      createHash('sha256').update(backupPayload).digest('hex')
+    )
+  })
+
+  it.each([
+    { label: 'a missing version', document: {} },
+    { label: 'a fractional version', document: { version: 2.5 } },
+    { label: 'a zero version', document: { version: 0 } },
+    { label: 'a negative version', document: { version: -2 } },
+    { label: 'a non-finite version', document: { version: 'NaN' } },
+    { label: 'a JSON array', document: [] },
+    { label: 'a JSON scalar', document: 42 }
+  ])(
+    'treats $label as corruption that may fall through',
+    async ({ document }) => {
+      const directory = await temporaryDirectory()
+      const sourcePath = path.join(directory, 'state.json')
+      const databasePath = path.join(directory, 'ground.sqlite')
+      await writeGeneration(
+        sourcePath,
+        document as unknown as PersistedStateData
+      )
+      await writeGeneration(`${sourcePath}.bak`, legacyState())
+
+      const result = migrated(
+        await migrateJsonV2ToSqlite({
+          ...migrationAuthority(),
+          sourceJsonPath: sourcePath,
+          databasePath
+        })
+      )
+      expect(result.sourceGeneration).toBe('retained')
+    }
+  )
+
   it('rejects a version-1 primary that StateStore would migrate', async () => {
     const directory = await temporaryDirectory()
     const sourcePath = path.join(directory, 'state.json')
@@ -635,6 +699,7 @@ describe('JSON v2 copy-on-migrate generation recovery', () => {
       ...legacyState(),
       version: 1
     } as unknown as PersistedStateData)
+    await writeGeneration(`${sourcePath}.bak`, legacyState())
 
     // The bootstrap event records sourceStateVersion as exactly 2 while
     // sourceSha256 hashes the selected file, so migrating a v1 document would
@@ -646,6 +711,10 @@ describe('JSON v2 copy-on-migrate generation recovery', () => {
         databasePath
       })
     ).rejects.toBeInstanceOf(EventStoreVersionError)
+    // v1 is a version decision, so no backup fallback follows it either.
+    await expect(lstat(databasePath)).rejects.toMatchObject({
+      code: 'ENOENT'
+    })
   })
 
   it('leaves legacy file metadata untouched on success', async () => {

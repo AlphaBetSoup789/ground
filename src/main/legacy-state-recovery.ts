@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { z } from 'zod'
 import type { ActivityItem, ManagedExecutionKind, Task } from '../shared/types'
 import {
   PersistedStateVersionError,
@@ -242,14 +243,29 @@ export function classifySharedStateFailure(
   return undefined
 }
 
+const MAX_RECOVERY_TIMESTAMP_CHARACTERS = 40
+
+/**
+ * The exact schema persisted timestamps use, so a value accepted here is always
+ * accepted by `managedExecution.interruptedAt` and `startedAt` afterward.
+ * Deriving the rule from that schema rather than a hand-written pattern keeps
+ * the two from drifting apart.
+ *
+ * `Date.parse` alone is not sufficient: it accepts locale strings such as
+ * `Aug 13 2026` and timezone-less values such as `2026-08-13T00:00:00`, which
+ * would make one recovery's stamp ambiguous across hosts.
+ */
+const RECOVERY_TIMESTAMP_SCHEMA = z.iso.datetime({ offset: true })
+
 function assertBoundedTimestamp(value: string, label: string): void {
   if (
     typeof value !== 'string' ||
-    value.length < 20 ||
-    value.length > 40 ||
-    !Number.isFinite(Date.parse(value))
+    value.length > MAX_RECOVERY_TIMESTAMP_CHARACTERS ||
+    !RECOVERY_TIMESTAMP_SCHEMA.safeParse(value).success
   ) {
-    throw new TypeError(`${label} must be a bounded ISO-8601 timestamp`)
+    throw new TypeError(
+      `${label} must be a bounded ISO-8601 timestamp with an explicit offset`
+    )
   }
 }
 
@@ -269,22 +285,44 @@ function managedExecutionKind(
 }
 
 /**
- * Deterministic identity for recovery-generated entries.
+ * Unambiguous encoding of hash inputs.
+ *
+ * Joining with a delimiter is ambiguous: any part that can itself contain the
+ * delimiter lets two different input tuples produce the same digest. Persisted
+ * task and run identifiers are arbitrary bounded strings, so each part is
+ * length-prefixed instead and no delimiter is needed.
+ */
+function encodeHashInputs(parts: readonly string[]): string {
+  return parts
+    .map((part) => `${Buffer.byteLength(part, 'utf8')}:${part}`)
+    .join('')
+}
+
+/**
+ * Deterministic identity for recovery-generated entries that is also guaranteed
+ * unused within its namespace.
  *
  * A random identifier would make recovery non-reproducible: two selections of
  * the same bytes at the same injected instant would produce different documents,
- * so a caller could never prove that a re-selection matched its first one.
- * Deriving from the task, run, purpose, and instant keeps entries unique — a
- * summary is emitted at most once per run — while staying byte-stable.
+ * so a caller could never prove a re-selection matched its first one. But a bare
+ * derived identifier is not enough either — persisted state is untrusted input
+ * and may already contain the exact value this function would derive, which
+ * would collide a recovery entry onto existing content. The counter keeps the
+ * result deterministic while stepping past any occupied candidate.
  */
-function deterministicRecoveryId(
+function deterministicUnusedId(
   prefix: string,
-  parts: readonly string[]
+  parts: readonly string[],
+  occupied: ReadonlySet<string>
 ): string {
-  const digest = createHash('sha256')
-    .update(parts.join('\u0000'))
-    .digest('hex')
-  return `${prefix}_recovered_${digest.slice(0, 32)}`
+  const encoded = encodeHashInputs(parts)
+  for (let attempt = 0; ; attempt += 1) {
+    const digest = createHash('sha256')
+      .update(encodeHashInputs([encoded, String(attempt)]))
+      .digest('hex')
+    const candidate = `${prefix}_recovered_${digest.slice(0, 32)}`
+    if (!occupied.has(candidate)) return candidate
+  }
 }
 
 function managedStartedAt(
@@ -314,6 +352,15 @@ export function recoverInterruptedRuns(
   let recovered = false
   for (const task of state.tasks) {
     const taskWasActive = isTaskActive(task)
+    // Persisted state is untrusted input: it may already contain the exact
+    // identifiers this recovery would derive. Track both namespaces so a
+    // generated entry can never land on existing content.
+    const occupiedItemIds = new Set(task.items.map((item) => item.id))
+    const occupiedRunIds = new Set(
+      task.items
+        .map((item) => item.runId)
+        .filter((runId): runId is string => typeof runId === 'string')
+    )
     const activeActivity = [...task.items]
       .reverse()
       .find(
@@ -327,7 +374,13 @@ export function recoverInterruptedRuns(
         : [...task.items]
             .reverse()
             .find((item) => item.kind === 'message' && item.runId)?.runId ??
-          deterministicRecoveryId('run', [task.id, 'interrupted', interruptedAt])
+          // Only the invented fallback needs collision avoidance; the run ids
+          // recovered from existing items are intentionally real.
+          deterministicUnusedId(
+            'run',
+            [task.id, 'interrupted', interruptedAt],
+            occupiedRunIds
+          )
     let activityRecovered = false
     const recoveredRunIds = new Set<string>()
     const outcomeUnknownRunIds = new Set<string>()
@@ -421,13 +474,14 @@ export function recoverInterruptedRuns(
         continue
       }
       const outcomeUnknown = outcomeUnknownRunIds.has(runId)
+      const summaryId = deterministicUnusedId(
+        'activity',
+        [task.id, runId, 'run-interrupted', interruptedAt],
+        occupiedItemIds
+      )
+      occupiedItemIds.add(summaryId)
       task.items.push({
-        id: deterministicRecoveryId('activity', [
-          task.id,
-          runId,
-          'run-interrupted',
-          interruptedAt
-        ]),
+        id: summaryId,
         kind: 'activity',
         runId,
         activityType: 'error',
