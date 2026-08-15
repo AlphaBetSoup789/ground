@@ -3,6 +3,15 @@ import { link, lstat, open } from 'node:fs/promises'
 import path from 'node:path'
 import { TextDecoder } from 'node:util'
 import {
+  assertRecoveryTimestamp,
+  classifySharedStateFailure,
+  LegacyStateUnrecoverableError,
+  selectLegacyStateGeneration,
+  type LegacyCandidateFailure,
+  type LegacyCandidateOutcome,
+  type LegacyGenerationSelection
+} from '../legacy-state-recovery'
+import {
   CURRENT_PERSISTED_STATE_VERSION,
   parsePersistedState,
   type PersistedStateData
@@ -29,6 +38,7 @@ import {
   MAX_DATABASE_BYTES,
   type HeadWitness,
   type JsonV2MigrationInput,
+  type JsonV2MigrationOutcome,
   type JsonV2MigrationResult
 } from './types'
 import {
@@ -48,8 +58,23 @@ interface ReadJsonV2Source {
   readonly rawBytes: Buffer
   readonly sourceSha256: string
   readonly sourceByteLength: number
+  readonly state: PersistedStateData
+}
+
+/**
+ * The exact generation this migration is committed to, plus the digests that
+ * pre-publication revalidation compares. Every field must still match under the
+ * held gate or the snapshot would be published from stale legacy state.
+ */
+interface SelectedLegacySource {
+  readonly source: 'primary' | 'retained'
+  readonly retainedIndex?: number
+  readonly path: string
+  readonly sourceSha256: string
+  readonly sourceByteLength: number
   readonly normalizedState: PersistedStateData
   readonly normalizedStateSha256: string
+  readonly encountered: readonly LegacyCandidateOutcome[]
 }
 
 /**
@@ -60,7 +85,27 @@ interface ReadJsonV2Source {
  */
 export async function migrateJsonV2ToSqlite(
   input: JsonV2MigrationInput
-): Promise<JsonV2MigrationResult> {
+): Promise<JsonV2MigrationOutcome> {
+  if (!input.gate) {
+    throw new JsonV2MigrationError(
+      'A legacy source migration gate is required; copy-on-migrate cannot run unguarded'
+    )
+  }
+  assertBoundedTimestamp(input.interruptedAt)
+  return input.gate.withExclusiveMigration((holdForProcessExit) =>
+    runGuardedMigration(input, holdForProcessExit)
+  )
+}
+
+/**
+ * The complete migration. Every step from initial selection through selected
+ * database verification runs inside the caller's exclusive scope, so no JSON
+ * writer can interleave with selection, revalidation, or publication.
+ */
+async function runGuardedMigration(
+  input: JsonV2MigrationInput,
+  holdForProcessExit: () => void
+): Promise<JsonV2MigrationOutcome> {
   const witnessPath =
     input.witnessPath ?? defaultWitnessPath(input.databasePath)
   assertDistinctMigrationPaths(
@@ -75,7 +120,16 @@ export async function migrateJsonV2ToSqlite(
   )
   await assertDatabaseAbsent(input.databasePath)
 
-  const source = await readJsonV2Source(input.sourceJsonPath)
+  const source = await selectMigrationSource(
+    input.sourceJsonPath,
+    input.interruptedAt
+  )
+  if (!source) {
+    // Nothing to migrate. There is no truthful legacy source, and the only
+    // bootstrap kind is legacy-state.bootstrapped, so no database or witness is
+    // created and the filesystem is left untouched.
+    return { outcome: 'no-legacy-source' }
+  }
   input.fault?.('after-source-read')
 
   const temporaryDatabasePath = await createPrivateTemporaryPath(
@@ -141,14 +195,27 @@ export async function migrateJsonV2ToSqlite(
     assertWitnessMatchesHead(temporaryWitness, verifiedHead)
     await withLedgerWriterLock(input.databasePath, async () => {
       await assertDatabaseAbsent(input.databasePath)
-      const sourceBeforePublish = await readJsonV2Source(
-        input.sourceJsonPath
+      // Repeat the complete bounded selection with the same strict reader and
+      // the same injected instant. A changed primary, a different retained
+      // generation, a different error classification, or changed bytes all mean
+      // the snapshot would be published from stale legacy state.
+      const sourceBeforePublish = await selectMigrationSource(
+        input.sourceJsonPath,
+        input.interruptedAt
       )
       if (
+        !sourceBeforePublish ||
+        sourceBeforePublish.source !== source.source ||
+        sourceBeforePublish.retainedIndex !== source.retainedIndex ||
+        sourceBeforePublish.path !== source.path ||
         sourceBeforePublish.sourceByteLength !== source.sourceByteLength ||
         sourceBeforePublish.sourceSha256 !== source.sourceSha256 ||
         sourceBeforePublish.normalizedStateSha256 !==
-          source.normalizedStateSha256
+          source.normalizedStateSha256 ||
+        !sameEncounteredOutcomes(
+          sourceBeforePublish.encountered,
+          source.encountered
+        )
       ) {
         throw new JsonV2MigrationError(
           'Legacy JSON state changed during migration; publication was refused'
@@ -164,6 +231,10 @@ export async function migrateJsonV2ToSqlite(
 
       await link(temporaryDatabasePath, input.databasePath)
       databasePublished = true
+      // A database now exists, so database presence already selects SQLite while
+      // this process still owns a JSON StateStore. Hold before any later step can
+      // fail, so no failure path can reopen the source gate.
+      holdForProcessExit()
       await syncDirectory(path.dirname(input.databasePath))
       await assertPrivateRegularFile(
         input.databasePath,
@@ -249,7 +320,12 @@ export async function migrateJsonV2ToSqlite(
         sourceSha256: source.sourceSha256,
         normalizedStateSha256: source.normalizedStateSha256,
         sourceByteLength: source.sourceByteLength,
-        head: selectedHead
+        head: selectedHead,
+        sourceGeneration: source.source,
+        ...(source.retainedIndex === undefined
+          ? {}
+          : { retainedIndex: source.retainedIndex }),
+        unreadableGenerationCount: source.encountered.length
       }
     } catch (error) {
       verificationFailures.push(error)
@@ -281,7 +357,32 @@ export async function migrateJsonV2ToSqlite(
       'SQLite JSON v2 migration completed without a result'
     )
   }
-  return result
+  return { outcome: 'migrated', ...result }
+}
+
+function sameEncounteredOutcomes(
+  left: readonly LegacyCandidateOutcome[],
+  right: readonly LegacyCandidateOutcome[]
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (outcome, index) =>
+        outcome.path === right[index]?.path &&
+        outcome.failure === right[index]?.failure
+    )
+  )
+}
+
+function assertBoundedTimestamp(value: string): void {
+  try {
+    assertRecoveryTimestamp(value, 'interruptedAt')
+  } catch (error) {
+    throw new JsonV2MigrationError(
+      'A bounded ISO-8601 interruptedAt timestamp is required',
+      { cause: error }
+    )
+  }
 }
 
 async function readJsonV2Source(
@@ -302,35 +403,122 @@ async function readJsonV2Source(
       { cause: error }
     )
   }
+  // A document that is not a state object at all, or whose version field is not
+  // a usable version number, is damaged rather than versioned. Those may fall
+  // through to an older generation. Only a well-formed version that this reader
+  // cannot accept is version evidence, which fails closed.
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new EventStoreCorruptionError(
+      'Legacy JSON state is not a state object'
+    )
+  }
+  const declaredVersion = (value as { version?: unknown }).version
   if (
-    !value ||
-    typeof value !== 'object' ||
-    Array.isArray(value) ||
-    (value as { version?: unknown }).version !==
-      CURRENT_PERSISTED_STATE_VERSION
+    typeof declaredVersion !== 'number' ||
+    !Number.isSafeInteger(declaredVersion) ||
+    declaredVersion < 1
   ) {
+    throw new EventStoreCorruptionError(
+      'Legacy JSON state does not declare a usable persisted-state version'
+    )
+  }
+  if (declaredVersion !== CURRENT_PERSISTED_STATE_VERSION) {
     throw new EventStoreVersionError(
       'projection',
       `Copy-on-migrate requires exact JSON state version ${CURRENT_PERSISTED_STATE_VERSION}`
     )
   }
 
-  let normalizedState: PersistedStateData
+  let state: PersistedStateData
   try {
-    normalizedState = parsePersistedState(value)
+    state = parsePersistedState(value)
   } catch (error) {
+    // Version and migration-contract evidence must survive as itself so the
+    // shared policy can fail closed instead of inspecting an older generation.
+    const shared = classifySharedStateFailure(error)
+    if (shared === 'version') {
+      throw new EventStoreVersionError(
+        'projection',
+        `Copy-on-migrate requires exact JSON state version ${CURRENT_PERSISTED_STATE_VERSION}`,
+        { cause: error }
+      )
+    }
+    if (shared === 'contract') throw error
     throw new EventStoreCorruptionError(
       'Legacy JSON v2 failed persisted-state validation',
       { cause: error }
     )
   }
-  const normalized = encodeProjection(normalizedState)
   return {
     rawBytes,
     sourceSha256: sha256(rawBytes),
     sourceByteLength: rawBytes.byteLength,
+    state
+  }
+}
+
+/**
+ * Classify the strict migration reader's failures for the shared policy.
+ *
+ * A missing generation may fall through. Structural damage may fall through.
+ * Any non-v2 version — older, newer, or malformed — fails closed: the bootstrap
+ * event records `sourceStateVersion` as exactly 2 while `sourceSha256` hashes
+ * the selected file, so migrating a v1 document would make those two fields
+ * describe different things.
+ */
+function classifyMigrationSourceFailure(
+  error: unknown
+): LegacyCandidateFailure {
+  const shared = classifySharedStateFailure(error)
+  if (shared) return shared
+  if (error instanceof EventStoreVersionError) return 'version'
+  if (error instanceof EventStoreCorruptionError) return 'corrupt'
+  if (isMissingFileError(error)) return 'missing'
+  return 'operational'
+}
+
+/**
+ * Select the newest valid generation and apply deterministic recovery, using
+ * only the strict read-only reader. Never mutates, quarantines, or rewrites.
+ */
+async function selectMigrationSource(
+  primaryPath: string,
+  interruptedAt: string
+): Promise<SelectedLegacySource | undefined> {
+  let selection: LegacyGenerationSelection<ReadJsonV2Source>
+  try {
+    selection = await selectLegacyStateGeneration<ReadJsonV2Source>(
+      primaryPath,
+      {
+        read: readJsonV2Source,
+        classify: classifyMigrationSourceFailure,
+        interruptedAt
+      }
+    )
+  } catch (error) {
+    if (error instanceof LegacyStateUnrecoverableError) {
+      // At least one generation exists and none validated. This must never look
+      // like a fresh install, so it fails visibly and publishes nothing.
+      throw new EventStoreCorruptionError(
+        'No valid legacy JSON generation remains; SQLite migration was refused',
+        { cause: error }
+      )
+    }
+    throw error
+  }
+  if (selection.source === 'none') return undefined
+  const normalized = encodeProjection(selection.state)
+  return {
+    source: selection.source,
+    ...(selection.source === 'retained'
+      ? { retainedIndex: selection.retainedIndex }
+      : {}),
+    path: selection.path,
+    sourceSha256: selection.candidate.sourceSha256,
+    sourceByteLength: selection.candidate.sourceByteLength,
     normalizedState: normalized.state,
-    normalizedStateSha256: normalized.stateSha256
+    normalizedStateSha256: normalized.stateSha256,
+    encountered: selection.encountered
   }
 }
 

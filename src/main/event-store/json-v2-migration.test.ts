@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { writeFileSync } from 'node:fs'
 import {
   link,
   lstat,
@@ -11,14 +13,22 @@ import {
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import {
+  createExclusiveLegacySourceMigrationGate
+} from '../legacy-state-recovery'
+import { PersistedStateVersionError } from '../state-migrations'
 import type { PersistedStateData } from '../state-schema'
 import {
+  EventStoreCorruptionError,
   EventStoreConflictError,
+  EventStoreVersionError,
   EventStorePersistenceUncertainError,
   JsonV2MigrationError,
   migrateJsonV2ToSqlite,
   SqliteEventStore
 } from './index'
+
+const INTERRUPTED_AT = '2026-08-12T00:00:00.000Z'
 
 const temporaryDirectories: string[] = []
 
@@ -38,6 +48,27 @@ async function temporaryDirectory(): Promise<string> {
   )
   temporaryDirectories.push(directory)
   return directory
+}
+
+/**
+ * Required migration authority plus the injected recovery instant. Both are
+ * mandatory inputs, so every call site supplies them explicitly.
+ */
+function migrationAuthority() {
+  return {
+    gate: createExclusiveLegacySourceMigrationGate(),
+    interruptedAt: INTERRUPTED_AT
+  }
+}
+
+/** Narrow a migration outcome to its successful shape. */
+function migrated(
+  outcome: Awaited<ReturnType<typeof migrateJsonV2ToSqlite>>
+) {
+  if (outcome.outcome !== 'migrated') {
+    throw new Error(`Expected a migrated outcome, received ${outcome.outcome}`)
+  }
+  return outcome
 }
 
 function legacyState(): PersistedStateData {
@@ -67,6 +98,44 @@ function legacyState(): PersistedStateData {
   }
 }
 
+function legacyStateWithRunningTask(): PersistedStateData {
+  const timestamp = '2026-07-30T20:00:00.000Z'
+  const state = legacyState()
+  state.tasks = [
+    {
+      id: 'task_active',
+      title: 'Active task',
+      providerId: 'provider_local',
+      mode: 'agent',
+      runStatus: 'running',
+      items: [
+        {
+          id: 'activity_running',
+          kind: 'activity',
+          runId: 'run_1',
+          activityType: 'tool',
+          title: 'Reading files',
+          status: 'running',
+          createdAt: timestamp
+        }
+      ],
+      createdAt: timestamp,
+      updatedAt: timestamp
+    }
+  ]
+  return state
+}
+
+async function writeGeneration(
+  filePath: string,
+  state: PersistedStateData | string
+): Promise<string> {
+  const payload =
+    typeof state === 'string' ? state : `${JSON.stringify(state, null, 2)}\n`
+  await writeFile(filePath, payload, { encoding: 'utf8', mode: 0o600 })
+  return payload
+}
+
 describe('JSON v2 copy-on-migrate', () => {
   it('publishes a verified SQLite database while preserving exact source bytes', async () => {
     const directory = await temporaryDirectory()
@@ -75,11 +144,15 @@ describe('JSON v2 copy-on-migrate', () => {
     const source = `${JSON.stringify(legacyState(), null, 2)}\n`
     await writeFile(sourcePath, source, { encoding: 'utf8', mode: 0o600 })
 
-    const result = await migrateJsonV2ToSqlite({
+    const result = migrated(await migrateJsonV2ToSqlite({
+      ...migrationAuthority(),
       sourceJsonPath: sourcePath,
       databasePath
-    })
+    }))
     expect(result.head.sequence).toBe(1)
+    expect(result.sourceGeneration).toBe('primary')
+    expect(result.retainedIndex).toBeUndefined()
+    expect(result.unreadableGenerationCount).toBe(0)
     expect(await readFile(sourcePath, 'utf8')).toBe(source)
 
     const store = await SqliteEventStore.open({
@@ -116,6 +189,7 @@ describe('JSON v2 copy-on-migrate', () => {
 
     await expect(
       migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
         sourceJsonPath: sourcePath,
         databasePath
       })
@@ -142,6 +216,7 @@ describe('JSON v2 copy-on-migrate', () => {
 
     await expect(
       migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
         sourceJsonPath: sourcePath,
         databasePath
       })
@@ -163,6 +238,7 @@ describe('JSON v2 copy-on-migrate', () => {
 
     await expect(
       migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
         sourceJsonPath: sourcePath,
         databasePath
       })
@@ -190,6 +266,7 @@ describe('JSON v2 copy-on-migrate', () => {
 
       await expect(
         migrateJsonV2ToSqlite({
+          ...migrationAuthority(),
           sourceJsonPath: sourcePath,
           databasePath
         })
@@ -211,6 +288,7 @@ describe('JSON v2 copy-on-migrate', () => {
 
     await expect(
       migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
         sourceJsonPath: sourcePath,
         databasePath,
         fault: (point) => {
@@ -227,6 +305,7 @@ describe('JSON v2 copy-on-migrate', () => {
 
     await expect(
       migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
         sourceJsonPath: sourcePath,
         databasePath
       })
@@ -245,6 +324,7 @@ describe('JSON v2 copy-on-migrate', () => {
 
     await expect(
       migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
         sourceJsonPath: sourcePath,
         databasePath,
         fault: (point) => {
@@ -266,6 +346,7 @@ describe('JSON v2 copy-on-migrate', () => {
 
     await expect(
       migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
         sourceJsonPath: sourcePath,
         databasePath,
         fault: (point) => {
@@ -282,6 +363,7 @@ describe('JSON v2 copy-on-migrate', () => {
     await selected.close()
     await expect(
       migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
         sourceJsonPath: sourcePath,
         databasePath
       })
@@ -299,6 +381,7 @@ describe('JSON v2 copy-on-migrate', () => {
 
     await expect(
       migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
         sourceJsonPath: sourcePath,
         databasePath,
         fault: (point) => {
@@ -336,6 +419,7 @@ describe('JSON v2 copy-on-migrate', () => {
       )
       await expect(
         migrateJsonV2ToSqlite({
+          ...migrationAuthority(),
           sourceJsonPath: sourcePath,
           databasePath
         })
@@ -360,9 +444,493 @@ describe('JSON v2 copy-on-migrate', () => {
 
     await expect(
       migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
         sourceJsonPath: linkedSource,
         databasePath
       })
     ).rejects.toThrow(/symbolic or non-regular/)
+  })
+})
+
+describe('JSON v2 copy-on-migrate generation recovery', () => {
+  it('migrates the newest valid retained generation and hashes that exact file', async () => {
+    const directory = await temporaryDirectory()
+    const sourcePath = path.join(directory, 'state.json')
+    const databasePath = path.join(directory, 'ground.sqlite')
+    const corruptPrimary = '{ not json'
+    await writeGeneration(sourcePath, corruptPrimary)
+    const backupPayload = await writeGeneration(
+      `${sourcePath}.bak`,
+      legacyState()
+    )
+
+    const result = migrated(
+      await migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
+        sourceJsonPath: sourcePath,
+        databasePath
+      })
+    )
+
+    expect(result.sourceGeneration).toBe('retained')
+    expect(result.retainedIndex).toBe(0)
+    expect(result.unreadableGenerationCount).toBe(1)
+    // The digest must describe the backup that supplied the state, never the
+    // corrupt primary that did not.
+    expect(result.sourceByteLength).toBe(Buffer.byteLength(backupPayload))
+    expect(result.sourceSha256).toBe(
+      createHash('sha256').update(backupPayload).digest('hex')
+    )
+    expect(result.sourceSha256).not.toBe(
+      createHash('sha256').update(corruptPrimary).digest('hex')
+    )
+
+    const store = await SqliteEventStore.open({
+      databasePath,
+      integrityCheck: 'full'
+    })
+    expect(store.getMigrationProvenance()).toMatchObject({
+      sourceStateVersion: 2,
+      sourceSha256: result.sourceSha256,
+      sourceByteLength: Buffer.byteLength(backupPayload)
+    })
+    await store.close()
+
+    // Neither legacy generation may be modified, rotated, or quarantined.
+    expect(await readFile(sourcePath, 'utf8')).toBe(corruptPrimary)
+    expect(await readFile(`${sourcePath}.bak`, 'utf8')).toBe(backupPayload)
+  })
+
+  it('skips a corrupt newest backup and selects an older valid generation', async () => {
+    const directory = await temporaryDirectory()
+    const sourcePath = path.join(directory, 'state.json')
+    const databasePath = path.join(directory, 'ground.sqlite')
+    await writeGeneration(sourcePath, '{ not json')
+    await writeGeneration(`${sourcePath}.bak`, 'also not json')
+    const olderPayload = await writeGeneration(
+      `${sourcePath}.bak.2`,
+      legacyState()
+    )
+
+    const result = migrated(
+      await migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
+        sourceJsonPath: sourcePath,
+        databasePath
+      })
+    )
+
+    expect(result.sourceGeneration).toBe('retained')
+    expect(result.retainedIndex).toBe(1)
+    expect(result.unreadableGenerationCount).toBe(2)
+    expect(result.sourceSha256).toBe(
+      createHash('sha256').update(olderPayload).digest('hex')
+    )
+  })
+
+  it('applies interrupted-run recovery before constructing the bootstrap projection', async () => {
+    const directory = await temporaryDirectory()
+    const sourcePath = path.join(directory, 'state.json')
+    const databasePath = path.join(directory, 'ground.sqlite')
+    await writeGeneration(sourcePath, legacyStateWithRunningTask())
+
+    await migrateJsonV2ToSqlite({
+      ...migrationAuthority(),
+      sourceJsonPath: sourcePath,
+      databasePath
+    })
+
+    const store = await SqliteEventStore.open({
+      databasePath,
+      integrityCheck: 'full'
+    })
+    const task = store.getProjection().tasks[0]!
+    expect(task.runStatus).toBe('failed')
+    expect(task.updatedAt).toBe(INTERRUPTED_AT)
+    expect(
+      task.items.some(
+        (item) => item.kind === 'activity' && item.status === 'running'
+      )
+    ).toBe(false)
+    expect(
+      task.items.some(
+        (item) => item.kind === 'activity' && item.title === 'Run interrupted'
+      )
+    ).toBe(true)
+    await store.close()
+  })
+
+  it('creates no database, witness, or bootstrap when no generation exists', async () => {
+    const directory = await temporaryDirectory()
+    const sourcePath = path.join(directory, 'state.json')
+    const databasePath = path.join(directory, 'ground.sqlite')
+
+    const outcome = await migrateJsonV2ToSqlite({
+      ...migrationAuthority(),
+      sourceJsonPath: sourcePath,
+      databasePath
+    })
+
+    expect(outcome.outcome).toBe('no-legacy-source')
+    await expect(lstat(databasePath)).rejects.toMatchObject({
+      code: 'ENOENT'
+    })
+    await expect(
+      lstat(`${databasePath}.head.json`)
+    ).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readdir(directory)).toEqual([])
+  })
+
+  it('refuses to publish when every existing generation is unreadable', async () => {
+    const directory = await temporaryDirectory()
+    const sourcePath = path.join(directory, 'state.json')
+    const databasePath = path.join(directory, 'ground.sqlite')
+    await writeGeneration(sourcePath, '{ not json')
+    await writeGeneration(`${sourcePath}.bak`, 'also not json')
+
+    // Corrupt-all must fail visibly. If it returned no-legacy-source, a later
+    // startup could read it as permission to initialize empty SQLite state.
+    await expect(
+      migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
+        sourceJsonPath: sourcePath,
+        databasePath
+      })
+    ).rejects.toBeInstanceOf(EventStoreCorruptionError)
+
+    await expect(lstat(databasePath)).rejects.toMatchObject({
+      code: 'ENOENT'
+    })
+    expect(await readFile(sourcePath, 'utf8')).toBe('{ not json')
+  })
+
+  it('rejects a non-v2 primary without falling through to a v2 backup', async () => {
+    const directory = await temporaryDirectory()
+    const sourcePath = path.join(directory, 'state.json')
+    const databasePath = path.join(directory, 'ground.sqlite')
+    await writeGeneration(sourcePath, {
+      ...legacyState(),
+      version: 9
+    } as unknown as PersistedStateData)
+    const backupPayload = await writeGeneration(
+      `${sourcePath}.bak`,
+      legacyState()
+    )
+
+    await expect(
+      migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
+        sourceJsonPath: sourcePath,
+        databasePath
+      })
+    ).rejects.toBeInstanceOf(EventStoreVersionError)
+
+    await expect(lstat(databasePath)).rejects.toMatchObject({
+      code: 'ENOENT'
+    })
+  })
+
+  it('falls back from a malformed-version primary to a valid v2 backup', async () => {
+    const directory = await temporaryDirectory()
+    const sourcePath = path.join(directory, 'state.json')
+    const databasePath = path.join(directory, 'ground.sqlite')
+    // A version field that is not a usable version number is damage, not a
+    // version this reader declines. It must not block recovery.
+    await writeGeneration(sourcePath, {
+      ...legacyState(),
+      version: 'two'
+    } as unknown as PersistedStateData)
+    const backupPayload = await writeGeneration(
+      `${sourcePath}.bak`,
+      legacyState()
+    )
+
+    const result = migrated(
+      await migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
+        sourceJsonPath: sourcePath,
+        databasePath
+      })
+    )
+
+    expect(result.sourceGeneration).toBe('retained')
+    expect(result.retainedIndex).toBe(0)
+    expect(result.sourceSha256).toBe(
+      createHash('sha256').update(backupPayload).digest('hex')
+    )
+  })
+
+  it.each([
+    { label: 'a missing version', document: {} },
+    { label: 'a fractional version', document: { version: 2.5 } },
+    { label: 'a zero version', document: { version: 0 } },
+    { label: 'a negative version', document: { version: -2 } },
+    { label: 'a non-finite version', document: { version: 'NaN' } },
+    { label: 'a JSON array', document: [] },
+    { label: 'a JSON scalar', document: 42 }
+  ])(
+    'treats $label as corruption that may fall through',
+    async ({ document }) => {
+      const directory = await temporaryDirectory()
+      const sourcePath = path.join(directory, 'state.json')
+      const databasePath = path.join(directory, 'ground.sqlite')
+      await writeGeneration(
+        sourcePath,
+        document as unknown as PersistedStateData
+      )
+      await writeGeneration(`${sourcePath}.bak`, legacyState())
+
+      const result = migrated(
+        await migrateJsonV2ToSqlite({
+          ...migrationAuthority(),
+          sourceJsonPath: sourcePath,
+          databasePath
+        })
+      )
+      expect(result.sourceGeneration).toBe('retained')
+    }
+  )
+
+  it('rejects a version-1 primary that StateStore would migrate', async () => {
+    const directory = await temporaryDirectory()
+    const sourcePath = path.join(directory, 'state.json')
+    const databasePath = path.join(directory, 'ground.sqlite')
+    await writeGeneration(sourcePath, {
+      ...legacyState(),
+      version: 1
+    } as unknown as PersistedStateData)
+    await writeGeneration(`${sourcePath}.bak`, legacyState())
+
+    // The bootstrap event records sourceStateVersion as exactly 2 while
+    // sourceSha256 hashes the selected file, so migrating a v1 document would
+    // make those two fields describe different things.
+    await expect(
+      migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
+        sourceJsonPath: sourcePath,
+        databasePath
+      })
+    ).rejects.toBeInstanceOf(EventStoreVersionError)
+    // v1 is a version decision, so no backup fallback follows it either.
+    await expect(lstat(databasePath)).rejects.toMatchObject({
+      code: 'ENOENT'
+    })
+  })
+
+  it('leaves legacy file metadata untouched on success', async () => {
+    const directory = await temporaryDirectory()
+    const sourcePath = path.join(directory, 'state.json')
+    const databasePath = path.join(directory, 'ground.sqlite')
+    const payload = await writeGeneration(sourcePath, legacyState())
+    const before = await lstat(sourcePath)
+
+    await migrateJsonV2ToSqlite({
+      ...migrationAuthority(),
+      sourceJsonPath: sourcePath,
+      databasePath
+    })
+
+    const after = await lstat(sourcePath)
+    expect(await readFile(sourcePath, 'utf8')).toBe(payload)
+    expect(after.mode).toBe(before.mode)
+    expect(after.size).toBe(before.size)
+    expect(after.ino).toBe(before.ino)
+    expect(after.mtimeMs).toBe(before.mtimeMs)
+    expect(after.nlink).toBe(1)
+  })
+
+  it('detects a selection change between construction and publication', async () => {
+    const directory = await temporaryDirectory()
+    const sourcePath = path.join(directory, 'state.json')
+    const databasePath = path.join(directory, 'ground.sqlite')
+    await writeGeneration(sourcePath, '{ not json')
+    await writeGeneration(`${sourcePath}.bak`, legacyState())
+
+    await expect(
+      migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
+        sourceJsonPath: sourcePath,
+        databasePath,
+        fault: (point) => {
+          if (point !== 'after-temporary-verified') return
+          // The primary becomes valid, so the migration would otherwise publish
+          // a snapshot selected from the now-stale backup.
+          writeFileSync(
+            sourcePath,
+            `${JSON.stringify(legacyState(), null, 2)}\n`,
+            { encoding: 'utf8', mode: 0o600 }
+          )
+        }
+      })
+    ).rejects.toThrow(/changed during migration/)
+
+    await expect(lstat(databasePath)).rejects.toMatchObject({
+      code: 'ENOENT'
+    })
+  })
+
+  it('detects selected backup contents changing before publication', async () => {
+    const directory = await temporaryDirectory()
+    const sourcePath = path.join(directory, 'state.json')
+    const databasePath = path.join(directory, 'ground.sqlite')
+    await writeGeneration(sourcePath, '{ not json')
+    await writeGeneration(`${sourcePath}.bak`, legacyState())
+
+    await expect(
+      migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
+        sourceJsonPath: sourcePath,
+        databasePath,
+        fault: (point) => {
+          if (point !== 'after-temporary-verified') return
+          const mutated = legacyState()
+          mutated.settings.sidebarCollapsed = false
+          writeFileSync(
+            `${sourcePath}.bak`,
+            `${JSON.stringify(mutated, null, 2)}\n`,
+            { encoding: 'utf8', mode: 0o600 }
+          )
+        }
+      })
+    ).rejects.toThrow(/changed during migration/)
+  })
+
+  it('detects a source change made before the exclusive scope opens', async () => {
+    const directory = await temporaryDirectory()
+    const sourcePath = path.join(directory, 'state.json')
+    const databasePath = path.join(directory, 'ground.sqlite')
+    await writeGeneration(sourcePath, legacyState())
+
+    const gate = createExclusiveLegacySourceMigrationGate()
+    const mutated = legacyState()
+    mutated.settings.sidebarCollapsed = false
+    const mutatedPayload = `${JSON.stringify(mutated, null, 2)}\n`
+    await writeFile(sourcePath, mutatedPayload, {
+      encoding: 'utf8',
+      mode: 0o600
+    })
+
+    const result = migrated(
+      await migrateJsonV2ToSqlite({
+        gate,
+        interruptedAt: INTERRUPTED_AT,
+        sourceJsonPath: sourcePath,
+        databasePath
+      })
+    )
+
+    // Selection runs inside the scope, so the pre-exclusive write is simply the
+    // state that gets migrated - consistently, and with its own digest.
+    expect(result.sourceSha256).toBe(
+      createHash('sha256').update(mutatedPayload).digest('hex')
+    )
+  })
+
+  it('requires a migration gate and a bounded recovery timestamp', async () => {
+    const directory = await temporaryDirectory()
+    const sourcePath = path.join(directory, 'state.json')
+    const databasePath = path.join(directory, 'ground.sqlite')
+    await writeGeneration(sourcePath, legacyState())
+
+    await expect(
+      migrateJsonV2ToSqlite({
+        gate: undefined as never,
+        interruptedAt: INTERRUPTED_AT,
+        sourceJsonPath: sourcePath,
+        databasePath
+      })
+    ).rejects.toThrow(/migration gate is required/)
+    await expect(
+      migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
+        interruptedAt: 'nope',
+        sourceJsonPath: sourcePath,
+        databasePath
+      })
+    ).rejects.toThrow(/bounded ISO-8601/)
+    // Date.parse accepts this timezone-less value. The outer gate must still
+    // reject it as the recovery schema does, rather than admitting it and
+    // wrapping a later TypeError as a generic pre-selection failure.
+    await expect(
+      migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
+        interruptedAt: '2026-08-13T00:00:00.000',
+        sourceJsonPath: sourcePath,
+        databasePath
+      })
+    ).rejects.toMatchObject({
+      name: 'JsonV2MigrationError',
+      message: expect.stringMatching(/bounded ISO-8601/)
+    })
+    await expect(
+      migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
+        interruptedAt: 'August 13, 2026 00:00:00 GMT',
+        sourceJsonPath: sourcePath,
+        databasePath
+      })
+    ).rejects.toThrow(/bounded ISO-8601/)
+  })
+
+  it('holds the gate after publication and reopens it after a pre-publication failure', async () => {
+    const directory = await temporaryDirectory()
+    const sourcePath = path.join(directory, 'state.json')
+    const databasePath = path.join(directory, 'ground.sqlite')
+    await writeGeneration(sourcePath, legacyState())
+
+    const failingGate = createExclusiveLegacySourceMigrationGate()
+    await expect(
+      migrateJsonV2ToSqlite({
+        gate: failingGate,
+        interruptedAt: INTERRUPTED_AT,
+        sourceJsonPath: sourcePath,
+        databasePath,
+        fault: (point) => {
+          if (point === 'after-temporary-verified') {
+            throw new Error('injected pre-publication fault')
+          }
+        }
+      })
+    ).rejects.toBeInstanceOf(JsonV2MigrationError)
+    expect(failingGate.isHeldForProcessExit()).toBe(false)
+
+    const gate = createExclusiveLegacySourceMigrationGate()
+    await migrateJsonV2ToSqlite({
+      gate,
+      interruptedAt: INTERRUPTED_AT,
+      sourceJsonPath: sourcePath,
+      databasePath
+    })
+    expect(gate.isHeldForProcessExit()).toBe(true)
+  })
+
+  it('replays a deterministic projection after reopening the published database', async () => {
+    const directory = await temporaryDirectory()
+    const sourcePath = path.join(directory, 'state.json')
+    const databasePath = path.join(directory, 'ground.sqlite')
+    await writeGeneration(sourcePath, legacyStateWithRunningTask())
+
+    const result = migrated(
+      await migrateJsonV2ToSqlite({
+        ...migrationAuthority(),
+        sourceJsonPath: sourcePath,
+        databasePath
+      })
+    )
+
+    const first = await SqliteEventStore.open({
+      databasePath,
+      integrityCheck: 'full'
+    })
+    const firstProjection = structuredClone(first.getProjection())
+    await first.close()
+
+    const second = await SqliteEventStore.open({
+      databasePath,
+      integrityCheck: 'full'
+    })
+    expect(second.getProjection()).toEqual(firstProjection)
+    expect(second.getHead().eventHash).toBe(result.head.eventHash)
+    await second.close()
   })
 })
