@@ -78,12 +78,16 @@ import type { LedgerHead } from './types'
  * ## Not selected in production
  *
  * Nothing here is constructed by `index.ts`. The desktop remains on the JSON
- * `StateStore`, because activating SQLite today would regress three recovery
- * behaviors this layer does not address: copy-on-migrate does not perform the
- * interrupted-run transition `StateStore.load` performs, it reads only the
- * primary JSON document rather than falling through retained backups, and local
- * snapshot export/restore is defined over rotated JSON generations that have no
- * ledger equivalent yet. Those are recovery-contract work, not composition work.
+ * `StateStore`, because one recovery behavior this layer does not address still
+ * has no ledger equivalent: local snapshot review, export, and restore are
+ * defined over rotated JSON generations. That is recovery-contract work, not
+ * composition work.
+ *
+ * Two further blockers were recorded here until copy-on-migrate and
+ * `StateStore.load` were given one shared generation-selection policy — see
+ * `legacy-state-recovery.ts`. The migration now performs the same
+ * interrupted-run transition and searches the same bounded generations rather
+ * than reading only the primary document.
  */
 
 /**

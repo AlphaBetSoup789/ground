@@ -489,9 +489,26 @@ regular file, refuse symlinks where the platform supports no-follow opens, strea
 within the ceiling, and reject malformed UTF-8. Writes use unpredictable exclusive
 `0600` temporary files, fsync their contents, rotate only schema-valid prior
 generations through three retained slots, atomically rename the new primary, and
-sync the directory where supported. Startup falls back through the retained
-generations, quarantines unreadable files, and reports backup restore or clean-state
-fallback through an ephemeral renderer banner.
+sync the directory where supported.
+
+Startup fall-through is class-dependent, not universal. A shared policy in
+`legacy-state-recovery.ts` searches the primary document and three retained
+generations in order and classifies each failure. Only a missing or structurally
+corrupt generation may fall through, because neither carries information about the
+generations behind it; corrupt files are quarantined. A `PersistedStateVersionError`
+— a document from a future build — and a `StateMigrationContractError` — an invalid
+current version, a missing registered step, or a step producing the wrong next
+version — both stop the search immediately with no fall-through, because reading an
+older backup after either would silently downgrade intact data or mask a defect in
+Ground’s own migration plan. Operational I/O and permission failures propagate
+unchanged and are never treated as data loss. Backup restore and clean-state
+fallback are reported through an ephemeral renderer banner.
+
+Absence and unrecoverable state are distinct. Every generation genuinely missing is
+a fresh install. If at least one generation exists but none validates, the shared
+selector raises `LegacyStateUnrecoverableError`. `StateStore` handles that evidence
+through its visible clean-state reset and quarantine path; copy-on-migrate fails
+closed and publishes nothing.
 
 Retained restore uses a main-derived review descriptor with generation, capture
 time, counts, size, and content digest. Requests are single-flight before the native
@@ -754,15 +771,20 @@ publication verifies the head as part of committing.
 
 The store is still not constructed by the production desktop. Tasks, runs,
 approvals, and provider revisions continue to be served from the JSON
-`StateStore`, because activating SQLite today would regress three recovery
-behaviors the composition layer does not address. Copy-on-migrate does not
-perform the interrupted-run transition `StateStore.load` performs, so a started
-managed execution would reach the ledger without becoming outcome-unknown. It
-reads only the primary JSON document, where `StateStore` falls through three
-retained generations and quarantines unreadable files. Local snapshot review,
-export, and restore are defined over rotated JSON generations and have no ledger
-equivalent yet. Those are recovery-contract work rather than composition work,
-so the cutover remains a later slice.
+`StateStore`, because one recovery behavior the composition layer does not
+address still has no ledger equivalent: local snapshot review, export, and
+restore are defined over rotated JSON generations. That is recovery-contract work
+rather than composition work, so the cutover remains a later slice.
+
+Two further blockers were recorded here until the copy-on-migrate slice landed.
+Copy-on-migrate and `StateStore.load` now share one generation-selection policy,
+so the migration performs the same deterministic interrupted-run transition — a
+started managed execution becomes outcome-unknown before it reaches the ledger —
+and searches the same bounded primary and three retained generations rather than
+reading only the primary document. The two consumers keep separate readers by
+design: `StateStore` repairs legacy permissions and quarantines unreadable files,
+while the migration mutates nothing it touches, so sharing one reader would force
+the stricter consumer down to the weaker contract.
 
 Native package workflows target macOS arm64/x64, Windows x64, and Linux x64. A
 fixed packaged smoke verifies app identity, OS-encrypted vault round-trip, the
