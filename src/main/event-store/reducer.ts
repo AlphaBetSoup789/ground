@@ -1,8 +1,14 @@
+import { isDeepStrictEqual } from 'node:util'
 import {
   parsePersistedState,
   type PersistedStateData
 } from '../state-schema'
 import type { ActivityItem, Task, TaskItem } from '../../shared/types'
+import {
+  LEGACY_MANAGED_EXECUTION_OUTCOME_UNKNOWN,
+  managedExecutionKind,
+  managedStartedAt
+} from '../legacy-state-recovery'
 import { encodeProjection } from './codec'
 import { EventStoreCorruptionError } from './errors'
 import type {
@@ -273,8 +279,19 @@ function applyEvent(draft: StateDraft, event: GroundLedgerEvent): void {
       })
 
     case 'task.runtime-session-set':
-      requireProvider(draft, event.providerId)
       return mutateTask(draft, event.taskId, event.updatedAt, (task) => {
+        // `provider.deleted` does not cascade into these maps, so a session
+        // left behind by a deleted provider is reachable and schema-valid.
+        // Recovery has to be able to clear or rewrite one. Neither operation
+        // can fabricate a reference: the key is already there. Only
+        // *introducing* a key needs a live provider.
+        requireProviderOrSafeSessionRecovery(
+          draft,
+          event.providerId,
+          task.runtimeSessions,
+          event.session,
+          'runtime'
+        )
         const sessions = { ...(task.runtimeSessions ?? {}) }
         if (event.session === null) delete sessions[event.providerId]
         else {
@@ -287,8 +304,15 @@ function applyEvent(draft: StateDraft, event: GroundLedgerEvent): void {
       })
 
     case 'task.model-session-set':
-      requireProvider(draft, event.providerId)
       return mutateTask(draft, event.taskId, event.updatedAt, (task) => {
+        // Same rule as the runtime sessions above.
+        requireProviderOrSafeSessionRecovery(
+          draft,
+          event.providerId,
+          task.modelSessions,
+          event.session,
+          'model'
+        )
         const sessions = { ...(task.modelSessions ?? {}) }
         if (event.session === null) delete sessions[event.providerId]
         else {
@@ -455,6 +479,57 @@ function applyEvent(draft: StateDraft, event: GroundLedgerEvent): void {
         }
       })
 
+    case 'managed-execution.legacy-interrupted':
+      return mutateTask(draft, event.taskId, event.updatedAt, (task) => {
+        const activity = requireActivity(task, event.itemId)
+        // The defining property of this event is the absence of a claim. An
+        // activity that already carries one has real evidence, and rewriting it
+        // from a recovery plan would destroy that evidence.
+        if (activity.managedExecution) {
+          throw new EventStoreCorruptionError(
+            'Legacy interruption cannot overwrite an existing managed execution claim'
+          )
+        }
+        if (activity.status !== 'running') {
+          throw new EventStoreCorruptionError(
+            'Only a running activity can be recovered as legacy-untracked'
+          )
+        }
+        if (managedExecutionKind(activity) !== event.executionKind) {
+          throw new EventStoreCorruptionError(
+            'Legacy interruption kind does not match its running activity'
+          )
+        }
+        if (
+          event.startedAt !==
+          managedStartedAt(activity.createdAt, event.interruptedAt)
+        ) {
+          throw new EventStoreCorruptionError(
+            'Legacy interruption start time is not derived from its activity'
+          )
+        }
+        if (event.updatedAt !== event.interruptedAt) {
+          throw new EventStoreCorruptionError(
+            'Legacy interruption must stamp one exact recovery instant'
+          )
+        }
+        activity.activityType =
+          event.executionKind === 'command' ? 'command' : 'tool'
+        activity.managedExecution = {
+          version: 1,
+          operationId: activity.id,
+          claim: 'legacy-untracked',
+          kind: event.executionKind,
+          phase: 'uncertain',
+          startedAt: event.startedAt,
+          interruptedAt: event.interruptedAt
+        }
+        activity.status = 'error'
+        activity.result = LEGACY_MANAGED_EXECUTION_OUTCOME_UNKNOWN
+        delete activity.durationMs
+        delete activity.approvalId
+      })
+
     default: {
       const neverEvent: never = event
       throw new EventStoreCorruptionError(
@@ -588,6 +663,50 @@ function requireTask(draft: StateDraft, taskId: string): Task {
     throw new EventStoreCorruptionError(`Ledger referenced unknown task ${taskId}`)
   }
   return task
+}
+
+/**
+ * A session map may only gain or arbitrarily rewrite a provider key that
+ * resolves to a live provider. Interrupted-run recovery gets two narrow
+ * exceptions for an entry orphaned by an earlier `provider.deleted`: remove the
+ * entry, or remove exactly the model checkpoint while preserving every other
+ * field. Neither exception can introduce new provider authority.
+ */
+function requireProviderOrSafeSessionRecovery(
+  draft: StateDraft,
+  providerId: string,
+  sessions: Readonly<Record<string, unknown>> | undefined,
+  nextSession: Readonly<Record<string, unknown>> | null,
+  kind: 'runtime' | 'model'
+): void {
+  if (draft.providers.some((provider) => provider.id === providerId)) return
+
+  const hasCurrent = sessions !== undefined && Object.hasOwn(sessions, providerId)
+  const current = hasCurrent ? sessions[providerId] : undefined
+  if (!hasCurrent) requireProvider(draft, providerId)
+
+  // Clearing an already-present orphaned entry only removes authority and is
+  // the exact runtime-session recovery operation.
+  if (nextSession === null) return
+
+  // Model recovery retains the normalized conversation but removes exactly its
+  // provider checkpoint. Do not turn that narrow exception into authority to
+  // rewrite arbitrary state under a provider that no longer exists.
+  if (
+    kind === 'model' &&
+    typeof current === 'object' &&
+    current !== null
+  ) {
+    const currentRecord = current as Readonly<Record<string, unknown>>
+    if (Object.hasOwn(currentRecord, 'checkpoint')) {
+      const { checkpoint: _checkpoint, ...withoutCheckpoint } = currentRecord
+      if (isDeepStrictEqual(nextSession, withoutCheckpoint)) return
+    }
+  }
+
+  throw new EventStoreCorruptionError(
+    `Ledger session referenced unknown provider ${providerId}`
+  )
 }
 
 function requireProvider(draft: StateDraft, providerId: string): void {
