@@ -98,8 +98,10 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
   SHA-256 event chain, deterministic materialized projection replay, strict schema
   and version gates, an external head witness, coordinated writers, verified
   backups, fail-closed external hard-link checks, durably cleaned publication
-  aliases, and copy-on-migrate from JSON v2. This source/test foundation is not yet
-  composed into the desktop `StateStore` or `RunManager`.
+  aliases, and copy-on-migrate from JSON v2 that shares one generation-selection
+  and deterministic interrupted-run recovery policy with `StateStore.load`. This
+  source/test foundation is not yet composed into the desktop `StateStore` or
+  `RunManager`.
 - Multi-session `node-pty` terminals with a session selector, native exact-launch
   confirmation, opaque sender-bound attachments, detach/reattach, restart, and
   termination.
@@ -140,6 +142,17 @@ formats stabilize. The package currently reports version `0.1.0`, but no support
 
 ### Changed
 
+- Local state recovery no longer collapses every read failure into one corruption
+  class. A persisted document from a future build and an invalid internal
+  migration plan are now distinct typed failures that stop the bounded generation
+  search immediately, so a future-version primary is never quarantined and
+  silently downgraded to an older retained backup. Missing and structurally
+  corrupt generations still fall through; operational I/O and permission failures
+  propagate unchanged. Every generation genuinely absent remains a fresh install,
+  while at least one present and none valid is now a distinct unrecoverable-state
+  signal. `StateStore` turns that signal into a visible clean-state reset with a
+  recovery notice and quarantines the corrupt generations; copy-on-migrate fails
+  closed and publishes nothing.
 - Raise the minimum supported Node 22 source-development runtime from 22.12 to
   22.16, the first Node 22 release that provides the SQLite backup API used by the
   event-store foundation. Supported runtimes are Node 22.16+ within 22.x or Node

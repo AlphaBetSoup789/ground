@@ -201,11 +201,14 @@ Requirements: GR-6
 Foundation status: the source/test layer now implements transactional append,
 deterministic replay, strict schema/version gates, external-head verification,
 coordinated publication, single-link protected-file validation, durable
-publication cleanup, copy-on-migrate from JSON v2, verified backups, and
-crash-prefix coverage. It is not production-composed. Completing M2.1 still
-requires semantic events for tasks, runs, activities, approvals, managed
-executions, provider revisions, and recovery checkpoints; bounded compaction; and
-desktop migration/cutover from the JSON `StateStore`.
+publication cleanup, verified backups, and crash-prefix coverage. Semantic events
+for tasks, runs, activities, approvals, managed executions, provider revisions,
+and settings have landed, together with a production mutation planner and a
+composition layer. Copy-on-migrate from JSON v2 shares one generation-selection
+policy with `StateStore.load`, so it recovers the same interrupted runs from the
+same bounded generations. It is not production-composed. Completing M2.1 still
+requires ledger-native snapshot review, export, and restore; recovery checkpoints
+and bounded compaction; and desktop migration/cutover from the JSON `StateStore`.
 
 Acceptance gate:
 
