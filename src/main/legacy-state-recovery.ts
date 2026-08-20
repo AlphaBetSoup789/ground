@@ -25,11 +25,15 @@ import {
 
 export const STATE_BACKUP_RETENTION = 3
 
-const MANAGED_EXECUTION_OUTCOME_UNKNOWN =
+// Exported because the ledger reducer must reproduce these exact strings when
+// it replays a recovery plan. Parity is byte-exact on canonical JSON, so a
+// second copy of the wording would be a silent divergence rather than a
+// compile error.
+export const MANAGED_EXECUTION_OUTCOME_UNKNOWN =
   'Outcome unknown: Ground closed after this action started. Review the workspace or external system before deciding what to do next. Ground will not retry this action automatically.'
-const LEGACY_MANAGED_EXECUTION_OUTCOME_UNKNOWN =
+export const LEGACY_MANAGED_EXECUTION_OUTCOME_UNKNOWN =
   'Outcome unknown: Ground closed while this mutating action was running before durable execution claims were available. Review the workspace or external system before deciding what to do next. Ground will not retry this action automatically.'
-const MAX_INTERRUPTED_RUN_SUMMARIES = 256
+export const MAX_INTERRUPTED_RUN_SUMMARIES = 256
 
 /**
  * How one candidate generation failed, and therefore whether the bounded search
@@ -269,11 +273,11 @@ export function assertRecoveryTimestamp(value: string, label: string): void {
   }
 }
 
-function isTaskActive(task: Task): boolean {
+export function isTaskActive(task: Task): boolean {
   return task.runStatus === 'running' || task.runStatus === 'awaiting-approval'
 }
 
-function managedExecutionKind(
+export function managedExecutionKind(
   item: Readonly<ActivityItem>
 ): ManagedExecutionKind | undefined {
   if (item.toolName === 'write_file' || item.toolName === 'edit_file') {
@@ -310,7 +314,7 @@ function encodeHashInputs(parts: readonly string[]): string {
  * would collide a recovery entry onto existing content. The counter keeps the
  * result deterministic while stepping past any occupied candidate.
  */
-function deterministicUnusedId(
+export function deterministicUnusedId(
   prefix: string,
   parts: readonly string[],
   occupied: ReadonlySet<string>
@@ -325,7 +329,7 @@ function deterministicUnusedId(
   }
 }
 
-function managedStartedAt(
+export function managedStartedAt(
   createdAt: string,
   recoveryTimestamp: string
 ): string {

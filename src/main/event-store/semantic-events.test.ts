@@ -345,6 +345,15 @@ const SAMPLE_EVENTS: readonly GroundLedgerEvent[] = [
     operationId: 'activity_1',
     interruptedAt: LATER,
     updatedAt: LATER
+  },
+  {
+    kind: 'managed-execution.legacy-interrupted',
+    taskId: 'task_1',
+    itemId: 'activity_1',
+    executionKind: 'command',
+    startedAt: LATER,
+    interruptedAt: LATER,
+    updatedAt: LATER
   }
 ]
 
@@ -407,6 +416,29 @@ describe('semantic ledger event codec', () => {
         updatedAt: TIMESTAMP
       })
     ).toThrow(EventCodecError)
+  })
+
+  it('rejects invented evidence on a legacy interruption payload', () => {
+    const codec = SEMANTIC_PAYLOAD_CODECS[
+      'managed-execution.legacy-interrupted'
+    ]
+    const payload = {
+      taskId: 'task_1',
+      itemId: 'activity_1',
+      executionKind: 'command',
+      startedAt: TIMESTAMP,
+      interruptedAt: LATER,
+      updatedAt: LATER
+    }
+    expect(
+      codec.schema.safeParse({ ...payload, operationId: 'invented' }).success
+    ).toBe(false)
+    expect(
+      codec.schema.safeParse({ ...payload, actionSha256: ACTION_SHA }).success
+    ).toBe(false)
+    expect(
+      codec.schema.safeParse({ ...payload, approvalSha256: APPROVAL_SHA }).success
+    ).toBe(false)
   })
 
   it('enforces field bounds', () => {
@@ -857,6 +889,86 @@ describe('task lifecycle invariants', () => {
     ).toThrow(EventStoreCorruptionError)
   })
 
+  it('allows only recovery-safe narrowing of a session orphaned by provider deletion', () => {
+    const orphanedRuntime = fold(
+      {
+        kind: 'task.created',
+        taskId: 'task_1',
+        task: taskBody({
+          runtimeSessions: { provider_missing: runtimeSessionBody() }
+        })
+      },
+      {
+        kind: 'task.runtime-session-set',
+        taskId: 'task_1',
+        providerId: 'provider_missing',
+        session: null,
+        updatedAt: LATER
+      }
+    )
+    expect(orphanedRuntime.tasks[0]?.runtimeSessions).toBeUndefined()
+
+    const orphanedModel = fold(
+      {
+        kind: 'task.created',
+        taskId: 'task_1',
+        task: taskBody({
+          modelSessions: {
+            provider_missing: {
+              ...modelSessionBody(),
+              checkpoint: { cursor: 7 }
+            }
+          }
+        })
+      },
+      {
+        kind: 'task.model-session-set',
+        taskId: 'task_1',
+        providerId: 'provider_missing',
+        session: modelSessionBody(),
+        updatedAt: LATER
+      }
+    )
+    expect(
+      orphanedModel.tasks[0]?.modelSessions?.provider_missing
+    ).not.toHaveProperty('checkpoint')
+  })
+
+  it('refuses arbitrary session rewrites under a deleted provider', () => {
+    const task = {
+      kind: 'task.created',
+      taskId: 'task_1',
+      task: taskBody({
+        runtimeSessions: { provider_missing: runtimeSessionBody() },
+        modelSessions: {
+          provider_missing: {
+            ...modelSessionBody(),
+            checkpoint: { cursor: 7 }
+          }
+        }
+      })
+    } as const
+
+    expect(() =>
+      fold(task, {
+        kind: 'task.runtime-session-set',
+        taskId: 'task_1',
+        providerId: 'provider_missing',
+        session: { ...runtimeSessionBody(), sessionId: 'rewritten' },
+        updatedAt: LATER
+      })
+    ).toThrow(EventStoreCorruptionError)
+    expect(() =>
+      fold(task, {
+        kind: 'task.model-session-set',
+        taskId: 'task_1',
+        providerId: 'provider_missing',
+        session: { ...modelSessionBody(), model: 'rewritten' },
+        updatedAt: LATER
+      })
+    ).toThrow(EventStoreCorruptionError)
+  })
+
   it('binds and forgets exactly one session at a time', () => {
     const bound = fold(
       { kind: 'task.created', taskId: 'task_1', task: taskBody() },
@@ -892,6 +1004,81 @@ describe('task lifecycle invariants', () => {
 })
 
 describe('managed execution facts', () => {
+  const legacyActivity = {
+    id: 'activity_legacy',
+    kind: 'activity' as const,
+    runId: 'run_1',
+    activityType: 'tool' as const,
+    title: 'Write file',
+    status: 'running' as const,
+    toolName: 'write_file',
+    createdAt: TIMESTAMP
+  }
+  const legacyInterrupted = {
+    kind: 'managed-execution.legacy-interrupted' as const,
+    taskId: 'task_1',
+    itemId: 'activity_legacy',
+    executionKind: 'workspace-write' as const,
+    startedAt: TIMESTAMP,
+    interruptedAt: LATER,
+    updatedAt: LATER
+  }
+
+  it('records legacy interruption without inventing approval evidence', () => {
+    const state = fold(
+      {
+        kind: 'task.created',
+        taskId: 'task_1',
+        task: taskBody({ runStatus: 'running', items: [legacyActivity] })
+      },
+      legacyInterrupted
+    )
+    expect(state.tasks[0]?.items[0]).toMatchObject({
+      status: 'error',
+      result: expect.stringMatching(/before durable execution claims/is),
+      managedExecution: {
+        operationId: 'activity_legacy',
+        claim: 'legacy-untracked',
+        kind: 'workspace-write',
+        phase: 'uncertain',
+        startedAt: TIMESTAMP,
+        interruptedAt: LATER
+      }
+    })
+    expect(state.tasks[0]?.items[0]).not.toHaveProperty(
+      'managedExecution.actionSha256'
+    )
+    expect(state.tasks[0]?.items[0]).not.toHaveProperty(
+      'managedExecution.approvalSha256'
+    )
+  })
+
+  it.each([
+    [
+      'the execution kind',
+      { ...legacyInterrupted, executionKind: 'command' as const }
+    ],
+    [
+      'the derived start time',
+      { ...legacyInterrupted, startedAt: LATER }
+    ],
+    [
+      'the single recovery instant',
+      { ...legacyInterrupted, updatedAt: TIMESTAMP }
+    ]
+  ])('refuses legacy interruption that fabricates %s', (_label, event) => {
+    expect(() =>
+      fold(
+        {
+          kind: 'task.created',
+          taskId: 'task_1',
+          task: taskBody({ runStatus: 'running', items: [legacyActivity] })
+        },
+        event
+      )
+    ).toThrow(EventStoreCorruptionError)
+  })
+
   it('consumes a pending approval into a started claim', () => {
     const state = fold(...awaitingApproval(), startedExecution)
     const activity = state.tasks[0]?.items[0]

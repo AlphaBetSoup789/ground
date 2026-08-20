@@ -48,6 +48,7 @@ export type EventKind =
   | 'managed-execution.started'
   | 'managed-execution.completed'
   | 'managed-execution.interrupted'
+  | 'managed-execution.legacy-interrupted'
 
 /**
  * Entity bodies are carried as opaque portable JSON here and validated in full
@@ -297,6 +298,34 @@ export interface ManagedExecutionInterruptedEvent {
 }
 
 /**
+ * Outcome-unknown evidence for an execution that predates durable operation
+ * claims: state written before markers existed records a running activity with
+ * no `managedExecution` at all.
+ *
+ * It is a separate event from `managed-execution.interrupted` because that one
+ * requires an exact `approved`/`started` claim to transition, and none exists
+ * here. Recovery must not manufacture one. Deliberately absent are
+ * `actionSha256` and `approvalSha256`: no prepared side-effect envelope and no
+ * native approval envelope were ever recorded, and a synthesized digest would
+ * be indistinguishable from a real one while attesting to nothing. The
+ * resulting marker is `claim: 'legacy-untracked'`, which carries neither field.
+ *
+ * `startedAt` is derived from the activity's own `createdAt` only when that is
+ * a strict offset timestamp, and otherwise falls back to `interruptedAt`; both
+ * are supplied by the planner so every layer of one recovery stamps the same
+ * instant.
+ */
+export interface ManagedExecutionLegacyInterruptedEvent {
+  readonly kind: 'managed-execution.legacy-interrupted'
+  readonly taskId: string
+  readonly itemId: string
+  readonly executionKind: 'workspace-write' | 'command' | 'mcp'
+  readonly startedAt: string
+  readonly interruptedAt: string
+  readonly updatedAt: string
+}
+
+/**
  * Every fact the reducer understands. New durable behavior extends this union
  * with a named event rather than introducing a generic state replacement, a
  * JSON-patch escape hatch, or a whole-snapshot mutation.
@@ -332,6 +361,7 @@ export type GroundLedgerEvent =
   | ManagedExecutionStartedEvent
   | ManagedExecutionCompletedEvent
   | ManagedExecutionInterruptedEvent
+  | ManagedExecutionLegacyInterruptedEvent
 
 export interface LedgerEventRecord {
   readonly eventSchemaVersion: typeof EVENT_SCHEMA_VERSION

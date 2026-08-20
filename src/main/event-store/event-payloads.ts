@@ -284,6 +284,22 @@ const managedExecutionInterruptedPayload = z
   })
   .strict()
 
+/**
+ * No `operationId`, `actionSha256`, or `approvalSha256`. The recovered
+ * operation identity is the activity's own ID, and the two digests never
+ * existed for pre-marker state. `strict` keeps a later change from quietly
+ * adding a synthesized one.
+ */
+const managedExecutionLegacyInterruptedPayload = z
+  .object({
+    ...taskFieldUpdate,
+    itemId: identifier,
+    executionKind: z.enum(['workspace-write', 'command', 'mcp']),
+    startedAt: exactTimestamp,
+    interruptedAt: exactTimestamp
+  })
+  .strict()
+
 export interface SemanticPayloadCodec {
   readonly schema: z.ZodType<Record<string, unknown>>
   /** Derives the row's exact entity ID from the validated payload. */
@@ -397,6 +413,10 @@ export const SEMANTIC_PAYLOAD_CODECS: Readonly<
   },
   'managed-execution.interrupted': {
     schema: managedExecutionInterruptedPayload,
+    entityId: byTaskId
+  },
+  'managed-execution.legacy-interrupted': {
+    schema: managedExecutionLegacyInterruptedPayload,
     entityId: byTaskId
   }
 } satisfies Record<SemanticEventKind, SemanticPayloadCodec>)
